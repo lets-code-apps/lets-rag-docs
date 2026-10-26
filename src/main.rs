@@ -3,6 +3,7 @@
 mod chunk;
 mod config;
 mod embed;
+mod eval;
 mod index;
 mod search;
 
@@ -58,10 +59,7 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Command::Ingest => ingest(&config).await,
         Command::Search { query } => search(&config, &query).await,
-        Command::Eval => {
-            println!("not implemented yet");
-            Ok(())
-        }
+        Command::Eval => eval::run(&config).await,
     }
 }
 

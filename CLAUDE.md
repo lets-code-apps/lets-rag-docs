@@ -80,7 +80,9 @@ the next chunk. Each chunk is embedded as `"{source}\n{chunk}"`. `source` = path
 
 **Eval** `evals/rag.jsonl` lines: `{"id", "lang", "question", "expect", "source"}`. Pass = the
 expected `source` is among the first 5 distinct sources. **Baseline 2026-10-26: 10/10**
-(PL/EN/RU/UK), measured with `rag.py`. The Rust port must match it.
+(PL/EN/RU/UK), measured with `rag.py`. The Rust port must match it: **Rust 10/10 on
+2026-10-27** (one rank differs, 3 vs 2, likely fp16 batching: Rust embeds 32 texts per request,
+`rag.py` a whole file per call).
 
 ### Config
 
