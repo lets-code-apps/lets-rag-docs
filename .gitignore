@@ -9,3 +9,11 @@
 .build/
 __pycache__/
 .DS_Store
+
+# Rust
+/target/
+
+# Local config and Claude Code local notes
+config.toml
+CLAUDE.local.md
+.claude/settings.local.json
