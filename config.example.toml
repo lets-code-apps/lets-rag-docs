@@ -1,0 +1,32 @@
+# Let's RAG Docs configuration.
+#
+# Copy this file to ~/.config/lets-rag-docs/config.toml and adjust it. Without that file the
+# defaults below are used. Every section and key is optional; the values shown are the
+# defaults. Unknown keys are an error, so typos are caught early.
+
+[qdrant]
+# Qdrant's gRPC port (6334, not the 6333 REST port). `docker compose up -d` starts it on 127.0.0.1.
+url = "http://127.0.0.1:6334"
+collection = "documents"
+
+[embed]
+# The bge-m3 embedding sidecar (embed_server.py).
+url = "http://127.0.0.1:8100"
+
+[paths]
+# Relative paths are resolved against the current directory. A leading ~ is expanded.
+# OCR output: one .txt file per document, as written by ocr.py.
+ocr_dir = "data/ocr"
+# Retrieval evals, one JSON object per line: {"id", "lang", "question", "expect", "source"}.
+evals = "evals/rag.jsonl"
+
+[llm]
+# Used by `ask`. Any OpenAI-compatible endpoint; Ollama by default.
+base_url = "http://127.0.0.1:11434/v1"
+model = "qwen3:30b-a3b"
+# The most tokens the model may write. Qwen3 thinks before it answers, so leave room.
+max_tokens = 4096
+timeout_seconds = 300
+# PRIVACY: your documents' text is sent to this server. It must be on this machine or your own
+# network; any other address is refused. true switches that check off. Leave it false.
+allow_remote = false
