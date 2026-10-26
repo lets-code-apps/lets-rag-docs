@@ -1,18 +1,18 @@
 //! The core API: a query in, the best matching passages out. MCP and `ask` build on this.
 
 use qdrant_client::Qdrant;
+use serde::Serialize;
 
 use crate::embed::{EmbedClient, EmbedError};
 use crate::index::{self, IndexError};
 
 /// One retrieved chunk with where it came from.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Passage {
     pub text: String,
     /// Document name: the OCR file's path without its extensions.
     pub source: String,
     /// OCR file path relative to the OCR folder.
-    #[expect(dead_code, reason = "returned by the MCP tool in phase 3")]
     pub file: String,
     /// Chunk number within the file, from 0.
     pub chunk: i64,

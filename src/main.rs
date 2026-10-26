@@ -5,6 +5,7 @@ mod config;
 mod embed;
 mod eval;
 mod index;
+mod mcp;
 mod search;
 
 use std::path::{Path, PathBuf};
@@ -43,6 +44,8 @@ enum Command {
     Search { query: String },
     /// Check that each eval question finds its expected document in the top 5
     Eval,
+    /// Serve `search_docs` to an MCP client over stdio
+    Mcp,
 }
 
 #[tokio::main]
@@ -60,6 +63,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Ingest => ingest(&config).await,
         Command::Search { query } => search(&config, &query).await,
         Command::Eval => eval::run(&config).await,
+        Command::Mcp => mcp::run(&config).await,
     }
 }
 
