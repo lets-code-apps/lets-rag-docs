@@ -1,0 +1,11 @@
+# Private: real documents and everything derived from them. Never commit.
+/docs/
+/data/
+/tests/oct test/
+/evals/rag.jsonl
+/design/
+
+.venv/
+.build/
+__pycache__/
+.DS_Store

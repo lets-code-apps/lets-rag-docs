@@ -1,0 +1,4 @@
+pypdfium2
+pillow
+qdrant-client
+FlagEmbedding
