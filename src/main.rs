@@ -1,5 +1,6 @@
 //! Let's RAG Docs: local, private retrieval over scanned documents.
 
+mod ask;
 mod chunk;
 mod config;
 mod embed;
@@ -46,6 +47,8 @@ enum Command {
     Eval,
     /// Serve `search_docs` to an MCP client over stdio
     Mcp,
+    /// Answer a question from the documents with a local LLM, with citations
+    Ask { question: String },
 }
 
 #[tokio::main]
@@ -64,6 +67,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Search { query } => search(&config, &query).await,
         Command::Eval => eval::run(&config).await,
         Command::Mcp => mcp::run(&config).await,
+        Command::Ask { question } => ask::run(&config, &question).await,
     }
 }
 
