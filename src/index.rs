@@ -1,4 +1,4 @@
-//! Qdrant over gRPC: the `documents` collection, laid out exactly like `rag.py` builds it.
+//! Qdrant over gRPC: the `documents` collection, laid out exactly like `rag.py` built it.
 //!
 //! Named vectors `dense` (1024, cosine) and sparse `sparse`; payload `text`, `source`, `file`,
 //! `chunk`. Queries are RRF fusion of a dense and a sparse prefetch.

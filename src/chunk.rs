@@ -1,7 +1,8 @@
 //! Splitting OCR text into chunks: an exact port of `chunks()` and the source naming in `rag.py`.
 //!
 //! The eval baseline was measured with `rag.py`, so any difference here (even one char of
-//! overlap) can change retrieval results. Tests compare against `rag.py`'s own output.
+//! overlap) can change retrieval results. The tests freeze `rag.py`'s output in
+//! `testdata/chunk_cases.json` (rag.py has since been removed).
 
 /// Upper bound on a chunk's length, in Unicode code points (Python's `len`).
 const CHUNK_CHARS: usize = 1500;
@@ -72,8 +73,8 @@ fn is_python_space(c: char) -> bool {
 mod tests {
     use super::*;
 
-    /// Synthetic cases with `rag.py`'s output as the expected values. Regenerate by running
-    /// rag.py's `chunks()` on the same inputs; never put real document text in this file.
+    /// Synthetic cases with `rag.py`'s output as the expected values, generated from its `chunks()`
+    /// before it was removed. Edit by hand only with care; never put real document text in it.
     const CASES: &str = include_str!("../testdata/chunk_cases.json");
 
     #[test]
@@ -118,72 +119,5 @@ mod tests {
         let mut python = python;
         python.sort();
         assert_eq!(rust, python);
-    }
-
-    /// Compares every file in the configured OCR folder with what `rag.py` produces right now.
-    /// Ignored by default: it needs the private documents and `.venv`. Run with
-    /// `cargo test -- --ignored`. Prints counts only, never document text or names.
-    #[test]
-    #[ignore]
-    fn real_ocr_files_match_rag_py() {
-        use std::collections::BTreeMap;
-        use std::path::{Path, PathBuf};
-
-        let config_path = crate::config::expand_home(Path::new(crate::config::DEFAULT_CONFIG_PATH));
-        let ocr = crate::config::Config::load(&config_path)
-            .unwrap()
-            .paths
-            .ocr_dir;
-        // Pulls chunks() and its constants out of rag.py without importing its heavy deps.
-        let script = r#"
-import ast, json, sys
-from pathlib import Path
-tree = ast.parse(Path("rag.py").read_text())
-keep = [n for n in tree.body if (isinstance(n, ast.FunctionDef) and n.name == "chunks")
-        or (isinstance(n, ast.Assign) and n.targets[0].id in ("CHUNK_CHARS", "OVERLAP_LINES"))]
-ns = {}
-exec(compile(ast.Module(keep, []), "rag", "exec"), ns)
-ocr = Path(sys.argv[1])
-json.dump({str(f.relative_to(ocr)): [str(f.relative_to(ocr)).rsplit(".", 3)[0], ns["chunks"](f.read_text())]
-           for f in sorted(ocr.rglob("*.txt"))}, sys.stdout)
-"#;
-        let output = std::process::Command::new(".venv/bin/python")
-            .args(["-c", script])
-            .arg(&ocr)
-            .output()
-            .expect("run .venv/bin/python");
-        assert!(output.status.success(), "rag.py helper failed");
-        let python: BTreeMap<String, (String, Vec<String>)> =
-            serde_json::from_slice(&output.stdout).unwrap();
-
-        fn txt_files(dir: &Path, out: &mut Vec<PathBuf>) {
-            for entry in std::fs::read_dir(dir).unwrap() {
-                let path = entry.unwrap().path();
-                if path.is_dir() {
-                    txt_files(&path, out);
-                } else if path.extension().is_some_and(|e| e == "txt") {
-                    out.push(path);
-                }
-            }
-        }
-        let mut files = Vec::new();
-        txt_files(&ocr, &mut files);
-
-        let (mut same, mut different) = (0, 0);
-        for file in &files {
-            let rel = file.strip_prefix(&ocr).unwrap().to_str().unwrap();
-            let text = std::fs::read_to_string(file).unwrap();
-            let ok = python.get(rel).is_some_and(|(source, parts)| {
-                *source == source_name(rel) && *parts == chunks(&text)
-            });
-            if ok { same += 1 } else { different += 1 }
-        }
-        println!(
-            "{same} files match, {different} differ, {} seen only by Python",
-            python.len().saturating_sub(same + different)
-        );
-        assert!(same > 0, "no OCR files found");
-        assert_eq!(different, 0);
-        assert_eq!(files.len(), python.len());
     }
 }

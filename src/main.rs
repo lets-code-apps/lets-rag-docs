@@ -19,7 +19,7 @@ use tracing_subscriber::EnvFilter;
 use crate::config::{Config, DEFAULT_CONFIG_PATH, expand_home};
 use crate::embed::EmbedClient;
 
-/// Passages `search` prints, as `rag.py` does.
+/// Passages `search` prints, as `rag.py` did.
 const TOP: u64 = 5;
 
 #[derive(Debug, Parser)]

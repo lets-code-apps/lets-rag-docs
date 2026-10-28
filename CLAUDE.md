@@ -63,11 +63,11 @@ GET /health  → {"ok": true}
 
 Note: it keeps ~2 GB resident. Fine during the day; add idle unload if it gets in the way.
 
-**Qdrant collection** `documents` (unchanged from `rag.py`, so both can read it during the port):
+**Qdrant collection** `documents` (same layout `rag.py` built, so the index carried over during the port):
 named vectors `dense` (1024, cosine) and sparse `sparse`; payload `text`, `source`, `file`,
 `chunk`. Query = RRF fusion of dense and sparse prefetches (limit 20 each).
 
-**Chunking must match `rag.py` exactly** (the eval baseline depends on it): skip blank lines;
+**Chunking matched `rag.py` exactly; frozen by `testdata/chunk_cases.json`** (the eval baseline depends on it): skip blank lines;
 start a new chunk when the current one plus the next line would exceed 1500 chars (Python
 `len` = Unicode code points → Rust `chars().count()`, not `len()`); carry the last 3 lines into
 the next chunk. Each chunk is embedded as `"{source}\n{chunk}"`. `source` = path relative to
@@ -76,7 +76,7 @@ the next chunk. Each chunk is embedded as `"{source}\n{chunk}"`. `source` = path
 
 **MCP tool** `search_docs(query: string, limit: int = 5)` → list of
 `{text, source, file, chunk, score}`. No page numbers yet: OCR output has no page markers
-(README promises "document and page"; add page markers to `ocr.py` later).
+(add page markers to `ocr.py` later).
 
 **Eval** `evals/rag.jsonl` lines: `{"id", "lang", "question", "expect", "source"}`. Pass = the
 expected `source` is among the first 5 distinct sources. **Baseline 2026-10-26: 10/10**
@@ -97,7 +97,7 @@ installed in Ollama; strip Qwen3 `<think>` blocks from answers).
 Cargo.toml
 src/main.rs     clap: ingest | search <q> | eval | mcp | ask <q>
 src/config.rs
-src/chunk.rs    port of rag.py chunks() + source naming, unit-tested against rag.py output
+src/chunk.rs    port of rag.py chunks() + source naming, tested against testdata/chunk_cases.json
 src/embed.rs    client for the embed service
 src/index.rs    Qdrant: create collection, upsert, hybrid RRF query
 src/search.rs   core API: search_docs(query, limit) -> Vec<Passage>; MCP and ask build on it
@@ -106,29 +106,50 @@ src/mcp.rs
 src/ask.rs
 embed_server.py
 ocr.py, vision_ocr.swift
-rag.py          reference implementation until the Rust port matches the baseline, then removed
 ```
 
 ## Implementation plan
 
-1. `embed_server.py` + `requirements.txt`. Check: its vectors equal what `rag.py` computes.
+1. `embed_server.py` + `requirements.txt`. Checked: its vectors equalled what `rag.py` computed.
 2. Rust crate: config, chunk (tests compare with `rag.py`), embed client, index, search, eval.
    Done when `lets-rag-docs ingest && lets-rag-docs eval` gives 10/10. Phases, one commit each:
    - **2a** `Cargo.toml`, `config.example.toml`, `src/main.rs` (clap: ingest | search | eval),
      `src/config.rs`, `src/chunk.rs`. Committed tests use synthetic text only (incl. Cyrillic,
      a line over 1500 chars, blank lines); expected values produced by `rag.py`'s `chunks()`.
-     The comparison against real `data/ocr/` files is an `#[ignore]` test that reads them at
-     run time and never copies their text anywhere tracked.
+     The comparison against real `data/ocr/` files was an `#[ignore]` test that read them at
+     run time and never copied their text anywhere tracked (removed with `rag.py` in step 5).
    - **2b** `src/embed.rs` (reqwest client for the embed service, wiremock test),
      `src/index.rs` (qdrant-client gRPC: recreate collection, upsert, RRF query),
      `src/search.rs` (`search_docs`), wire `ingest` and `search`.
-   - **2c** `src/eval.rs`, wire `eval`. Run `rag.py ingest && rag.py eval`, then
-     `cargo run -- ingest && cargo run -- eval`; both must be 10/10.
+   - **2c** `src/eval.rs`, wire `eval`. Ran `rag.py ingest && rag.py eval`, then
+     `cargo run -- ingest && cargo run -- eval`; both were 10/10.
 3. `lets-rag-docs mcp` (`rmcp`, stdio). Register it in Claude Code and try real questions.
 4. `lets-rag-docs ask` with citations through Ollama.
-5. Remove `rag.py`; update README (stack, usage, roadmap).
-6. Later: synthetic sample docs + public eval set, page markers, reranking (bge-reranker-v2-m3),
-   metadata filters, SQL facts layer.
+5. Remove `rag.py`; update README (stack, usage, roadmap). **Done 2026-10-28.**
+6. **Classify at ingestion** (decided 2026-10-28; this is the SQL facts layer). After OCR, send
+   the first few thousand chars to the local LLM and ask for strict JSON: `title`, `type`, `date`,
+   `people`, `issuer`, `folder`. `type` comes from a fixed list in `config.toml` (`[classify]
+   types`), not free text. Validate the output (document text is untrusted): anything invalid →
+   type `unsorted`, never a path built from raw model output. Store in SQLite keyed by a hash of
+   the document's content (`documents` table: hash, path, title, type, date, people, issuer,
+   folder); copy `type`/`date` into the Qdrant payload for metadata filters. Originals are never
+   renamed or moved here; title and folder are metadata only. Backfilling the existing documents
+   is a night job. Needs its own eval (expected type + date for each document) before
+   `organize` is trusted.
+7. **`lets-rag-docs add <file>`**: OCR one file (calls `ocr.py`), classify, index. Single entry
+   point for the CLI, the MCP tool and the app. Same MCP server gets an `add_document` tool;
+   Let's Triage Mail calls it (as an MCP client) for mail it marked "keep" (e.g. invoices).
+8. **`lets-rag-docs organize --dry-run | --apply`**: explicit only. Copies originals into
+   `<library>/<folder>/<title>.<ext>` and re-indexes them under the new path: delete the
+   document's points, re-embed (`source` is part of the embedded text, so updating the payload
+   alone isn't enough). One document per content hash, so the copy and the original never show
+   up as duplicates. Eval `source` values change after `organize`; match evals by hash or update
+   `evals/rag.jsonl` in the same run.
+9. **Desktop app**: browse by folder, ask a question and see the best-matching documents,
+   upload (→ `add`). Electron (owner's preference) or Tauri; both use a web UI, decide when we
+   get there. With Electron the backend is the `lets-rag-docs` binary (MCP over stdio, the same
+   server the agents use).
+10. Later: synthetic sample docs + public eval set, page markers, reranking (bge-reranker-v2-m3).
 
 ## Environment
 
