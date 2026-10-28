@@ -19,6 +19,7 @@ pub struct Config {
     pub embed: EmbedConfig,
     pub paths: PathsConfig,
     pub llm: LlmConfig,
+    pub classify: ClassifyConfig,
 }
 
 /// `[qdrant]`: the vector store, over gRPC.
@@ -59,6 +60,10 @@ impl Default for EmbedConfig {
 pub struct PathsConfig {
     pub ocr_dir: PathBuf,
     pub evals: PathBuf,
+    /// The original documents ocr.py read; `classify` hashes them.
+    pub docs_dir: PathBuf,
+    /// SQLite database with one row per classified document.
+    pub db: PathBuf,
 }
 
 impl Default for PathsConfig {
@@ -66,6 +71,8 @@ impl Default for PathsConfig {
         PathsConfig {
             ocr_dir: PathBuf::from("data/ocr"),
             evals: PathBuf::from("evals/rag.jsonl"),
+            docs_dir: PathBuf::from("docs"),
+            db: PathBuf::from("data/lets-rag-docs.sqlite"),
         }
     }
 }
@@ -78,7 +85,7 @@ pub struct LlmConfig {
     pub model: String,
     pub max_tokens: u32,
     pub timeout_seconds: u64,
-    /// Allow a `base_url` outside this machine and the local network. Checked by `ask`.
+    /// Allow a `base_url` outside this machine and the local network. Checked by `ask` and `classify`.
     pub allow_remote: bool,
 }
 
@@ -90,6 +97,36 @@ impl Default for LlmConfig {
             max_tokens: 4096,
             timeout_seconds: 300,
             allow_remote: false,
+        }
+    }
+}
+
+/// `[classify]`: document types the model may choose. Anything else becomes `unsorted`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ClassifyConfig {
+    pub types: Vec<String>,
+}
+
+impl Default for ClassifyConfig {
+    fn default() -> Self {
+        let types = [
+            "identity",
+            "medical",
+            "invoice",
+            "receipt",
+            "contract",
+            "loan",
+            "insurance",
+            "tax",
+            "bank",
+            "warranty",
+            "certificate",
+            "letter",
+            "other",
+        ];
+        ClassifyConfig {
+            types: types.map(String::from).to_vec(),
         }
     }
 }
@@ -106,6 +143,8 @@ impl Config {
             .with_context(|| format!("invalid config file {}", path.display()))?;
         config.paths.ocr_dir = expand_home(&config.paths.ocr_dir);
         config.paths.evals = expand_home(&config.paths.evals);
+        config.paths.docs_dir = expand_home(&config.paths.docs_dir);
+        config.paths.db = expand_home(&config.paths.db);
         Ok(config)
     }
 }

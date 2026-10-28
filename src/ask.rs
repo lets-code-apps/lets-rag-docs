@@ -70,6 +70,7 @@ pub async fn run(config: &Config, question: &str) -> anyhow::Result<()> {
         &config.llm,
         SYSTEM_PROMPT,
         &user_prompt(question, &passages),
+        false,
     )
     .await?;
     println!("{answer}\n\nSources:");
@@ -80,7 +81,7 @@ pub async fn run(config: &Config, question: &str) -> anyhow::Result<()> {
 }
 
 /// Refuses a `base_url` outside this machine and the local network unless `allow_remote`.
-fn check_base_url(llm: &LlmConfig) -> Result<(), AskError> {
+pub(crate) fn check_base_url(llm: &LlmConfig) -> Result<(), AskError> {
     let url = reqwest::Url::parse(&llm.base_url).map_err(|e| AskError::BadUrl(e.to_string()))?;
     if url.scheme() != "http" {
         return Err(AskError::NotHttp);
@@ -129,8 +130,7 @@ fn is_local_or_private_host(host: &str) -> bool {
 fn user_prompt(question: &str, passages: &[Passage]) -> String {
     let mut out = String::new();
     for (n, p) in passages.iter().enumerate() {
-        // A passage must not be able to close its own fence and speak outside it.
-        let text = p.text.replace("</", "< /"); // any closing tag, whatever its case or spacing
+        let text = defuse(&p.text);
         out.push_str(&format!(
             "<passage n=\"{}\" source=\"{}\" chunk=\"{}\">\n{text}\n</passage>\n\n",
             n + 1,
@@ -142,6 +142,12 @@ fn user_prompt(question: &str, passages: &[Passage]) -> String {
     out
 }
 
+/// Document text must not be able to close its own fence and speak outside it: breaks every
+/// closing tag, whatever its case or spacing.
+pub(crate) fn defuse(text: &str) -> String {
+    text.replace("</", "< /")
+}
+
 #[derive(Serialize)]
 struct ChatRequest<'a> {
     model: &'a str,
@@ -149,6 +155,9 @@ struct ChatRequest<'a> {
     max_tokens: u32,
     temperature: f32,
     stream: bool,
+    /// `{"type": "json_object"}` asks the server to emit valid JSON only (Ollama supports it).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_format: Option<serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -175,7 +184,13 @@ struct ChatMessage {
 }
 
 /// One non-streaming chat request; returns the answer with think blocks removed.
-async fn chat(llm: &LlmConfig, system: &str, user: &str) -> Result<String, AskError> {
+/// `json` asks for a JSON object as the answer; the caller must still validate it.
+pub(crate) async fn chat(
+    llm: &LlmConfig,
+    system: &str,
+    user: &str,
+    json: bool,
+) -> Result<String, AskError> {
     let url = format!("{}/chat/completions", llm.base_url.trim_end_matches('/'));
     let http_err = |source| AskError::Http {
         url: url.clone(),
@@ -200,6 +215,7 @@ async fn chat(llm: &LlmConfig, system: &str, user: &str) -> Result<String, AskEr
         max_tokens: llm.max_tokens,
         temperature: 0.0,
         stream: false,
+        response_format: json.then(|| serde_json::json!({"type": "json_object"})),
     };
     let resp = http.post(&url).json(&body).send().await.map_err(http_err)?;
     let status = resp.status();
@@ -326,6 +342,7 @@ mod tests {
             &config,
             SYSTEM_PROMPT,
             &user_prompt("What colour?", &passages),
+            false,
         )
         .await
         .unwrap();
@@ -335,6 +352,7 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
         assert_eq!(body["model"], "qwen3:30b-a3b");
         assert_eq!(body["stream"], false);
+        assert!(body.get("response_format").is_none());
         assert_eq!(body["messages"][0]["role"], "system");
         let user = body["messages"][1]["content"].as_str().unwrap();
         assert!(user.starts_with("<passage n=\"1\" source=\"manual\" chunk=\"2\">\n"));
@@ -351,7 +369,7 @@ mod tests {
             .mount(&server)
             .await;
         let config = llm(&format!("{}/v1", server.uri()), false);
-        let err = chat(&config, "s", "u").await.unwrap_err();
+        let err = chat(&config, "s", "u", false).await.unwrap_err();
         assert!(err.to_string().contains("model not found"), "{err}");
 
         let server = MockServer::start().await;
@@ -363,7 +381,7 @@ mod tests {
             .await;
         let config = llm(&format!("{}/v1", server.uri()), false);
         assert!(matches!(
-            chat(&config, "s", "u").await,
+            chat(&config, "s", "u", false).await,
             Err(AskError::EmptyAnswer)
         ));
     }

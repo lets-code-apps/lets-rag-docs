@@ -19,9 +19,14 @@ url = "http://127.0.0.1:8100"
 ocr_dir = "data/ocr"
 # Retrieval evals, one JSON object per line: {"id", "lang", "question", "expect", "source"}.
 evals = "evals/rag.jsonl"
+# The original documents (the folder you ran ocr.py on). `classify` hashes each one, so a
+# document keeps its row in the database even if it is renamed or moved.
+docs_dir = "docs"
+# SQLite database with what `classify` found out about each document.
+db = "data/lets-rag-docs.sqlite"
 
 [llm]
-# Used by `ask`. Any OpenAI-compatible endpoint; Ollama by default.
+# Used by `ask` and `classify`. Any OpenAI-compatible endpoint; Ollama by default.
 base_url = "http://127.0.0.1:11434/v1"
 model = "qwen3:30b-a3b"
 # The most tokens the model may write. Qwen3 thinks before it answers, so leave room.
@@ -30,3 +35,11 @@ timeout_seconds = 300
 # PRIVACY: your documents' text is sent to this server. It must be on this machine or your own
 # network; any other address is refused. true switches that check off. Leave it false.
 allow_remote = false
+
+[classify]
+# The document types `classify` lets the model choose from. An answer outside this list is
+# stored as `unsorted` (always the fallback, not listed here).
+types = [
+  "identity", "medical", "invoice", "receipt", "contract", "loan", "insurance", "tax", "bank",
+  "warranty", "certificate", "letter", "other",
+]

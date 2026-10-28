@@ -1,7 +1,7 @@
 //! Qdrant over gRPC: the `documents` collection, laid out exactly like `rag.py` built it.
 //!
 //! Named vectors `dense` (1024, cosine) and sparse `sparse`; payload `text`, `source`, `file`,
-//! `chunk`. Queries are RRF fusion of a dense and a sparse prefetch.
+//! `chunk`, plus `type` and `date` for classified documents (for metadata filters). Queries are RRF fusion of a dense and a sparse prefetch.
 
 use std::collections::HashMap;
 
@@ -13,6 +13,7 @@ use qdrant_client::qdrant::{
 };
 use qdrant_client::{Payload, Qdrant, QdrantError};
 
+use crate::db::Meta;
 use crate::embed::Embedding;
 use crate::search::Passage;
 
@@ -58,7 +59,7 @@ pub async fn recreate(client: &Qdrant, collection: &str) -> Result<(), IndexErro
 }
 
 /// One chunk as a Qdrant point. Takes `text` and `embedding` by value: they move into the
-/// point instead of being copied.
+/// point instead of being copied. `meta` is the document's row from `classify`, if any.
 pub fn point(
     id: u64,
     text: String,
@@ -66,6 +67,7 @@ pub fn point(
     file: &str,
     chunk: usize,
     embedding: Embedding,
+    meta: Option<&Meta>,
 ) -> PointStruct {
     let vectors = NamedVectors::default()
         .add_vector(DENSE, Vector::new_dense(embedding.dense))
@@ -78,6 +80,12 @@ pub fn point(
     payload.insert("source", source);
     payload.insert("file", file);
     payload.insert("chunk", chunk as i64);
+    if let Some(meta) = meta {
+        payload.insert("type", meta.doc_type.as_str());
+        if let Some(date) = &meta.date {
+            payload.insert("date", date.as_str());
+        }
+    }
     PointStruct::new(id, vectors, payload)
 }
 
@@ -151,5 +159,47 @@ fn take_string(
     match payload.remove(key).and_then(|v| v.kind) {
         Some(Kind::StringValue(s)) => Ok(s),
         _ => Err(IndexError::Payload(key)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::embed::Sparse;
+
+    fn payload_keys(meta: Option<&Meta>) -> Vec<String> {
+        let embedding = Embedding {
+            dense: vec![0.0],
+            sparse: Sparse {
+                indices: vec![],
+                values: vec![],
+            },
+        };
+        let p = point(0, "t".into(), "s", "f", 0, embedding, meta);
+        let mut keys: Vec<String> = p.payload.into_keys().collect();
+        keys.sort();
+        keys
+    }
+
+    #[test]
+    fn payload_gets_type_and_known_date() {
+        assert_eq!(payload_keys(None), ["chunk", "file", "source", "text"]);
+        let mut meta = Meta {
+            title: None,
+            doc_type: "invoice".into(),
+            date: Some("2025-03-14".into()),
+            people: vec![],
+            issuer: None,
+            folder: None,
+        };
+        assert_eq!(
+            payload_keys(Some(&meta)),
+            ["chunk", "date", "file", "source", "text", "type"]
+        );
+        meta.date = None;
+        assert_eq!(
+            payload_keys(Some(&meta)),
+            ["chunk", "file", "source", "text", "type"]
+        );
     }
 }

@@ -2,7 +2,9 @@
 
 mod ask;
 mod chunk;
+mod classify;
 mod config;
+mod db;
 mod embed;
 mod eval;
 mod index;
@@ -44,7 +46,17 @@ enum Command {
     /// Show the passages that best match a query
     Search { query: String },
     /// Check that each eval question finds its expected document in the top 5
-    Eval,
+    Eval {
+        /// Check `classify` instead: expected type and date per document (evals/classify.jsonl)
+        #[arg(long)]
+        classify: bool,
+    },
+    /// Ask the local LLM for each new document's title, type, date, people, issuer and folder
+    Classify {
+        /// Classify again documents that are already in the database
+        #[arg(long)]
+        force: bool,
+    },
     /// Serve `search_docs` to an MCP client over stdio
     Mcp,
     /// Answer a question from the documents with a local LLM, with citations
@@ -65,7 +77,9 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Command::Ingest => ingest(&config).await,
         Command::Search { query } => search(&config, &query).await,
-        Command::Eval => eval::run(&config).await,
+        Command::Eval { classify: false } => eval::run(&config).await,
+        Command::Eval { classify: true } => eval::run_classify(&config),
+        Command::Classify { force } => classify::run(&config, force).await,
         Command::Mcp => mcp::run(&config).await,
         Command::Ask { question } => ask::run(&config, &question).await,
     }
@@ -75,6 +89,7 @@ async fn main() -> anyhow::Result<()> {
 async fn ingest(config: &Config) -> anyhow::Result<()> {
     let ocr_dir = &config.paths.ocr_dir;
     let embed = EmbedClient::new(&config.embed.url);
+    let conn = db::open(&config.paths.db)?;
     let mut files = Vec::new();
     find_txt(ocr_dir, &mut files)?;
     // Path's Ord compares component by component, like Python's sorted() on Paths.
@@ -91,10 +106,17 @@ async fn ingest(config: &Config) -> anyhow::Result<()> {
         // The document's name goes in front of every chunk, so it is findable in all of them.
         let inputs: Vec<String> = parts.iter().map(|c| format!("{source}\n{c}")).collect();
         let embeddings = embed.embed(&inputs).await?;
+        // Without an original or a `classify` row the document is still indexed, minus type/date.
+        let doc = match classify::hash_file(&classify::original_path(&config.paths.docs_dir, &rel))
+        {
+            Ok(hash) => db::get(&conn, &hash)?,
+            Err(_) => None,
+        };
+        let meta = doc.as_ref().map(|d| &d.meta);
         println!("{:>3} chunks  {source}", parts.len());
         for (n, (text, embedding)) in parts.into_iter().zip(embeddings).enumerate() {
             let id = points.len() as u64;
-            points.push(index::point(id, text, &source, &rel, n, embedding));
+            points.push(index::point(id, text, &source, &rel, n, embedding, meta));
         }
     }
 

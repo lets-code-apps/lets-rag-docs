@@ -136,6 +136,10 @@ ocr.py, vision_ocr.swift
    renamed or moved here; title and folder are metadata only. Backfilling the existing documents
    is a night job. Needs its own eval (expected type + date for each document) before
    `organize` is trusted.
+   **Done 2026-10-28:** `classify [--force]` (`src/classify.rs`, `src/db.rs`; Ollama JSON mode;
+   validator in `classify::validate`), `ingest` adds `type`/`date` to the payload, `eval
+   --classify` scores `evals/classify.jsonl` (writes a draft from the DB if missing). Keys:
+   `[paths] docs_dir, db`, `[classify] types`.
 7. **`lets-rag-docs add <file>`**: OCR one file (calls `ocr.py`), classify, index. Single entry
    point for the CLI, the MCP tool and the app. Same MCP server gets an `add_document` tool;
    Let's Triage Mail calls it (as an MCP client) for mail it marked "keep" (e.g. invoices).

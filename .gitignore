@@ -3,6 +3,7 @@
 /data/
 /tests/oct test/
 /evals/rag.jsonl
+/evals/classify.jsonl
 /design/
 
 .venv/
