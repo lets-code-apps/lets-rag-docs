@@ -155,7 +155,11 @@ async fn prepare(config: &Config, embed: &EmbedClient, file: &Path) -> anyhow::R
     }
 
     // 7. OCR just this file: --only so nothing else is touched, --out to ocr_dir. The `=` form
-    //    means a leading-dash name (say -x.pdf) is a value, never an option.
+    //    means a leading-dash name (say -x.pdf) is a value, never an option. The file's previous
+    //    OCR output is deleted first: this std has no mtime, so instead of picking "the newer
+    //    file" (impossible) we make sure only THIS run's output exists (a stale `.text.txt` from
+    //    an older document would otherwise be indexed when today's OCR writes `.vision.txt`).
+    clear_ocr_output(config, &rel)?;
     run_ocr(config, &rel).await?;
     let ocr_abs: PathBuf = find_ocr_output(config, &rel)?;
     let ocr_file: String = ocr_abs
@@ -268,9 +272,28 @@ async fn run_ocr(config: &Config, rel: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Removes `<rel>.text.txt` / `<rel>.vision.txt` from ocr_dir before OCR runs, so `find_ocr_output`
+/// can only see a file THIS run produced. OCR regenerates whatever its current input needs, so
+/// deleting the old outputs costs nothing; reading them is the bug (an old document's text would
+/// be classified and indexed under the new one).
+fn clear_ocr_output(config: &Config, rel: &Path) -> anyhow::Result<()> {
+    let rel_s: String = rel.to_string_lossy().to_string();
+    for method in ["text", "vision"] {
+        let stale: PathBuf = config
+            .paths
+            .ocr_dir
+            .join(format!("{}.{}.txt", rel_s, method));
+        if stale.is_file() {
+            std::fs::remove_file(&stale)
+                .with_context(|| format!("cannot replace OCR output {}", stale.display()))?;
+        }
+    }
+    Ok(())
+}
+
 /// `ocr.py` writes `<rel>.<method>.txt` under ocr_dir: the text method for a digital PDF, vision
-/// for a scan or photo. This std has no mtime access, so when both exist (the file was OCR'd before
-/// with a different result) `.text.txt` wins; only the one `add` just needed is read.
+/// for a scan or photo. `clear_ocr_output` removed this file's old outputs before OCR ran, so
+/// whatever exists now was produced by THIS run; if both methods somehow exist, `.text.txt` wins.
 fn find_ocr_output(config: &Config, rel: &Path) -> anyhow::Result<PathBuf> {
     let ocr: PathBuf = config.paths.ocr_dir.clone();
     let rel_s: String = rel.to_string_lossy().to_string();
@@ -320,6 +343,22 @@ printf '%s\n' "Receipt ACME 42/2025" "Total 12 EUR" "Scan Скан 3" > "$out/$r
     fn fake_ocr_fail(root: &Path) -> PathBuf {
         let script: PathBuf = root.join("fail_ocr.sh");
         std::fs::write(&script, "#!/bin/sh\necho bad ocr >&2\nexit 1\n").unwrap();
+        script
+    }
+
+    /// A sh script standing in for an `ocr.py` that picks the VISION method (like a scan would),
+    /// so this run's output is `<rel>.vision.txt` while an old `.text.txt` may still sit in ocr_dir.
+    fn fake_ocr_vision(root: &Path, log: &Path) -> PathBuf {
+        let script: PathBuf = root.join("vision_ocr.sh");
+        let body: &str = r#"#!/bin/sh
+rel="${2#--only=}"
+out="${3#--out=}"
+printf '%s\n' "$2 $3 $1" >> "LOG"
+out_dir="$out/$(dirname "$rel")"
+mkdir -p "$out_dir"
+printf '%s\n' "Receipt ACME 42/2025" "Total 12 EUR" "Scan Скан 3" > "$out/$rel.vision.txt"
+"#;
+        std::fs::write(&script, body.replace("LOG", log.to_string_lossy().as_ref())).unwrap();
         script
     }
 
@@ -674,6 +713,33 @@ printf '%s\n' "   " > "$out/$rel.text.txt"
         assert!(prepare(&cfg, &embed, &source).await.is_err());
         assert_eq!(rows(&s).len(), 0);
         assert!(s.docs.join("x.pdf").is_file()); // original kept
+    }
+
+    #[tokio::test]
+    async fn stale_ocr_output_is_not_reused() {
+        let s: Setup = setup();
+        let source: PathBuf = s.dir.path().join("x.pdf");
+        std::fs::write(&source, "the document was replaced").unwrap();
+        // An old run left OCR text for this name; today's OCR answers with the vision method.
+        // Reading the old `.text.txt` would classify and index the PREVIOUS document's text.
+        std::fs::write(
+            s.ocr.join("x.pdf.text.txt"),
+            "OLD text of a previous document",
+        )
+        .unwrap();
+        let embed_srv: MockServer = embed_mock().await;
+        let llm_srv: MockServer = llm_mock(1).await;
+        let embed: EmbedClient = EmbedClient::new(&embed_srv.uri());
+        let mut cfg: Config = config(&s, &llm_srv, &embed_srv);
+        cfg.ocr.script = fake_ocr_vision(s.dir.path(), &s.log);
+        let prepared: Prepared = prepare(&cfg, &embed, &source).await.unwrap();
+        // The stale file is gone; the fresh output was the one read (row stored, chunks built).
+        assert!(!s.ocr.join("x.pdf.text.txt").is_file());
+        let fresh: String = std::fs::read_to_string(s.ocr.join("x.pdf.vision.txt")).unwrap();
+        assert!(fresh.contains("Receipt ACME"));
+        assert_eq!(rows(&s).len(), 1);
+        assert!(!prepared.duplicate);
+        assert_eq!(prepared.added.source, "x");
     }
 
     #[ignore]
