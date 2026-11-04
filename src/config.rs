@@ -20,6 +20,7 @@ pub struct Config {
     pub paths: PathsConfig,
     pub llm: LlmConfig,
     pub classify: ClassifyConfig,
+    pub ocr: OcrConfig,
 }
 
 /// `[qdrant]`: the vector store, over gRPC.
@@ -131,6 +132,25 @@ impl Default for ClassifyConfig {
     }
 }
 
+/// `[ocr]`: how `add <file>` shells out to `ocr.py` (OCR stays Python; see CLAUDE.md).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct OcrConfig {
+    /// The interpreter to run the script with (the repo's venv by default).
+    pub python: PathBuf,
+    /// The OCR script itself.
+    pub script: PathBuf,
+}
+
+impl Default for OcrConfig {
+    fn default() -> Self {
+        OcrConfig {
+            python: PathBuf::from(".venv/bin/python"),
+            script: PathBuf::from("ocr.py"),
+        }
+    }
+}
+
 impl Config {
     /// Reads the config at `path`; a missing file means all defaults, so the tool runs without setup.
     pub fn load(path: &Path) -> anyhow::Result<Config> {
@@ -145,6 +165,8 @@ impl Config {
         config.paths.evals = expand_home(&config.paths.evals);
         config.paths.docs_dir = expand_home(&config.paths.docs_dir);
         config.paths.db = expand_home(&config.paths.db);
+        config.ocr.python = expand_home(&config.ocr.python);
+        config.ocr.script = expand_home(&config.ocr.script);
         Ok(config)
     }
 }
