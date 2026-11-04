@@ -11,8 +11,8 @@ use anyhow::Context;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::ask::{chat, check_base_url, defuse};
-use crate::config::Config;
+use crate::ask::{AskError, chat, check_base_url, defuse};
+use crate::config::{Config, LlmConfig};
 use crate::db::{self, Doc, Meta};
 
 /// The fallback type for anything the model got wrong or left out.
@@ -58,10 +58,8 @@ pub async fn run(config: &Config, force: bool) -> anyhow::Result<()> {
         }
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("cannot read {}", path.display()))?;
-        let head: String = text.chars().take(MAX_CHARS).collect();
-        let user = format!("<document>\n{}\n</document>", defuse(&head));
-        let meta = match chat(&config.llm, &system, &user, true).await {
-            Ok(answer) => validate(&answer, &config.classify.types),
+        let meta = match classify_text(&config.llm, &config.classify.types, &system, &text).await {
+            Ok(meta) => meta,
             Err(e) => {
                 // No row: the next run tries this document again.
                 tracing::warn!("{rel}: {e}");
@@ -84,6 +82,20 @@ pub async fn run(config: &Config, force: bool) -> anyhow::Result<()> {
         typed + unsorted
     );
     Ok(())
+}
+
+/// One document through the model: cut it to the header, fence the text (it is untrusted), ask
+/// for strict JSON and validate. Shared by `classify` (its whole loop) and `add` (one file).
+pub(crate) async fn classify_text(
+    llm: &LlmConfig,
+    types: &[String],
+    system: &str,
+    text: &str,
+) -> Result<Meta, AskError> {
+    let head: String = text.chars().take(MAX_CHARS).collect();
+    let user = format!("<document>\n{}\n</document>", defuse(&head));
+    let answer = chat(llm, system, &user, true).await?;
+    Ok(validate(&answer, types))
 }
 
 /// ocr.py writes `<rel dir>/<original name>.<method>.txt`: drop the last two dot-parts.
@@ -117,7 +129,7 @@ pub fn hash_file(path: &Path) -> std::io::Result<String> {
         .collect())
 }
 
-fn system_prompt(types: &[String]) -> String {
+pub(crate) fn system_prompt(types: &[String]) -> String {
     format!(
         "You file the user's own scanned documents. The user message contains the start of one \
 document's OCR text inside <document> tags.
