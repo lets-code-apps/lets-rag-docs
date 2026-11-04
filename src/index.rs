@@ -5,16 +5,20 @@
 
 use std::collections::HashMap;
 
+use sha2::{Digest, Sha256};
+
 use qdrant_client::qdrant::value::Kind;
 use qdrant_client::qdrant::{
-    CreateCollectionBuilder, Distance, Fusion, NamedVectors, PointStruct, PrefetchQueryBuilder,
-    Query, QueryPointsBuilder, SparseVectorParamsBuilder, SparseVectorsConfigBuilder,
-    UpsertPointsBuilder, Value, Vector, VectorInput, VectorParamsBuilder, VectorsConfigBuilder,
+    Condition, CreateCollectionBuilder, DeletePointsBuilder, Distance, Filter, Fusion,
+    NamedVectors, PointStruct, PrefetchQueryBuilder, Query, QueryPointsBuilder,
+    SparseVectorParamsBuilder, SparseVectorsConfigBuilder, UpsertPointsBuilder, Value, Vector,
+    VectorInput, VectorParamsBuilder, VectorsConfigBuilder,
 };
 use qdrant_client::{Payload, Qdrant, QdrantError};
 
+use crate::chunk;
 use crate::db::Meta;
-use crate::embed::Embedding;
+use crate::embed::{EmbedClient, EmbedError, Embedding};
 use crate::search::Passage;
 
 const DENSE: &str = "dense";
@@ -44,6 +48,20 @@ pub async fn recreate(client: &Qdrant, collection: &str) -> Result<(), IndexErro
     if client.collection_exists(collection).await? {
         client.delete_collection(collection).await?;
     }
+    create(client, collection).await?;
+    Ok(())
+}
+
+/// Creates the collection only if it is missing; `add` uses this so it never drops an index.
+pub async fn ensure_collection(client: &Qdrant, collection: &str) -> Result<(), IndexError> {
+    if !client.collection_exists(collection).await? {
+        create(client, collection).await?;
+    }
+    Ok(())
+}
+
+/// The shared layout both `ingest` and `add` need: named `dense` (cosine) and `sparse` vectors.
+async fn create(client: &Qdrant, collection: &str) -> Result<(), IndexError> {
     let mut vectors = VectorsConfigBuilder::default();
     vectors.add_named_vector_params(DENSE, VectorParamsBuilder::new(DIM, Distance::Cosine));
     let mut sparse = SparseVectorsConfigBuilder::default();
@@ -89,6 +107,43 @@ pub fn point(
     PointStruct::new(id, vectors, payload)
 }
 
+/// A point's stable id: the first 8 bytes (big-endian) of SHA-256 of `"{file}\0{chunk}"`.
+///
+/// Same file + chunk => same id, so `ingest` and `add` agree and a re-add overwrites its own
+/// points. Numbering points 0..N (as `ingest` used to) would let one document clobber another's.
+pub fn point_id(file: &str, chunk: usize) -> u64 {
+    let mut digest = Sha256::new();
+    digest.update(file.as_bytes());
+    digest.update(b"\x00");
+    digest.update(format!("{chunk}").as_bytes());
+    // finalize() is exactly 32 bytes, so a slice of 8 always converts: the unwrap never panics.
+    u64::from_be_bytes(digest.finalize()[..8].try_into().unwrap())
+}
+
+/// Embeds and builds the points for one document: every chunk embedded as `"{source}\n{chunk}"`,
+/// each point keyed by `point_id(file, chunk)`. Shared by `ingest` and `add`; `file` is the OCR
+/// path relative to `ocr_dir` (what `delete_file` later matches on).
+pub async fn document_points(
+    embed: &EmbedClient,
+    file: &str,
+    text: String,
+    meta: Option<&Meta>,
+) -> Result<Vec<PointStruct>, EmbedError> {
+    let source = chunk::source_name(file);
+    let parts = chunk::chunks(&text);
+    // The document's name fronts every chunk, so each chunk is findable by document name too.
+    let inputs: Vec<String> = parts.iter().map(|c| format!("{source}\n{c}")).collect();
+    let embeddings = embed.embed(&inputs).await?;
+    Ok(parts
+        .into_iter()
+        .zip(embeddings)
+        .enumerate()
+        .map(|(n, (text, embedding))| {
+            point(point_id(file, n), text, &source, file, n, embedding, meta)
+        })
+        .collect())
+}
+
 pub async fn upsert(
     client: &Qdrant,
     collection: &str,
@@ -105,6 +160,19 @@ pub async fn upsert(
             .upsert_points(UpsertPointsBuilder::new(collection, batch).wait(true))
             .await?;
     }
+}
+
+/// Deletes every point whose payload `file` equals `file` (one document's chunks). A re-`add`
+/// runs delete-then-upsert, so it stays idempotent even when the chunk count changed.
+pub async fn delete_file(client: &Qdrant, collection: &str, file: &str) -> Result<(), IndexError> {
+    client
+        .delete_points(
+            DeletePointsBuilder::new(collection)
+                .points(Filter::must([Condition::matches("file", file.to_string())]))
+                .wait(true),
+        )
+        .await?;
+    Ok(())
 }
 
 /// Hybrid search: meaning (dense) and keywords (sparse), merged by rank (RRF).
