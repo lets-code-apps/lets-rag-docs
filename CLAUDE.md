@@ -143,6 +143,16 @@ ocr.py, vision_ocr.swift
 7. **`lets-rag-docs add <file>`**: OCR one file (calls `ocr.py`), classify, index. Single entry
    point for the CLI, the MCP tool and the app. Same MCP server gets an `add_document` tool;
    Let's Triage Mail calls it (as an MCP client) for mail it marked "keep" (e.g. invoices).
+   **Done 2026-11-04:** `add <file>` and `add_document(path)` share one entry point,
+   `add::add_file` (`src/add.rs`); steps 1-10 (`prepare`) run before the Qdrant write, so the
+   pipeline is testable without a vector store: LLM must be local first, path resolved (a
+   `x.pdf -> secret.txt` symlink is refused), extension must be in `ocr.py`'s `TYPES`, SHA-256
+   content hash, SQLite duplicate check, copy into `docs_dir` (never a move, never an overwrite),
+   `ocr.py --only=<rel> --out=<ocr_dir>`, classify (`classify::classify_text`, re-add reuses the
+   stored row), `db.put` before embedding. Key: `[ocr] python, script`. `Added` returns
+   `{source, file, type, date, chunks, duplicate_of}` - never document text. Tests stand in for
+   `ocr.py` with a sh script (no Python, Swift or GPU needed); the Qdrant round trip is
+   `#[ignore]` (`cargo test -- --ignored`, needs `docker compose up -d`).
 8. **`lets-rag-docs organize --dry-run | --apply`**: explicit only. Copies originals into
    `<library>/<folder>/<title>.<ext>` and re-indexes them under the new path: delete the
    document's points, re-embed (`source` is part of the embedded text, so updating the payload

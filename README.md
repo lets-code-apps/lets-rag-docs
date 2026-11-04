@@ -39,8 +39,8 @@ the agent that calls this tool.
 
 - **OCR** (`ocr.py`, `vision_ocr.swift`): embedded PDF text when present, otherwise Apple Vision
   (macOS, offline). Writes one text file per document to `data/ocr/`.
-- **`lets-rag-docs`**: one Rust binary for chunking, ingest, search, evals, the MCP server (stdio)
-  and `ask`.
+- **`lets-rag-docs`**: one Rust binary for chunking, ingest, search, evals, the MCP server (stdio),
+  `ask` and `add <file>` (one document end to end: OCR, classify, index).
 - **Embeddings** (`embed_server.py`): [bge-m3](https://huggingface.co/BAAI/bge-m3), dense + sparse,
   multilingual (tested with Polish, English, Russian and Ukrainian). A small Python sidecar on
   127.0.0.1:8100, using the Mac GPU.
@@ -66,10 +66,11 @@ directory, so run the commands below from the repo root or make them absolute.
 ## Usage
 
 ```sh
-.venv/bin/python ocr.py <folder>          # extract text into data/ocr/ (unchanged files are skipped)
+.venv/bin/python ocr.py <folder> [--only=REL] [--out=DIR]  # extract text into data/ocr/
 .venv/bin/python embed_server.py          # keep running: the embedding service (~2 GB resident)
 
 lets-rag-docs ingest                      # (re)build the index from data/ocr/
+lets-rag-docs add ~/inbox/invoice.pdf     # one document: copy it in, OCR, classify, index
 lets-rag-docs search "when does the warranty end"   # best-matching passages
 lets-rag-docs eval                        # did the right document come back? (evals/rag.jsonl)
 lets-rag-docs ask "when does the warranty end"      # answer with citations from a local LLM
@@ -83,6 +84,9 @@ claude mcp add lets-rag-docs -- /path/to/lets-rag-docs mcp
 ```
 
 `search_docs(query, limit = 5)` returns `{text, source, file, chunk, score}` for each passage.
+`add_document(path)` files one document (an absolute path) and returns `{source, file, type, date,
+chunks, duplicate_of}` - metadata and counts, never document text. `add <file>` runs the same
+pipeline from the command line.
 Evals are JSON lines: `{"id", "lang", "question", "expect", "source"}`; a question passes when its
 `source` is among the first 5 distinct documents.
 
@@ -101,7 +105,7 @@ Evals are JSON lines: `{"id", "lang", "question", "expect", "source"}`; a questi
 - [x] MCP server with `search_docs`
 - [x] `ask`: standalone answers with citations through an OpenAI-compatible API
 - [ ] Classification at ingestion: title, type, date, people, issuer into SQLite (the facts layer)
-- [ ] `add <file>` and an MCP `add_document` tool (used by Let's Triage Mail)
+- [x] `add <file>` and an MCP `add_document` tool (used by Let's Triage Mail)
 - [ ] `organize`: copy documents into a named folder structure on request, re-indexed
 - [ ] Desktop app: browse, search, upload
 - [ ] Synthetic sample documents and a public eval set
