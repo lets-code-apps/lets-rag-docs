@@ -77,6 +77,10 @@ lets-rag-docs ask "when does the warranty end"      # answer with citations from
 lets-rag-docs mcp                         # MCP server over stdio
 ```
 
+`ingest` drops the collection and rebuilds it from `data/ocr/`, so never run `add` and `ingest` at
+the same time: a rebuild that lands in the middle of an `add` can drop the document `add` is
+indexing (the next `ingest` restores it).
+
 Register the MCP server with Claude Code (or point any MCP client at the same command):
 
 ```sh
@@ -104,7 +108,7 @@ Evals are JSON lines: `{"id", "lang", "question", "expect", "source"}`; a questi
 
 - [x] MCP server with `search_docs`
 - [x] `ask`: standalone answers with citations through an OpenAI-compatible API
-- [ ] Classification at ingestion: title, type, date, people, issuer into SQLite (the facts layer)
+- [x] Classification at ingestion: title, type, date, people, issuer into SQLite (the facts layer)
 - [x] `add <file>` and an MCP `add_document` tool (used by Let's Triage Mail)
 - [ ] `organize`: copy documents into a named folder structure on request, re-indexed
 - [ ] Desktop app: browse, search, upload
