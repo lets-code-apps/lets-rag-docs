@@ -42,6 +42,16 @@ def vision(path):
 
 
 def main(folder, out_root=OUT, only=None):
+    # --only must name an existing document of a supported type: fail non-zero with a message
+    # now, instead of silently processing nothing and letting the caller (lets-rag-docs add)
+    # treat that as success.
+    if only is not None:
+        target = folder / only
+        if not target.is_file() or target.suffix.lower() not in TYPES:
+            raise SystemExit(
+                f"error: --only={only} is not an existing file with one of "
+                f"{', '.join(sorted(TYPES))} suffixes under {folder}"
+            )
     if not VISION_BIN.exists() or VISION_BIN.stat().st_mtime < VISION_SRC.stat().st_mtime:
         VISION_BIN.parent.mkdir(exist_ok=True)
         subprocess.run(["swiftc", "-O", VISION_SRC, "-o", VISION_BIN], check=True)
