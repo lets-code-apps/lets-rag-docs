@@ -1,5 +1,5 @@
 //! Speaks MCP over stdio to the real binary. Needs no Qdrant or embed service: `tools/list`
-//! and a rejected empty query never reach them.
+//! and the rejected calls (empty query, bad path) never reach them.
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
@@ -7,7 +7,7 @@ use std::process::{Command, Stdio};
 use serde_json::{Value, json};
 
 #[test]
-fn lists_search_docs_and_rejects_empty_query() {
+fn lists_both_tools_and_rejects_bad_arguments() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_lets-rag-docs"))
         .args(["--config", "/nonexistent/lets-rag-docs.toml", "mcp"])
         .stdin(Stdio::piped())
@@ -41,18 +41,44 @@ fn lists_search_docs_and_rejects_empty_query() {
 
     send(json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}));
     let tools = recv()["result"]["tools"].clone();
-    assert_eq!(tools.as_array().unwrap().len(), 1);
-    assert_eq!(tools[0]["name"], "search_docs");
-    let props = &tools[0]["inputSchema"]["properties"];
-    assert_eq!(props["limit"]["default"], 5);
-    assert_eq!(tools[0]["inputSchema"]["required"], json!(["query"]));
+    let listed = tools.as_array().unwrap();
+    assert_eq!(listed.len(), 2);
+    // Which order the server lists them in is its business: look them up by name.
+    let search = listed.iter().find(|t| t["name"] == "search_docs").unwrap();
+    assert_eq!(search["inputSchema"]["properties"]["limit"]["default"], 5);
+    assert_eq!(search["inputSchema"]["required"], json!(["query"]));
+    let document = listed.iter().find(|t| t["name"] == "add_document").unwrap();
+    assert_eq!(document["inputSchema"]["required"], json!(["path"]));
 
     send(json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
         "params": {"name": "search_docs", "arguments": {"query": "  "}}}));
     let result = recv()["result"].clone();
     assert_eq!(result["isError"], true);
 
-    drop(send);
+    // add_document rejects a relative path before it touches the filesystem.
+    send(json!({"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+        "params": {"name": "add_document", "arguments": {"path": "receipt.pdf"}}}));
+    let relative = recv()["result"].clone();
+    assert_eq!(relative["isError"], true);
+    assert!(
+        relative["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("absolute")
+    );
+
+    // A missing absolute path is an error too: nothing is copied, OCR'd or indexed.
+    send(json!({"jsonrpc": "2.0", "id": 5, "method": "tools/call",
+        "params": {"name": "add_document", "arguments": {"path": "/nonexistent/receipt.pdf"}}}));
+    let missing = recv()["result"].clone();
+    assert_eq!(missing["isError"], true);
+    assert!(
+        missing["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("cannot find")
+    );
+
     let _ = child.kill();
     let _ = child.wait();
 }

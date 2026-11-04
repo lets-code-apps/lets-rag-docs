@@ -1,5 +1,6 @@
 //! Let's RAG Docs: local, private retrieval over scanned documents.
 
+mod add;
 mod ask;
 mod chunk;
 mod classify;
@@ -57,6 +58,11 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
+    /// OCR one file, classify it and index it: `add <file>`
+    Add {
+        /// The file to add
+        file: PathBuf,
+    },
     /// Serve `search_docs` to an MCP client over stdio
     Mcp,
     /// Answer a question from the documents with a local LLM, with citations
@@ -80,6 +86,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Eval { classify: false } => eval::run(&config).await,
         Command::Eval { classify: true } => eval::run_classify(&config),
         Command::Classify { force } => classify::run(&config, force).await,
+        Command::Add { file } => add::run(&config, &file).await,
         Command::Mcp => mcp::run(&config).await,
         Command::Ask { question } => ask::run(&config, &question).await,
     }
@@ -99,13 +106,8 @@ async fn ingest(config: &Config) -> anyhow::Result<()> {
     let mut points = Vec::new();
     for path in &files {
         let rel = path.strip_prefix(ocr_dir)?.to_string_lossy();
-        let source = chunk::source_name(&rel);
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("cannot read {}", path.display()))?;
-        let parts = chunk::chunks(&text);
-        // The document's name goes in front of every chunk, so it is findable in all of them.
-        let inputs: Vec<String> = parts.iter().map(|c| format!("{source}\n{c}")).collect();
-        let embeddings = embed.embed(&inputs).await?;
         // Without an original or a `classify` row the document is still indexed, minus type/date.
         let doc = match classify::hash_file(&classify::original_path(&config.paths.docs_dir, &rel))
         {
@@ -113,11 +115,11 @@ async fn ingest(config: &Config) -> anyhow::Result<()> {
             Err(_) => None,
         };
         let meta = doc.as_ref().map(|d| &d.meta);
-        println!("{:>3} chunks  {source}", parts.len());
-        for (n, (text, embedding)) in parts.into_iter().zip(embeddings).enumerate() {
-            let id = points.len() as u64;
-            points.push(index::point(id, text, &source, &rel, n, embedding, meta));
-        }
+        // document_points embeds "{source}\n{chunk}" per chunk and keys each point by point_id
+        // (file, chunk): stable, and shared verbatim with `add`.
+        let new = index::document_points(&embed, &rel, text, meta).await?;
+        println!("{:>3} chunks  {}", new.len(), chunk::source_name(&rel));
+        points.extend(new);
     }
 
     let qdrant = index::connect(&config.qdrant.url)?;
