@@ -115,7 +115,9 @@ async fn prepare(config: &Config, embed: &EmbedClient, file: &Path) -> anyhow::R
     let rel_string: String = rel.to_string_lossy().to_string();
 
     // 5. Same content already filed under a different name => a duplicate: report it, do nothing
-    //    else (no copy, no OCR, no LLM, no index). One document per content hash.
+    //    else (no copy, no OCR, no LLM, no index). One document per content hash. The result names
+    //    the document that IS in docs_dir (`doc.path`): the requested name was never copied, so
+    //    returning it would point at a file that does not exist.
     let existing: Option<db::Doc> = lookup(&config.paths.db, &hash)?;
     if let Some(doc) = &existing
         && doc.path != rel_string
@@ -125,8 +127,8 @@ async fn prepare(config: &Config, embed: &EmbedClient, file: &Path) -> anyhow::R
             points: Vec::new(),
             ocr_file: String::new(),
             added: Added {
-                source: chunk::source_name(&doc.path),
-                file: rel_string,
+                source: cite_source(&doc.path),
+                file: doc.path.clone(),
                 doc_type: doc.meta.doc_type.clone(),
                 date: doc.meta.date.clone(),
                 chunks: 0,
@@ -231,6 +233,22 @@ struct Prepared {
     points: Vec<PointStruct>,
     ocr_file: String,
     duplicate: bool,
+}
+
+/// Citation source for a path stored under docs_dir: drop only the file's own extension
+/// (`tax.return.2025.pdf` -> `tax.return.2025`). `chunk::source_name` strips three dot-parts,
+/// which is right for an OCR output (`tax.return.2025.pdf.text.txt`) but would eat into a dotted
+/// document name. The last dot only counts when it is past the last folder separator, so `v.1`
+/// folders keep their dots too; a name with no extension (or a leading-dot name) is kept whole.
+fn cite_source(rel: &str) -> String {
+    let folder: usize = match rel.rfind('/') {
+        Some(index) => index + 1,
+        None => 0,
+    };
+    match rel.rfind('.') {
+        Some(dot) if dot > folder && dot + 1 < rel.len() => rel[..dot].to_string(),
+        _ => rel.to_string(),
+    }
 }
 
 /// rusqlite's Connection is not `Sync`, so it must never straddle an `await`. These tiny sync
@@ -591,11 +609,30 @@ printf '%s\n' "   " > "$out/$rel.text.txt"
         let dup: Prepared = prepare(&cfg, &embed, &b).await.unwrap();
         assert!(dup.duplicate);
         assert_eq!(dup.added.duplicate_of, Some("one.pdf".into()));
+        assert_eq!(dup.added.file, "one.pdf"); // the stored document, not the never-copied two.pdf
         assert_eq!(dup.added.chunks, 0);
         // No two.pdf landed in docs_dir, OCR never ran for it, and no second row exists.
         assert!(!s.docs.join("two.pdf").is_file());
         assert_eq!(log_lines(&s).len(), 1);
         assert_eq!(rows(&s).len(), 1);
+
+        // A stored name with dots: the result still points at the file that actually exists
+        // (`tax.return.2025.pdf`, not the never-copied `second.copy.pdf`), and the citation
+        // source strips only ".pdf": `tax.return.2025`, not `tax`.
+        let dotted: PathBuf = s.dir.path().join("tax.return.2025.pdf");
+        let alias: PathBuf = s.dir.path().join("second.copy.pdf");
+        std::fs::write(&dotted, "tax copy").unwrap();
+        std::fs::write(&alias, "tax copy").unwrap();
+        let llm2: MockServer = llm_mock(1).await; // only the stored one was classified
+        let cfg2: Config = config(&s, &llm2, &embed_srv);
+        prepare(&cfg2, &embed, &dotted).await.unwrap();
+        let dup2: Prepared = prepare(&cfg2, &embed, &alias).await.unwrap();
+        assert!(dup2.duplicate);
+        assert_eq!(dup2.added.file, "tax.return.2025.pdf");
+        assert_eq!(dup2.added.source, "tax.return.2025");
+        assert_eq!(dup2.added.duplicate_of, Some("tax.return.2025.pdf".into()));
+        assert!(!s.docs.join("second.copy.pdf").is_file());
+        assert_eq!(rows(&s).len(), 2);
     }
 
     #[tokio::test]
