@@ -14,6 +14,11 @@ __pycache__/
 # Rust
 /target/
 
+# Desktop (Electron): dependencies and build output, never the sources
+desktop/node_modules/
+desktop/dist/
+desktop/out/
+
 # Local config and Claude Code local notes
 config.toml
 CLAUDE.local.md
