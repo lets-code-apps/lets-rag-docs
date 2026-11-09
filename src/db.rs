@@ -6,7 +6,7 @@
 use std::path::Path;
 
 use anyhow::Context;
-use rusqlite::{Connection, OptionalExtension, Row, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, params};
 
 /// What `classify` found out about a document, already validated.
 #[derive(Debug, Clone, PartialEq)]
@@ -57,6 +57,30 @@ pub fn open(path: &Path) -> anyhow::Result<Connection> {
     Ok(conn)
 }
 
+/// Opens an existing database without writing a thing: no parent folder, no file, no table, no
+/// permission change. `organize --dry-run` needs to read the rows and must not touch the file, so
+/// it uses this instead of `open` (which is a write command, and is free to set the file up).
+pub fn open_read_only(path: &Path) -> anyhow::Result<Connection> {
+    Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .with_context(|| format!("cannot read {}", path.display()))
+}
+
+/// Whether the `documents` table exists, so a reader can say "run `classify` first" instead of
+/// failing on a missing table (and, unlike `open`, without creating it).
+pub fn has_documents(conn: &Connection) -> rusqlite::Result<bool> {
+    let rows: i64 = conn.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'documents'",
+        [],
+        count_row,
+    )?;
+    Ok(rows > 0)
+}
+
+/// One row of a `count(*)` query.
+fn count_row(row: &Row) -> rusqlite::Result<i64> {
+    row.get(0)
+}
+
 /// Inserts the document, or replaces the row with the same hash (`classify --force`).
 pub fn put(conn: &Connection, doc: &Doc) -> rusqlite::Result<()> {
     let m = &doc.meta;
@@ -103,6 +127,22 @@ fn from_row(row: &Row) -> rusqlite::Result<Doc> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_only_open_never_creates_anything() {
+        let dir = tempfile::tempdir().unwrap();
+        // The parent folder is missing too: a read-only open fails instead of building it out.
+        let missing = dir.path().join("data/missing.sqlite");
+        assert!(open_read_only(&missing).is_err());
+        assert!(!std::fs::exists(missing.parent().unwrap()).unwrap_or(false));
+        // An existing database is readable; `has_documents` reads the schema without adding one.
+        open(&missing).unwrap();
+        assert!(has_documents(&open_read_only(&missing).unwrap()).unwrap());
+        // A bare database file with no table is "no documents", and still gets no table.
+        let bare = Connection::open(dir.path().join("bare.sqlite")).unwrap();
+        assert!(!has_documents(&bare).unwrap());
+        assert!(!has_documents(&open_read_only(&dir.path().join("bare.sqlite")).unwrap()).unwrap());
+    }
 
     #[test]
     fn round_trip_and_replace() {

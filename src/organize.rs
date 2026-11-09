@@ -6,7 +6,8 @@
 //! (`classify::safe_folder`, `safe_title`, `safe_ext`), never from raw model text: a document can
 //! steer the model into a `folder` or `title` like `../../etc`, and that must never escape
 //! `library_dir`. Nothing here deletes or moves an original; the only writes are new copies under
-//! the library and new points in the collection.
+//! the library and new points in the collection. A dry-run reads the database through a read-only
+//! connection, so it cannot create the file, its table, a parent folder or the library either.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
@@ -25,6 +26,7 @@ use crate::db;
 use crate::embed::EmbedClient;
 use crate::index;
 use qdrant_client::Qdrant;
+use qdrant_client::qdrant::PointStruct;
 
 /// A title becomes at most this many characters (then at most 200 bytes on disk).
 const TITLE_CAP: usize = 80;
@@ -44,10 +46,14 @@ struct Entry {
     original: PathBuf,
     hash: String,
     folder: String,
+    /// The sanitised title (before any collision suffix) and the extension the copy gets: planning
+    /// and apply both derive their candidate names from these two fields.
+    name: String,
+    ext_suffix: String,
+    /// `name`, `name (2)`, ... as resolved by `resolve_target`.
     stem: String,
     /// `folder/stem.ext`, relative to the library; checked by `inside_library` before a write.
     rel: PathBuf,
-    target: PathBuf,
     meta: db::Meta,
     already: bool,
     duplicates: Vec<String>,
@@ -55,6 +61,11 @@ struct Entry {
 
 #[derive(Clone)]
 struct Counts {
+    /// What the plan would do.
+    would_copy: usize,
+    would_reuse: usize,
+    /// What `--apply` did. A copy that failed counts as failed only and never as copied, so an
+    /// operator can read the totals and know whether a retry is needed.
     copied: usize,
     already: usize,
     failed: usize,
@@ -74,35 +85,47 @@ pub async fn run(config: &Config, dry_run: bool, apply: bool) -> anyhow::Result<
         parse_mode(dry_run, apply).ok_or(anyhow!("pass exactly one of --dry-run or --apply"))?;
     check_library_separation(config)?;
 
-    if !std::fs::exists(&config.paths.db).unwrap_or(false) {
-        // `db::open` would create an empty database; dry-run must change nothing, so bail first.
-        println!(
-            "run `classify` first: no database at {}",
-            config.paths.db.display()
-        );
+    if mode == Mode::DryRun {
+        // A dry-run may read, never write: `db::open` creates the parent folder, the file and its
+        // table and tightens permissions, so dry-run opens the database read-only instead - and
+        // does not open it at all when the file is missing.
+        if !std::fs::exists(&config.paths.db).unwrap_or(false) {
+            println!(
+                "run `classify` first: no database at {}",
+                config.paths.db.display()
+            );
+            return Ok(());
+        }
+        let conn = db::open_read_only(&config.paths.db)?;
+        if !db::has_documents(&conn)? {
+            println!(
+                "run `classify` first: no documents table in {}",
+                config.paths.db.display()
+            );
+            return Ok(());
+        }
+        let plan = build_plan(config, &conn)?;
+        for line in plan.lines {
+            println!("{}", line);
+        }
+        println!("{}", plan_line(&plan.counts));
         return Ok(());
     }
+
+    // Only `--apply` opens the embed service and Qdrant.
     let conn = db::open(&config.paths.db)?;
     let plan = build_plan(config, &conn)?;
     for line in plan.lines {
         println!("{}", line);
     }
-
-    if mode == Mode::DryRun {
-        println!("{}", counts_line(&plan.counts));
-        return Ok(());
-    }
-
-    // Only `--apply` opens the embed service and Qdrant.
     let embed = EmbedClient::new(&config.embed.url);
     let qdrant = index::connect(&config.qdrant.url)?;
     let mut counts = plan.counts.clone();
     for entry in plan.entries {
-        if !apply_entry(config, &embed, Some(&qdrant), entry).await? {
-            counts.failed += 1;
-        }
+        let applied = apply_entry(config, &embed, Some(&qdrant), entry).await?;
+        tally(&mut counts, applied);
     }
-    println!("{}", counts_line(&counts));
+    println!("{}", apply_line(&counts));
     Ok(())
 }
 
@@ -149,6 +172,8 @@ fn build_plan(config: &Config, conn: &Connection) -> anyhow::Result<Built> {
 
     let mut entries: Vec<Entry> = Vec::new();
     let mut counts = Counts {
+        would_copy: 0,
+        would_reuse: 0,
         copied: 0,
         already: 0,
         failed: 0,
@@ -213,23 +238,23 @@ fn build_plan(config: &Config, conn: &Connection) -> anyhow::Result<Built> {
             None => String::new(),
         };
 
-        let (stem, target, already, ok) =
+        let (stem, already, ok) =
             resolve_target(library, &folder, &name, &ext_suffix, &hash, &claimed);
         if !ok {
             counts.failed += 1;
             continue;
         }
         claimed.insert(target_key(&folder, &stem).to_lowercase());
-        let rel_path: PathBuf = PathBuf::from(format!("{folder}/{stem}{ext_suffix}"));
+        let rel_path: PathBuf = rel_for(&folder, &stem, &ext_suffix);
 
         if already {
             lines.push(format!(
                 "already there  {orel} -> {folder}/{stem}{ext_suffix}"
             ));
-            counts.already += 1;
+            counts.would_reuse += 1;
         } else {
             lines.push(format!("copy  {orel} -> {folder}/{stem}{ext_suffix}"));
-            counts.copied += 1;
+            counts.would_copy += 1;
         }
         entry_by_hash.insert(hash.clone(), entries.len());
         entries.push(Entry {
@@ -238,9 +263,10 @@ fn build_plan(config: &Config, conn: &Connection) -> anyhow::Result<Built> {
             original,
             hash,
             folder,
+            name,
+            ext_suffix,
             stem,
             rel: rel_path,
-            target,
             meta,
             already,
             duplicates: Vec::new(),
@@ -255,6 +281,7 @@ fn build_plan(config: &Config, conn: &Connection) -> anyhow::Result<Built> {
 
 /// Picks a free name for one document. An earlier entry with the same key, or a different file at
 /// the path, forces the next suffix; a file with the *same* hash means "already there" (idempotent).
+/// The last member of the tuple is false when no name within `COLLISION_CAP` was free.
 fn resolve_target(
     library: &Path,
     folder: &str,
@@ -262,69 +289,137 @@ fn resolve_target(
     ext_suffix: &str,
     hash: &str,
     claimed: &HashSet<String>,
-) -> (String, PathBuf, bool, bool) {
+) -> (String, bool, bool) {
     for n in 1..=COLLISION_CAP {
-        let stem: String = if n == 1 {
-            name.to_string()
-        } else {
-            format!("{name} ({n})")
-        };
+        let stem: String = stem_for(name, n);
         let key: String = target_key(folder, &stem).to_lowercase();
         if claimed.contains(&key) {
             continue;
         }
-        let candidate: PathBuf = PathBuf::from(format!(
-            "{lib}/{folder}/{stem}{ext_suffix}",
-            lib = library.display()
-        ));
+        let candidate: PathBuf = candidate_path(library, folder, &stem, ext_suffix);
         match classify::hash_file(&candidate) {
             // A file is there: same bytes => reuse it; different bytes => this name is taken.
-            Ok(seen) if seen == hash => return (stem, candidate, true, true),
+            Ok(seen) if seen == hash => return (stem, true, true),
             Ok(_) => continue,
             // Nothing there (NotFound or the folder missing) => copy here.
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return (stem, candidate, false, true),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return (stem, false, true),
             Err(_) => continue,
         }
     }
     // No free name within the cap: give up on this document rather than write somewhere else.
-    (String::new(), PathBuf::new(), false, false)
+    (String::new(), false, false)
 }
 
 fn target_key(folder: &str, stem: &str) -> String {
     format!("{folder}/{stem}")
 }
 
+/// The nth candidate stem for a document: `name`, then `name (2)`, `name (3)`, ...
+fn stem_for(name: &str, n: usize) -> String {
+    if n == 1 {
+        name.to_string()
+    } else {
+        format!("{name} ({n})")
+    }
+}
+
+/// `<library>/<folder>/<stem><ext>` for one candidate name.
+fn candidate_path(library: &Path, folder: &str, stem: &str, ext_suffix: &str) -> PathBuf {
+    PathBuf::from(format!(
+        "{lib}/{folder}/{stem}{ext_suffix}",
+        lib = library.display()
+    ))
+}
+
+/// `<folder>/<stem><ext>`: the same name relative to the library, which is what `inside_library`
+/// checks and what the plan prints.
+fn rel_for(folder: &str, stem: &str, ext_suffix: &str) -> PathBuf {
+    PathBuf::from(format!("{folder}/{stem}{ext_suffix}"))
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum Applied {
+    Copied,
+    Reused,
+    Failed,
+}
+
+/// One entry's final library name: the stem and relative path the copy landed under, plus whether
+/// the bytes were written now (`false`: an identical file was already there).
+struct Filed {
+    stem: String,
+    rel: PathBuf,
+    wrote: bool,
+}
+
 /// Does one planned entry: create the folder (refusing a symlink), copy the bytes owner-only, then
-/// embed and re-index. Embed and Qdrant errors abort the whole run (the service is down, so continuing
-/// is pointless); a per-file copy or folder error is just counted and the run moves on. The `Option`
-/// `qdrant` is a seam: tests without a Qdrant pass `None` and still exercise the copy and embed.
+/// embed and re-index under the source the copy actually landed under. Embed and Qdrant errors abort
+/// the whole run (the service is down, so continuing is pointless); a per-file copy or folder error
+/// is just counted and the run moves on. The `Option` `qdrant` is a seam: tests without a Qdrant pass
+/// `None` and still exercise the copy and the embed.
 async fn apply_entry(
     config: &Config,
     embed: &EmbedClient,
     qdrant: Option<&Qdrant>,
     entry: Entry,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<Applied> {
     debug_assert!(inside_library(&config.paths.library_dir, &entry.rel));
     if !ensure_folder(&config.paths.library_dir, &entry.folder) {
         tracing::warn!(
             "refusing to write into a non-directory or symlinked folder {}",
             entry.folder
         );
-        return Ok(false);
+        return Ok(Applied::Failed);
     }
-    if !entry.already && !copy_file(&entry.original, &entry.target, &entry.hash) {
-        return Ok(false);
-    }
+    let filed: Option<Filed> = if entry.already {
+        Some(Filed {
+            stem: entry.stem.clone(),
+            rel: entry.rel.clone(),
+            wrote: false,
+        })
+    } else {
+        copy_with_probe(&config.paths.library_dir, &entry)
+    };
+    let filed: Filed = match filed {
+        None => return Ok(Applied::Failed),
+        Some(filed) => filed,
+    };
+    debug_assert!(inside_library(&config.paths.library_dir, &filed.rel));
 
     // Embed before deleting (as `ingest` does): a failure here leaves the old index untouched.
+    let re: Reindex = reembed(embed, &entry, &filed).await?;
+    if let Some(client) = qdrant {
+        for file in re.delete {
+            index::delete_file(client, &config.qdrant.collection, file.as_str()).await?;
+        }
+        index::upsert(client, &config.qdrant.collection, re.points).await?;
+    }
+    tracing::debug!("re-indexed {} under {}", entry.ocr_rel, re.source);
+    Ok(if filed.wrote {
+        Applied::Copied
+    } else {
+        Applied::Reused
+    })
+}
+
+/// Embeds one document's OCR text under its new source and builds the points to write. Split out
+/// from `apply_entry` so a test with no Qdrant can still see what would be written: `delete` lists
+/// the OCR files whose old points must go first, and `points` carry the new source and the
+/// `index::organized_id` ids that let a rerun overwrite its own work.
+struct Reindex {
+    source: String,
+    delete: Vec<String>,
+    points: Vec<PointStruct>,
+}
+
+async fn reembed(embed: &EmbedClient, entry: &Entry, filed: &Filed) -> anyhow::Result<Reindex> {
     let text = std::fs::read_to_string(&entry.ocr_abs)
         .with_context(|| format!("cannot read {}", entry.ocr_abs.display()))?;
-    let source = format!("{}/{}", entry.folder, entry.stem);
+    let source: String = format!("{}/{}", entry.folder, filed.stem);
     let parts = chunk::chunks(&text);
     let inputs: Vec<String> = parts.iter().map(|c| format!("{source}\n{c}")).collect();
     let embeddings = embed.embed(&inputs).await?;
-
-    let points: Vec<qdrant_client::qdrant::PointStruct> = parts
+    let points: Vec<PointStruct> = parts
         .into_iter()
         .zip(embeddings)
         .enumerate()
@@ -340,54 +435,116 @@ async fn apply_entry(
             )
         })
         .collect();
-
-    if let Some(client) = qdrant {
-        index::delete_file(client, &config.qdrant.collection, &entry.ocr_rel).await?;
-        for dup in entry.duplicates {
-            index::delete_file(client, &config.qdrant.collection, dup.as_str()).await?;
-        }
-        index::upsert(client, &config.qdrant.collection, points).await?;
-    }
-    Ok(true)
+    // The copy's own OCR file plus every duplicate that pointed at these bytes.
+    let mut delete: Vec<String> = Vec::new();
+    delete.push(entry.ocr_rel.clone());
+    delete.extend(entry.duplicates.iter().cloned());
+    Ok(Reindex {
+        source,
+        delete,
+        points,
+    })
 }
 
-/// Copies the original to `target` owner-only and atomically "create only if absent", then verifies
-/// the copy's bytes match. The only file it may remove is a partial copy it just created.
-fn copy_file(original: &Path, target: &Path, hash: &str) -> bool {
-    let bytes_res = std::fs::read(original);
-    if bytes_res.is_err() {
-        tracing::warn!("cannot read the original {}", original.display());
-        return false;
+/// Copies the original under the planned name, walking `name (2)`, `name (3)`, ... when that path
+/// was claimed by a different file between planning and applying (another process, or one Unicode
+/// spelling of a name the case-insensitive filesystem already holds under another). `create_new` is
+/// what reports the clash, so nothing that exists is ever overwritten.
+fn copy_with_probe(library: &Path, entry: &Entry) -> Option<Filed> {
+    for n in 1..=COLLISION_CAP {
+        let stem: String = stem_for(&entry.name, n);
+        let target: PathBuf = candidate_path(library, &entry.folder, &stem, &entry.ext_suffix);
+        match copy_attempt(entry, &target) {
+            Attempt::Wrote => return Some(filed_for(library, entry, &stem, true)),
+            Attempt::Reused => return Some(filed_for(library, entry, &stem, false)),
+            Attempt::Taken => continue,
+            Attempt::Failed => return None,
+        }
     }
-    let bytes = bytes_res.unwrap();
+    tracing::warn!(
+        "no free library name for {} within {} tries",
+        entry.ocr_rel,
+        COLLISION_CAP
+    );
+    None
+}
+
+/// The `Filed` for one candidate name.
+fn filed_for(library: &Path, entry: &Entry, stem: &str, wrote: bool) -> Filed {
+    let rel: PathBuf = rel_for(&entry.folder, stem, &entry.ext_suffix);
+    debug_assert!(inside_library(library, &rel));
+    Filed {
+        stem: stem.to_string(),
+        rel,
+        wrote,
+    }
+}
+
+/// What one copy attempt found at a candidate path.
+enum Attempt {
+    /// The bytes were written to a new file.
+    Wrote,
+    /// An identical file was already there: nothing to write.
+    Reused,
+    /// Another file is there: this name is taken, so the probe tries the next suffix.
+    Taken,
+    /// An I/O error while writing: another name would not help.
+    Failed,
+}
+
+/// Copies the original to one candidate path: create-only (never overwrite), owner-only, then verify
+/// the bytes. The only file it may remove is a partial copy it just created itself.
+fn copy_attempt(entry: &Entry, target: &Path) -> Attempt {
+    let bytes: Vec<u8> = match std::fs::read(&entry.original) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            tracing::warn!("cannot read the original {}: {e}", entry.original.display());
+            return Attempt::Failed;
+        }
+    };
     let opened = OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
         .open(target);
     if opened.is_err() {
-        // A file we did not create is there, or the create failed: reuse only if the bytes match.
+        // Something is already at this path: reuse it only when the bytes already match.
         return match classify::hash_file(target) {
-            Ok(h) => h == hash,
-            _ => false,
+            Ok(seen) if seen == entry.hash => Attempt::Reused,
+            Ok(_) => Attempt::Taken,
+            Err(e) => {
+                tracing::warn!("cannot hash the file at {}: {e}", target.display());
+                Attempt::Failed
+            }
         };
     }
     let mut dst = opened.unwrap();
     if dst.write_all(&bytes).is_err() {
-        // A partial copy we just made: remove it and let the caller count the document as failed.
-        if std::fs::remove_file(target).is_err() {
-            tracing::warn!("could not remove the partial copy {}", target.display());
-        }
-        return false;
+        remove_partial(target);
+        return Attempt::Failed;
     }
     match classify::hash_file(target) {
-        Ok(h) if h == hash => true,
-        _ => {
-            if std::fs::remove_file(target).is_err() {
-                tracing::warn!("could not remove the partial copy {}", target.display());
-            }
-            false
+        Ok(seen) if seen == entry.hash => Attempt::Wrote,
+        Ok(_) => {
+            tracing::warn!(
+                "the copy at {} does not match its original",
+                target.display()
+            );
+            remove_partial(target);
+            Attempt::Failed
         }
+        Err(e) => {
+            tracing::warn!("cannot verify the copy at {}: {e}", target.display());
+            remove_partial(target);
+            Attempt::Failed
+        }
+    }
+}
+
+/// Remove a copy this run created and could not verify.
+fn remove_partial(target: &Path) {
+    if std::fs::remove_file(target).is_err() {
+        tracing::warn!("could not remove the partial copy {}", target.display());
     }
 }
 
@@ -405,7 +562,22 @@ fn ensure_folder(library: &Path, folder: &str) -> bool {
     }
 }
 
-fn counts_line(c: &Counts) -> String {
+/// What the plan would do.
+fn plan_line(c: &Counts) -> String {
+    format!(
+        "planned {}: {} to copy, {} already there, {} failed, {} duplicate, {} not classified, {} missing original",
+        c.would_copy + c.would_reuse,
+        c.would_copy,
+        c.would_reuse,
+        c.failed,
+        c.duplicate,
+        c.not_classified,
+        c.missing,
+    )
+}
+
+/// What `--apply` did: only copies that really landed count as copied.
+fn apply_line(c: &Counts) -> String {
     format!(
         "organized {}: {} copied, {} already there, {} failed, {} duplicate, {} not classified, {} missing original",
         c.copied + c.already,
@@ -416,6 +588,15 @@ fn counts_line(c: &Counts) -> String {
         c.not_classified,
         c.missing,
     )
+}
+
+/// Moves one apply outcome into the counts.
+fn tally(counts: &mut Counts, applied: Applied) {
+    match applied {
+        Applied::Copied => counts.copied += 1,
+        Applied::Reused => counts.already += 1,
+        Applied::Failed => counts.failed += 1,
+    }
 }
 
 /// A `title` becomes a safe file stem, or a hash-derived name when there is nothing usable.
@@ -512,8 +693,16 @@ fn inside_library(library: &Path, rel: &Path) -> bool {
 mod tests {
     use std::fs;
 
+    use serde_json::json;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, Request as MockRequest, ResponseTemplate};
+
+    use qdrant_client::qdrant::CountPointsBuilder;
+    use qdrant_client::qdrant::value::Kind;
+
     use super::*;
     use crate::classify;
+    use crate::embed::{Embedding, Sparse};
 
     // A synthetic workspace: separate `docs/`, `data/ocr/` and `library/` trees and a config
     // pointing the network at dead ports. Nothing here is a real document; every byte is made up.
@@ -578,6 +767,74 @@ mod tests {
         .unwrap();
     }
 
+    // Embed mock that answers with real vectors only when every text begins with `prefix`; any other
+    // request gets an empty reply, so a wrong `source` fails loudly (a count mismatch) rather than
+    // passing quietly.
+    async fn embed_prefix_mock(prefix: &str) -> MockServer {
+        let server: MockServer = MockServer::start().await;
+        let prefix: String = prefix.to_string();
+        Mock::given(method("POST"))
+            .and(path("/embed"))
+            .respond_with(move |req: &MockRequest| {
+                let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+                let texts = body["texts"].as_array().unwrap();
+                let ok = texts
+                    .iter()
+                    .all(|t| t.as_str().unwrap().starts_with(&prefix));
+                if !ok {
+                    return ResponseTemplate::new(200)
+                        .set_body_json(json!({"dense": [], "sparse": []}));
+                }
+                let dense: Vec<_> = texts.iter().map(|_| vec![0.5]).collect();
+                let sparse: Vec<_> = texts
+                    .iter()
+                    .map(|_| json!({"indices": [1], "values": [0.5]}))
+                    .collect();
+                ResponseTemplate::new(200).set_body_json(json!({"dense": dense, "sparse": sparse}))
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+        server
+    }
+
+    // Embed mock that answers any request: for the tests that check something other than the prefix.
+    async fn embed_ok_mock() -> MockServer {
+        let server: MockServer = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/embed"))
+            .respond_with(|req: &MockRequest| {
+                let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+                let texts = body["texts"].as_array().unwrap();
+                let dense: Vec<_> = texts.iter().map(|_| vec![0.5]).collect();
+                let sparse: Vec<_> = texts
+                    .iter()
+                    .map(|_| json!({"indices": [1], "values": [0.5]}))
+                    .collect();
+                ResponseTemplate::new(200).set_body_json(json!({"dense": dense, "sparse": sparse}))
+            })
+            .mount(&server)
+            .await;
+        server
+    }
+
+    fn payload_string(p: &PointStruct, key: &str) -> String {
+        match p.payload.get(key).and_then(|v| v.kind.as_ref()) {
+            Some(Kind::StringValue(s)) => s.to_string(),
+            _ => panic!("payload has no string {key}"),
+        }
+    }
+
+    async fn count_points(client: &Qdrant, collection: &str) -> u64 {
+        client
+            .count(CountPointsBuilder::new(collection.to_string()).exact(true))
+            .await
+            .unwrap()
+            .result
+            .unwrap()
+            .count
+    }
+
     #[test]
     fn plan_lists_copies_and_counts() {
         let f = fixture();
@@ -599,8 +856,8 @@ mod tests {
         assert!(!e.already, "a fresh target is a copy, not already-there");
         assert_eq!(e.rel, PathBuf::from("Home/Report.pdf"));
         assert_eq!(
-            counts_line(&plan.counts),
-            "organized 1: 1 copied, 0 already there, 0 failed, 0 duplicate, 0 not classified, 0 missing original",
+            plan_line(&plan.counts),
+            "planned 1: 1 to copy, 0 already there, 0 failed, 0 duplicate, 0 not classified, 0 missing original",
         );
     }
 
@@ -805,21 +1062,22 @@ mod tests {
             Some("Report"),
             Some("Home"),
         );
-        let original = f.config.paths.docs_dir.join("one.pdf");
-        let hash = classify::hash_file(&original).unwrap();
-        let target = f.config.paths.library_dir.join("Home/Report.pdf");
-        assert!(ensure_folder(&f.config.paths.library_dir, "Home"));
-        assert!(copy_file(&original, &target, &hash));
-        assert_eq!(fs::read_to_string(original).unwrap(), "abc");
-        assert_eq!(classify::hash_file(&target).unwrap(), hash);
+        let plan = build_plan(&f.config, &conn).unwrap();
+        let entry = plan.entries.first().unwrap();
+        assert!(ensure_folder(&f.config.paths.library_dir, &entry.folder));
+        let filed = copy_with_probe(&f.config.paths.library_dir, entry).unwrap();
+        assert!(filed.wrote);
+        let target = f.config.paths.library_dir.join(&filed.rel);
+        assert_eq!(fs::read_to_string(&entry.original).unwrap(), "abc");
+        assert_eq!(classify::hash_file(&target).unwrap(), entry.hash);
         assert_eq!(
-            fs::metadata(target).unwrap().permissions().mode() & 0o777,
+            fs::metadata(&target).unwrap().permissions().mode() & 0o777,
             0o600
         );
     }
 
     #[test]
-    fn existing_different_file_is_never_overwritten() {
+    fn existing_different_file_walks_the_next_suffix() {
         let f = fixture();
         let conn = open(&f);
         add_doc(
@@ -830,13 +1088,19 @@ mod tests {
             Some("Report"),
             Some("Home"),
         );
-        let original = f.config.paths.docs_dir.join("one.pdf");
-        let hash = classify::hash_file(&original).unwrap();
-        let target = f.config.paths.library_dir.join("Home/other.pdf");
-        fs::create_dir_all(target.parent().unwrap()).unwrap();
-        fs::write(&target, "ZZZ pre-existing").unwrap();
-        assert!(!copy_file(&original, &target, &hash));
-        assert_eq!(fs::read_to_string(target).unwrap(), "ZZZ pre-existing");
+        let plan = build_plan(&f.config, &conn).unwrap();
+        let entry = plan.entries.first().unwrap();
+        let planned = f.config.paths.library_dir.join(&entry.rel);
+        fs::create_dir_all(planned.parent().unwrap()).unwrap();
+        fs::write(&planned, "ZZZ pre-existing").unwrap();
+        let filed = copy_with_probe(&f.config.paths.library_dir, entry).unwrap();
+        assert_eq!(
+            filed.stem, "Report (2)",
+            "a taken name is walked, never overwritten"
+        );
+        assert_eq!(fs::read_to_string(&planned).unwrap(), "ZZZ pre-existing");
+        let moved = f.config.paths.library_dir.join(&filed.rel);
+        assert_eq!(classify::hash_file(&moved).unwrap(), entry.hash);
     }
 
     #[test]
@@ -851,11 +1115,11 @@ mod tests {
             Some("Report"),
             Some("Home"),
         );
-        let target = build_plan(&f.config, &conn).unwrap().entries[0]
-            .target
-            .clone();
+        let plan1 = build_plan(&f.config, &conn).unwrap();
+        let first = plan1.entries.first().unwrap();
+        let target = f.config.paths.library_dir.join(&first.rel);
         fs::create_dir_all(target.parent().unwrap()).unwrap();
-        fs::write(target, "abc").unwrap();
+        fs::write(&target, "abc").unwrap();
         let plan2 = build_plan(&f.config, &conn).unwrap();
         let second = plan2.entries.first().unwrap();
         assert!(
@@ -891,6 +1155,13 @@ mod tests {
         assert_eq!(fs::read_dir(other.path()).unwrap().count(), 0);
     }
 
+    #[test]
+    fn library_copies_are_gitignored() {
+        // `--apply` files copies of real documents: an in-repo library must never be committable.
+        let ignore: &str = include_str!("../.gitignore");
+        assert!(ignore.contains("/library/"));
+    }
+
     #[tokio::test]
     async fn dry_run_changes_nothing() {
         let f = fixture();
@@ -922,8 +1193,12 @@ mod tests {
         let f = fixture();
         run(&f.config, true, false).await.unwrap();
         assert!(
-            !fs::exists(f.config.paths.db).unwrap_or(false),
+            !fs::exists(&f.config.paths.db).unwrap_or(false),
             "dry-run must not create the database"
+        );
+        assert!(
+            !fs::exists(f.config.paths.db.parent().unwrap()).unwrap_or(false),
+            "dry-run must not create the database's parent folder either",
         );
         assert!(
             !fs::exists(f.config.paths.library_dir).unwrap_or(false),
@@ -932,11 +1207,61 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn apply_embeds_new_source_prefix() {
-        use serde_json::json;
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, Request as MockRequest, ResponseTemplate};
+    async fn dry_run_does_not_touch_the_database() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = fixture();
+        {
+            let conn = open(&f);
+            add_doc(
+                &f,
+                &conn,
+                "one.pdf.vision.txt",
+                "abc",
+                Some("Report"),
+                Some("Home"),
+            );
+        }
+        // Deliberately loose: `db::open` would tighten them to 0600, so a write is visible.
+        fs::set_permissions(&f.config.paths.db, fs::Permissions::from_mode(0o644)).unwrap();
+        let before: Vec<u8> = fs::read(&f.config.paths.db).unwrap();
+        run(&f.config, true, false).await.unwrap();
+        assert_eq!(
+            fs::read(&f.config.paths.db).unwrap(),
+            before,
+            "dry-run must leave the database bytes alone",
+        );
+        assert_eq!(
+            fs::metadata(&f.config.paths.db)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o644,
+            "dry-run must leave the permissions alone",
+        );
+        let ro = db::open_read_only(&f.config.paths.db).unwrap();
+        assert!(
+            db::has_documents(&ro).unwrap(),
+            "dry-run must leave the schema alone",
+        );
+    }
 
+    #[tokio::test]
+    async fn dry_run_without_the_documents_table_says_so() {
+        // A database file that exists but has no table yet: dry-run must hint, not create it.
+        let f = fixture();
+        fs::create_dir_all(f.config.paths.db.parent().unwrap()).unwrap();
+        Connection::open(&f.config.paths.db).unwrap();
+        run(&f.config, true, false).await.unwrap();
+        let ro = db::open_read_only(&f.config.paths.db).unwrap();
+        assert!(
+            !db::has_documents(&ro).unwrap(),
+            "dry-run must not create the documents table",
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_embeds_new_source_prefix() {
         let f = fixture();
         let conn = open(&f);
         add_doc(
@@ -949,40 +1274,214 @@ mod tests {
         );
         let plan = build_plan(&f.config, &conn).unwrap();
         let entry = plan.entries.into_iter().next().unwrap();
-        let target = entry.target.clone();
-        let source = format!("{}/{}", entry.folder, entry.stem);
-        let prefix = format!("{source}\n");
-
-        let server = MockServer::start().await;
-        // Only answer with real embeddings when every input begins with "<folder>/<name>\n".
-        Mock::given(method("POST"))
-            .and(path("/embed"))
-            .respond_with(move |req: &MockRequest| {
-                let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
-                let texts = body["texts"].as_array().unwrap();
-                let ok = texts
-                    .iter()
-                    .all(|t| t.as_str().unwrap().starts_with(&prefix));
-                if !ok {
-                    return ResponseTemplate::new(200)
-                        .set_body_json(json!({"dense": [], "sparse": []}));
-                }
-                let dense: Vec<_> = texts.iter().map(|_| vec![0.5]).collect();
-                let sparse: Vec<_> = texts
-                    .iter()
-                    .map(|_| json!({"indices": [1], "values": [0.5]}))
-                    .collect();
-                ResponseTemplate::new(200).set_body_json(json!({"dense": dense, "sparse": sparse}))
-            })
-            .expect(1)
-            .mount(&server)
-            .await;
-
+        let target = f.config.paths.library_dir.join(&entry.rel);
+        // Every embedded chunk must start with the library name, not the old OCR source.
+        let prefix: String = format!("{}/{}\n", entry.folder, entry.stem);
+        let server = embed_prefix_mock(&prefix).await;
         let embed = EmbedClient::new(&server.uri());
-        apply_entry(&f.config, &embed, None, entry).await.unwrap();
+        let applied = apply_entry(&f.config, &embed, None, entry).await.unwrap();
+        assert_eq!(applied, Applied::Copied);
         assert!(
             fs::exists(&target).unwrap_or(false),
             "the copy landed in the library"
         );
+        assert_eq!(fs::read_to_string(&target).unwrap(), "hello world document");
+    }
+
+    #[tokio::test]
+    async fn reembed_carries_the_organized_source() {
+        // The re-index seam without a Qdrant: which old points must go, and what the new ones say.
+        let f = fixture();
+        let conn = open(&f);
+        add_doc(
+            &f,
+            &conn,
+            "one.pdf.vision.txt",
+            "abc",
+            Some("Report"),
+            Some("Home"),
+        );
+        // Same bytes as the first document: one row (one title), and it becomes a duplicate.
+        add_doc(
+            &f,
+            &conn,
+            "two.pdf.vision.txt",
+            "abc",
+            Some("Report"),
+            Some("Home"),
+        );
+        let plan = build_plan(&f.config, &conn).unwrap();
+        let entry = plan.entries.into_iter().next().unwrap();
+        assert_eq!(entry.duplicates[0], "two.pdf.vision.txt");
+        let server = embed_ok_mock().await;
+        let embed = EmbedClient::new(&server.uri());
+        let filed = Filed {
+            stem: entry.stem.clone(),
+            rel: entry.rel.clone(),
+            wrote: true,
+        };
+        let re = reembed(&embed, &entry, &filed).await.unwrap();
+        assert_eq!(re.source, "Home/Report");
+        assert_eq!(re.delete.len(), 2);
+        assert_eq!(re.delete[0], "one.pdf.vision.txt");
+        assert_eq!(re.delete[1], "two.pdf.vision.txt");
+        assert_eq!(re.points.len(), 1);
+        let p: PointStruct = re.points.first().unwrap().clone();
+        // A point's id is a wrapper, so compare it against the id `index::point` was asked for.
+        let expected_id = index::point(
+            index::organized_id(&entry.hash, 0),
+            "x".into(),
+            "s",
+            "f",
+            0,
+            Embedding {
+                dense: vec![0.0],
+                sparse: Sparse {
+                    indices: vec![],
+                    values: vec![],
+                },
+            },
+            None,
+        )
+        .id;
+        assert_eq!(p.id, expected_id);
+        assert_eq!(payload_string(&p, "source"), "Home/Report");
+        assert_eq!(payload_string(&p, "file"), "one.pdf.vision.txt");
+        assert_eq!(payload_string(&p, "type"), "invoice");
+    }
+
+    #[tokio::test]
+    async fn apply_recovers_from_a_late_collision() {
+        // Another file claims the planned name after planning: apply must take the next suffix,
+        // keep that stranger's bytes, and embed under the name it actually filed the copy under.
+        let f = fixture();
+        let conn = open(&f);
+        add_doc(
+            &f,
+            &conn,
+            "one.pdf.vision.txt",
+            "abc",
+            Some("Report"),
+            Some("Home"),
+        );
+        let plan = build_plan(&f.config, &conn).unwrap();
+        let entry = plan.entries.into_iter().next().unwrap();
+        let planned = f.config.paths.library_dir.join(&entry.rel);
+        let original = entry.original.clone();
+        fs::create_dir_all(planned.parent().unwrap()).unwrap();
+        fs::write(&planned, "someone else's file").unwrap();
+        let prefix: String = format!("{}/{} (2)\n", entry.folder, entry.stem);
+        let server = embed_prefix_mock(&prefix).await;
+        let embed = EmbedClient::new(&server.uri());
+        let applied = apply_entry(&f.config, &embed, None, entry).await.unwrap();
+        assert_eq!(applied, Applied::Copied);
+        assert_eq!(fs::read_to_string(&planned).unwrap(), "someone else's file");
+        let moved = f.config.paths.library_dir.join("Home/Report (2).pdf");
+        assert!(
+            fs::exists(&moved).unwrap_or(false),
+            "the copy took the next free name"
+        );
+        assert_eq!(
+            classify::hash_file(&moved).unwrap(),
+            classify::hash_file(&original).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_copy_is_not_counted_as_copied() {
+        // A directory where the copy should go: the copy cannot happen, so the document counts as
+        // failed only - never as copied, and never re-embedded (the fixture's embed URL is a dead
+        // port, so an embed attempt would return an error instead of this result).
+        let f = fixture();
+        let conn = open(&f);
+        add_doc(
+            &f,
+            &conn,
+            "one.pdf.vision.txt",
+            "abc",
+            Some("Report"),
+            Some("Home"),
+        );
+        let plan = build_plan(&f.config, &conn).unwrap();
+        assert_eq!(plan.counts.would_copy, 1);
+        let entry = plan.entries.into_iter().next().unwrap();
+        let target = f.config.paths.library_dir.join(&entry.rel);
+        fs::create_dir_all(&target).unwrap();
+        let embed = EmbedClient::new(&f.config.embed.url);
+        let applied = apply_entry(&f.config, &embed, None, entry).await.unwrap();
+        assert_eq!(applied, Applied::Failed);
+        let mut counts = plan.counts.clone();
+        tally(&mut counts, applied);
+        assert_eq!(counts.copied, 0);
+        assert_eq!(counts.failed, 1);
+        assert_eq!(
+            apply_line(&counts),
+            "organized 0: 0 copied, 0 already there, 1 failed, 0 duplicate, 0 not classified, 0 missing original",
+        );
+    }
+
+    #[ignore]
+    #[tokio::test]
+    async fn apply_reindexes_the_copy_in_qdrant() {
+        // Needs a real Qdrant at 127.0.0.1:6334 (`docker compose up -d`); this repo has no CI, so
+        // run it by hand with `cargo test -- --ignored`. The point counts are the proof: with no
+        // delete the total grows, with no upsert it shrinks, and an unscoped delete would take the
+        // other document's point with it.
+        let client = index::connect("http://127.0.0.1:6334").unwrap();
+        let mut f = fixture();
+        f.config.qdrant.collection = "test-organize-apply".to_string();
+        let conn = open(&f);
+        add_doc(
+            &f,
+            &conn,
+            "one.pdf.vision.txt",
+            "abc",
+            Some("Report"),
+            Some("Home"),
+        );
+        add_doc(
+            &f,
+            &conn,
+            "two.pdf.vision.txt",
+            "def",
+            Some("Report"),
+            Some("Home"),
+        );
+        let server = embed_ok_mock().await;
+        let embed = EmbedClient::new(&server.uri());
+        index::recreate(&client, &f.config.qdrant.collection)
+            .await
+            .unwrap();
+        // Seed the collection the way `ingest` does: one point per document, under the old sources.
+        let plan = build_plan(&f.config, &conn).unwrap();
+        assert_eq!(plan.entries.len(), 2);
+        let mut seeded: Vec<PointStruct> = Vec::new();
+        for entry in &plan.entries {
+            let text = fs::read_to_string(&entry.ocr_abs).unwrap();
+            seeded.extend(
+                index::document_points(&embed, &entry.ocr_rel, text, None)
+                    .await
+                    .unwrap(),
+            );
+        }
+        index::upsert(&client, &f.config.qdrant.collection, seeded)
+            .await
+            .unwrap();
+        assert_eq!(count_points(&client, &f.config.qdrant.collection).await, 2);
+        let entry = plan.entries.into_iter().next().unwrap();
+        assert_eq!(entry.ocr_rel, "one.pdf.vision.txt");
+        let applied = apply_entry(&f.config, &embed, Some(&client), entry)
+            .await
+            .unwrap();
+        assert_eq!(applied, Applied::Copied);
+        assert_eq!(
+            count_points(&client, &f.config.qdrant.collection).await,
+            2,
+            "old points deleted, organized ones added, the other document untouched",
+        );
+        client
+            .delete_collection(&f.config.qdrant.collection)
+            .await
+            .unwrap();
     }
 }
