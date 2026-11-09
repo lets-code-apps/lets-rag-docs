@@ -83,6 +83,12 @@ lets-rag-docs mcp                         # MCP server over stdio
 the same time: a rebuild that lands in the middle of an `add` can drop the document `add` is
 indexing (the next `ingest` restores it).
 
+`organize --apply` re-indexes each copy under its new `library/<folder>/<title>` name, and the same
+rebuild rule applies to it: `ingest` only knows the paths under `data/ocr/`, so it drops the
+organized sources. Run `ingest`, then `organize --apply` again - that order, never the other way
+round. Because the indexed `source` changes, eval `source` values change after `--apply` too: an
+eval question passes when its `source` matches the library name the document was filed under.
+
 Register the MCP server with Claude Code (or point any MCP client at the same command):
 
 ```sh
@@ -103,8 +109,8 @@ Evals are JSON lines: `{"id", "lang", "question", "expect", "source"}`; a questi
   `allow_remote = true`.
 - Document text is treated as data, never as instructions: `ask` fences passages in the prompt and
   the model only writes an answer.
-- Your documents, OCR output and eval questions stay out of git: `docs/`, `data/` and
-  `evals/rag.jsonl` are in `.gitignore`.
+- Your documents, OCR output and eval questions stay out of git: `docs/`, `data/`, `library/` (the
+  copies `organize --apply` files) and `evals/rag.jsonl` are in `.gitignore`.
 
 ## Roadmap
 
