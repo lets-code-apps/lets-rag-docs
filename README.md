@@ -74,6 +74,8 @@ lets-rag-docs add ~/inbox/invoice.pdf     # one document: copy it in, OCR, class
 lets-rag-docs search "when does the warranty end"   # best-matching passages
 lets-rag-docs eval                        # did the right document come back? (evals/rag.jsonl)
 lets-rag-docs ask "when does the warranty end"      # answer with citations from a local LLM
+lets-rag-docs organize --dry-run          # planned copies into library/<folder>/<title>; changes nothing
+lets-rag-docs organize --apply            # copy originals into the library and re-embed the copies
 lets-rag-docs mcp                         # MCP server over stdio
 ```
 
@@ -110,7 +112,7 @@ Evals are JSON lines: `{"id", "lang", "question", "expect", "source"}`; a questi
 - [x] `ask`: standalone answers with citations through an OpenAI-compatible API
 - [x] Classification at ingestion: title, type, date, people, issuer into SQLite (the facts layer)
 - [x] `add <file>` and an MCP `add_document` tool (used by Let's Triage Mail)
-- [ ] `organize`: copy documents into a named folder structure on request, re-indexed
+- [x] `organize`: copy documents into a named folder structure on request, re-indexed
 - [ ] Desktop app: browse, search, upload
 - [ ] Synthetic sample documents and a public eval set
 - [ ] Page markers, so citations name the page (today they name the document only)
