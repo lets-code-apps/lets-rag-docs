@@ -106,6 +106,7 @@ src/mcp.rs
 src/ask.rs
 embed_server.py
 ocr.py, vision_ocr.swift
+desktop/                 # Electron placeholder window (Node/TS): no Cargo involvement, `exclude`d from the crate
 ```
 
 ## Implementation plan
@@ -153,6 +154,10 @@ ocr.py, vision_ocr.swift
    upload (→ `add`). Electron (owner's preference) or Tauri; both use a web UI, decide when we
    get there. With Electron the backend is the `lets-rag-docs` binary (MCP over stdio, the same
    server the agents use).
+   **Foundation (2026-11-07, via LET-57):** `desktop/` — an Electron placeholder window only, on
+   branch `feature/issue-3`. No features, no backend wiring, no IPC/preload. Stack pinned: Electron 45.2.3,
+   TypeScript 5.9.3, Node 24. `desktop/` has no `Cargo.toml` and `Cargo.toml` `exclude`s it, so `cargo`
+   ignores it. The Electron-vs-Tauri and final-UX decisions above still stand for later increments.
 10. Later: synthetic sample docs + public eval set, page markers, reranking (bge-reranker-v2-m3).
 
 ## Environment

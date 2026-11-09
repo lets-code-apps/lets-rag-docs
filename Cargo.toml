@@ -6,6 +6,7 @@ rust-version = "1.88"
 description = "Local, private retrieval over scanned documents: OCR, bge-m3 hybrid search in Qdrant, MCP"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/lets-code-apps/lets-rag-docs"
+exclude = ["desktop/"]
 readme = "README.md"
 keywords = ["rag", "ocr", "qdrant", "mcp", "search"]
 categories = ["command-line-utilities"]

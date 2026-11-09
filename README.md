@@ -48,6 +48,8 @@ the agent that calls this tool.
   the dense and sparse results (RRF).
 - **LLM for `ask`**: any OpenAI-compatible endpoint, e.g. [Ollama](https://ollama.com)
   (default model `qwen3:30b-a3b`).
+- **Desktop (placeholder)**: an Electron shell in `desktop/` that opens one neutral window and does
+  nothing else yet. See [`desktop/README.md`](desktop/README.md) for its setup/dev/build commands.
 
 ## Setup
 
@@ -95,6 +97,8 @@ Evals are JSON lines: `{"id", "lang", "question", "expect", "source"}`; a questi
   the model only writes an answer.
 - Your documents, OCR output and eval questions stay out of git: `docs/`, `data/` and
   `evals/rag.jsonl` are in `.gitignore`.
+- The desktop shell makes no network calls; `npm ci` downloads the Electron binary once at setup, and
+  the running app loads only local content in a sandboxed window.
 
 ## Roadmap
 
@@ -104,6 +108,7 @@ Evals are JSON lines: `{"id", "lang", "question", "expect", "source"}`; a questi
 - [ ] `add <file>` and an MCP `add_document` tool (used by Let's Triage Mail)
 - [ ] `organize`: copy documents into a named folder structure on request, re-indexed
 - [ ] Desktop app: browse, search, upload
+  - foundation (empty placeholder window) in `desktop/`
 - [ ] Synthetic sample documents and a public eval set
 - [ ] Page markers, so citations name the page (today they name the document only)
 - [ ] Reranking (bge-reranker-v2-m3) and metadata filters (document type, date)

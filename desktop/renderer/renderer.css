@@ -1,0 +1,24 @@
+/* Neutral, deliberately unfinished styling: a plain system font, centred in the window. No
+   branding, theme or layout decisions — the visual direction is still open. */
+html,
+body {
+	margin: 0;
+	height: 100%;
+	background: #ffffff;
+	color: #1a1a1a;
+	font-family: system-ui, -apple-system, sans-serif;
+}
+
+#app {
+	display: flex;
+	height: 100%;
+	flex-direction: column;
+	justify-content: center;
+	align-items: center;
+	text-align: center;
+}
+
+.hint {
+	max-width: 28em;
+	color: #555555;
+}
