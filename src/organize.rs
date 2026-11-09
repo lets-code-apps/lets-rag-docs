@@ -50,12 +50,10 @@ struct Entry {
     /// and apply both derive their candidate names from these two fields.
     name: String,
     ext_suffix: String,
-    /// `name`, `name (2)`, ... as resolved by `resolve_target`.
-    stem: String,
-    /// `folder/stem.ext`, relative to the library; checked by `inside_library` before a write.
+    /// `folder/stem.ext`, relative to the library: the name `resolve_target` picked, checked by
+    /// `inside_library` before a write.
     rel: PathBuf,
     meta: db::Meta,
-    already: bool,
     duplicates: Vec<String>,
 }
 
@@ -265,10 +263,8 @@ fn build_plan(config: &Config, conn: &Connection) -> anyhow::Result<Built> {
             folder,
             name,
             ext_suffix,
-            stem,
             rel: rel_path,
             meta,
-            already,
             duplicates: Vec::new(),
         });
     }
@@ -371,15 +367,10 @@ async fn apply_entry(
         );
         return Ok(Applied::Failed);
     }
-    let filed: Option<Filed> = if entry.already {
-        Some(Filed {
-            stem: entry.stem.clone(),
-            rel: entry.rel.clone(),
-            wrote: false,
-        })
-    } else {
-        copy_with_probe(&config.paths.library_dir, &entry)
-    };
+    // The plan's `already` is re-checked, not trusted: `copy_with_probe` re-hashes whatever sits at
+    // the planned name, so a file another process swapped in meanwhile is walked past (never indexed,
+    // never overwritten) and the copy takes the next free suffix.
+    let filed: Option<Filed> = copy_with_probe(&config.paths.library_dir, &entry);
     let filed: Filed = match filed {
         None => return Ok(Applied::Failed),
         Some(filed) => filed,
@@ -446,8 +437,9 @@ async fn reembed(embed: &EmbedClient, entry: &Entry, filed: &Filed) -> anyhow::R
     })
 }
 
-/// Copies the original under the planned name, walking `name (2)`, `name (3)`, ... when that path
-/// was claimed by a different file between planning and applying (another process, or one Unicode
+/// Copies the original under the planned name - or, when the bytes are already there, leaves them
+/// and reports that - walking `name (2)`, `name (3)`, ... when that path was claimed by a different
+/// file between planning and applying (another process, or one Unicode
 /// spelling of a name the case-insensitive filesystem already holds under another). `create_new` is
 /// what reports the clash, so nothing that exists is ever overwritten.
 fn copy_with_probe(library: &Path, entry: &Entry) -> Option<Filed> {
@@ -852,8 +844,6 @@ mod tests {
         assert!(plan.entries.len() == 1);
         let e = plan.entries.first().unwrap();
         assert_eq!(e.folder, "Home");
-        assert_eq!(e.stem, "Report");
-        assert!(!e.already, "a fresh target is a copy, not already-there");
         assert_eq!(e.rel, PathBuf::from("Home/Report.pdf"));
         assert_eq!(
             plan_line(&plan.counts),
@@ -883,8 +873,8 @@ mod tests {
         );
         let plan = build_plan(&f.config, &conn).unwrap();
         assert!(plan.entries.len() == 2);
-        assert_eq!(plan.entries[0].stem, "Report");
-        assert_eq!(plan.entries[1].stem, "Report (2)");
+        assert_eq!(plan.entries[0].rel, PathBuf::from("Home/Report.pdf"));
+        assert_eq!(plan.entries[1].rel, PathBuf::from("Home/Report (2).pdf"));
     }
 
     #[test]
@@ -908,7 +898,7 @@ mod tests {
             Some("home"),
         );
         let plan = build_plan(&f.config, &conn).unwrap();
-        assert_eq!(plan.entries[1].stem, "report (2)");
+        assert_eq!(plan.entries[1].rel, PathBuf::from("home/report (2).pdf"));
     }
 
     #[test]
@@ -1121,12 +1111,11 @@ mod tests {
         fs::create_dir_all(target.parent().unwrap()).unwrap();
         fs::write(&target, "abc").unwrap();
         let plan2 = build_plan(&f.config, &conn).unwrap();
-        let second = plan2.entries.first().unwrap();
         assert!(
-            second.already,
-            "same bytes at the target means already there"
+            plan2.lines[0].starts_with("already there"),
+            "same bytes at the target means already there",
         );
-        assert_eq!(second.stem, "Report");
+        assert_eq!(plan2.entries[0].rel, PathBuf::from("Home/Report.pdf"));
     }
 
     #[test]
@@ -1276,7 +1265,7 @@ mod tests {
         let entry = plan.entries.into_iter().next().unwrap();
         let target = f.config.paths.library_dir.join(&entry.rel);
         // Every embedded chunk must start with the library name, not the old OCR source.
-        let prefix: String = format!("{}/{}\n", entry.folder, entry.stem);
+        let prefix: String = format!("{}/{}\n", entry.folder, entry.name);
         let server = embed_prefix_mock(&prefix).await;
         let embed = EmbedClient::new(&server.uri());
         let applied = apply_entry(&f.config, &embed, None, entry).await.unwrap();
@@ -1316,7 +1305,7 @@ mod tests {
         let server = embed_ok_mock().await;
         let embed = EmbedClient::new(&server.uri());
         let filed = Filed {
-            stem: entry.stem.clone(),
+            stem: entry.name.clone(),
             rel: entry.rel.clone(),
             wrote: true,
         };
@@ -1370,7 +1359,7 @@ mod tests {
         let original = entry.original.clone();
         fs::create_dir_all(planned.parent().unwrap()).unwrap();
         fs::write(&planned, "someone else's file").unwrap();
-        let prefix: String = format!("{}/{} (2)\n", entry.folder, entry.stem);
+        let prefix: String = format!("{}/{} (2)\n", entry.folder, entry.name);
         let server = embed_prefix_mock(&prefix).await;
         let embed = EmbedClient::new(&server.uri());
         let applied = apply_entry(&f.config, &embed, None, entry).await.unwrap();
@@ -1385,6 +1374,54 @@ mod tests {
             classify::hash_file(&moved).unwrap(),
             classify::hash_file(&original).unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn apply_rejects_a_file_swapped_into_an_already_there_target() {
+        // The mirror of the late-collision test: the plan marked the planned name "already there"
+        // because our own bytes sat there, then another process replaced them. Apply must leave the
+        // stranger alone and file the copy under the next suffix - never index the stranger's bytes.
+        let f = fixture();
+        let conn = open(&f);
+        add_doc(
+            &f,
+            &conn,
+            "one.pdf.vision.txt",
+            "abc",
+            Some("Report"),
+            Some("Home"),
+        );
+        let planned = f.config.paths.library_dir.join("Home/Report.pdf");
+        fs::create_dir_all(planned.parent().unwrap()).unwrap();
+        fs::write(&planned, "abc").unwrap();
+        let plan = build_plan(&f.config, &conn).unwrap();
+        assert!(
+            plan.lines[0].starts_with("already there"),
+            "the plan saw our own bytes at the planned name",
+        );
+        assert_eq!(plan.counts.would_reuse, 1);
+        let entry = plan.entries.into_iter().next().unwrap();
+        fs::write(&planned, "swapped in by someone else").unwrap();
+
+        let prefix: String = format!("{}/{} (2)\n", entry.folder, entry.name);
+        let server = embed_prefix_mock(&prefix).await;
+        let embed = EmbedClient::new(&server.uri());
+        let applied = apply_entry(&f.config, &embed, None, entry).await.unwrap();
+        assert_eq!(
+            applied,
+            Applied::Copied,
+            "the stranger is never filed as this document"
+        );
+        assert_eq!(
+            fs::read_to_string(&planned).unwrap(),
+            "swapped in by someone else"
+        );
+        let moved = f.config.paths.library_dir.join("Home/Report (2).pdf");
+        assert!(
+            fs::exists(&moved).unwrap_or(false),
+            "the copy took the next free name"
+        );
+        assert_eq!(fs::read_to_string(&moved).unwrap(), "abc");
     }
 
     #[tokio::test]
