@@ -164,6 +164,10 @@ ocr.py, vision_ocr.swift
    get there. With Electron the backend is the `lets-rag-docs` binary (MCP over stdio, the same
    server the agents use).
 10. Later: synthetic sample docs + public eval set, page markers, reranking (bge-reranker-v2-m3).
+11. **Advanced RAG** (decided 2026-11-09): plan in `plans/advanced-rag.md` (from LangChain's
+    "RAG From Scratch"). Techniques go into Rust (filters, rerank, multi-query, CRAG/Self-RAG as
+    a state machine in `ask`); LangGraph only in a separate learning lab on synthetic data.
+    Tracing: self-hosted **Langfuse** (Phoenix as alternative), **never LangSmith** (cloud).
 
 ## Environment
 
