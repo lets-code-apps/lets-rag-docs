@@ -43,3 +43,10 @@ types = [
   "identity", "medical", "invoice", "receipt", "contract", "loan", "insurance", "tax", "bank",
   "warranty", "certificate", "letter", "other",
 ]
+
+[ocr]
+# How `add <file>` runs OCR: it shells out to this Python script (OCR stays Python for now).
+# Relative paths resolve against the current directory; a leading ~ is expanded. If an MCP client
+# starts the server from a different folder, use absolute paths for both.
+python = ".venv/bin/python"
+script = "ocr.py"
