@@ -230,6 +230,18 @@ fn take_string(
     }
 }
 
+/// A deterministic point id for an organized copy: the first 8 bytes (big-endian) of SHA-256 of
+/// `"{hash}:{chunk}"`, with bit 63 set. Rerunning `organize` re-upserts the same ids, so a rerun
+/// is idempotent. Bit 63 keeps organize's ids in the upper half of the id space.
+pub fn organized_id(hash: &str, chunk: usize) -> u64 {
+    let mut digest = Sha256::new();
+    digest.update(hash.as_bytes());
+    digest.update(b":");
+    digest.update(format!("{chunk}").as_bytes());
+    // finalize() is exactly 32 bytes, so an 8-byte slice always converts: the unwrap never panics.
+    u64::from_be_bytes(digest.finalize()[..8].try_into().unwrap()) | (1 << 63)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -476,5 +488,16 @@ mod tests {
             payload_keys(Some(&meta)),
             ["chunk", "file", "source", "text", "type"]
         );
+    }
+
+    #[test]
+    fn organized_id_is_stable_and_in_the_upper_half() {
+        // Same hash + chunk => the same id, so rerunning `organize` overwrites its own points.
+        assert_eq!(organized_id("abc", 3), organized_id("abc", 3));
+        assert_ne!(organized_id("abc", 3), organized_id("abc", 4));
+        assert_ne!(organized_id("abc", 3), organized_id("abd", 3));
+        // Bit 63 set: organize lives in the upper half of the id space, which a rerun reuses.
+        assert!(organized_id("abc", 0) & (1 << 63) != 0);
+        assert_eq!(organized_id("abc", 0) >> 63, 1);
     }
 }

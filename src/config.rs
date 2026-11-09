@@ -65,6 +65,9 @@ pub struct PathsConfig {
     pub docs_dir: PathBuf,
     /// SQLite database with one row per classified document.
     pub db: PathBuf,
+    /// Where `organize --apply` copies originals into, under `<folder>/<title>`. Kept separate
+    /// from `docs_dir`/`ocr_dir` so a copy is never OCR'd or classified as a new original.
+    pub library_dir: PathBuf,
 }
 
 impl Default for PathsConfig {
@@ -74,6 +77,7 @@ impl Default for PathsConfig {
             evals: PathBuf::from("evals/rag.jsonl"),
             docs_dir: PathBuf::from("docs"),
             db: PathBuf::from("data/lets-rag-docs.sqlite"),
+            library_dir: PathBuf::from("library"),
         }
     }
 }
@@ -165,6 +169,7 @@ impl Config {
         config.paths.evals = expand_home(&config.paths.evals);
         config.paths.docs_dir = expand_home(&config.paths.docs_dir);
         config.paths.db = expand_home(&config.paths.db);
+        config.paths.library_dir = expand_home(&config.paths.library_dir);
         config.ocr.python = expand_home(&config.ocr.python);
         config.ocr.script = expand_home(&config.ocr.script);
         Ok(config)

@@ -10,6 +10,7 @@ mod embed;
 mod eval;
 mod index;
 mod mcp;
+mod organize;
 mod search;
 
 use std::path::{Path, PathBuf};
@@ -63,6 +64,16 @@ enum Command {
         /// The file to add
         file: PathBuf,
     },
+    #[group(required = true, multiple = false)]
+    /// Copy each classified original into `library/<folder>/<title>` and re-index the copy
+    Organize {
+        /// Print the planned copies and change nothing
+        #[arg(long)]
+        dry_run: bool,
+        /// Copy the documents and re-embed the copies
+        #[arg(long)]
+        apply: bool,
+    },
     /// Serve `search_docs` to an MCP client over stdio
     Mcp,
     /// Answer a question from the documents with a local LLM, with citations
@@ -87,6 +98,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Eval { classify: true } => eval::run_classify(&config),
         Command::Classify { force } => classify::run(&config, force).await,
         Command::Add { file } => add::run(&config, &file).await,
+        Command::Organize { dry_run, apply } => organize::run(&config, dry_run, apply).await,
         Command::Mcp => mcp::run(&config).await,
         Command::Ask { question } => ask::run(&config, &question).await,
     }

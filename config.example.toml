@@ -24,6 +24,10 @@ evals = "evals/rag.jsonl"
 docs_dir = "docs"
 # SQLite database with what `classify` found out about each document.
 db = "data/lets-rag-docs.sqlite"
+# Where `organize --apply` copies originals into, under <folder>/<title>. Keep it separate from
+# docs_dir and ocr_dir: `organize` refuses to run if the library is inside (or contains) either,
+# so a filed copy can never be OCR'd or classified as a new original.
+library_dir = "library"
 
 [llm]
 # Used by `ask` and `classify`. Any OpenAI-compatible endpoint; Ollama by default.
