@@ -86,8 +86,15 @@ indexing (the next `ingest` restores it).
 `organize --apply` re-indexes each copy under its new `library/<folder>/<title>` name, and the same
 rebuild rule applies to it: `ingest` only knows the paths under `data/ocr/`, so it drops the
 organized sources. Run `ingest`, then `organize --apply` again - that order, never the other way
-round. Because the indexed `source` changes, eval `source` values change after `--apply` too: an
-eval question passes when its `source` matches the library name the document was filed under.
+round. Evals don't change: `eval` names each hit by its OCR file, which `--apply` keeps, so the
+same `evals/rag.jsonl` scores the same before and after organizing.
+
+Folders come from a fixed list, `[classify] folders` in the config, so documents in different
+languages share one folder (no `Home`, `Dom` and `Дом` side by side). A document whose stored
+folder is not on the list is filed under `unsorted/`. Documents classified before the list
+existed, or before you changed it, need `classify --force` first. Before the first `--apply`,
+check the result: `eval --classify` scores type, date and folder against `evals/classify.jsonl`
+(delete that file to get a fresh draft that includes folders), and read the `--dry-run` output.
 
 Register the MCP server with Claude Code (or point any MCP client at the same command):
 

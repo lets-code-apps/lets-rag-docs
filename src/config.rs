@@ -106,11 +106,13 @@ impl Default for LlmConfig {
     }
 }
 
-/// `[classify]`: document types the model may choose. Anything else becomes `unsorted`.
+/// `[classify]`: the document types and library folders the model may choose. Anything else
+/// becomes `unsorted` (type) or no folder (filed under `unsorted/` by `organize`).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ClassifyConfig {
     pub types: Vec<String>,
+    pub folders: Vec<String>,
 }
 
 impl Default for ClassifyConfig {
@@ -130,8 +132,23 @@ impl Default for ClassifyConfig {
             "letter",
             "other",
         ];
+        let folders = [
+            "Identity",
+            "Health",
+            "Finance",
+            "Taxes",
+            "Insurance",
+            "Home",
+            "Car",
+            "Work",
+            "Education",
+            "Purchases",
+            "Letters",
+            "Other",
+        ];
         ClassifyConfig {
             types: types.map(String::from).to_vec(),
+            folders: folders.map(String::from).to_vec(),
         }
     }
 }

@@ -47,6 +47,14 @@ types = [
   "identity", "medical", "invoice", "receipt", "contract", "loan", "insurance", "tax", "bank",
   "warranty", "certificate", "letter", "other",
 ]
+# The library folders `organize` files copies under (`library/<folder>/<title>`). A fixed list, so
+# one family's documents in four languages don't end up in "Home", "Dom" and "Дом" side by side.
+# An answer outside this list files the copy under `unsorted/`. After changing it, run
+# `classify --force` so stored documents pick from the new list.
+folders = [
+  "Identity", "Health", "Finance", "Taxes", "Insurance", "Home", "Car", "Work", "Education",
+  "Purchases", "Letters", "Other",
+]
 
 [ocr]
 # How `add <file>` runs OCR: it shells out to this Python script (OCR stays Python for now).

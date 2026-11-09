@@ -127,6 +127,18 @@ pub async fn run(config: &Config, dry_run: bool, apply: bool) -> anyhow::Result<
     Ok(())
 }
 
+/// The library folder a stored `folder` files under. The row is data on disk, not trusted, and one
+/// classified before `[classify] folders` existed may hold a free-text name: both go to `unsorted`.
+/// Shared with `eval --classify`, so the eval scores the folder `organize` would really use.
+pub(crate) fn library_folder(config: &Config, folder: Option<&str>) -> String {
+    match folder {
+        Some(f) if classify::safe_folder(f) && config.classify.folders.iter().any(|c| c == f) => {
+            f.to_string()
+        }
+        _ => classify::UNSORTED.to_string(),
+    }
+}
+
 pub fn parse_mode(dry_run: bool, apply: bool) -> Option<Mode> {
     if dry_run && !apply {
         Some(Mode::DryRun)
@@ -224,11 +236,7 @@ fn build_plan(config: &Config, conn: &Connection) -> anyhow::Result<Built> {
         }
         first_by_hash.insert(hash.clone(), rel.clone());
 
-        // Re-validate the folder from the database: the row is data on disk, not trusted.
-        let folder: String = match &meta.folder {
-            Some(f) if classify::safe_folder(f) => f.clone(),
-            _ => classify::UNSORTED.to_string(),
-        };
+        let folder: String = library_folder(config, meta.folder.as_deref());
         let name = safe_title(meta.title.as_ref(), hash.to_string());
         let ext = safe_ext(&original);
         let ext_suffix: String = match ext.as_ref() {
@@ -777,7 +785,8 @@ mod tests {
                     return ResponseTemplate::new(200)
                         .set_body_json(json!({"dense": [], "sparse": []}));
                 }
-                let dense: Vec<_> = texts.iter().map(|_| vec![0.5]).collect();
+                // 1024 like bge-m3: a real Qdrant (the ignored round-trip test) rejects any other size.
+                let dense: Vec<_> = texts.iter().map(|_| vec![0.5; 1024]).collect();
                 let sparse: Vec<_> = texts
                     .iter()
                     .map(|_| json!({"indices": [1], "values": [0.5]}))
@@ -798,7 +807,8 @@ mod tests {
             .respond_with(|req: &MockRequest| {
                 let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
                 let texts = body["texts"].as_array().unwrap();
-                let dense: Vec<_> = texts.iter().map(|_| vec![0.5]).collect();
+                // 1024 like bge-m3: a real Qdrant (the ignored round-trip test) rejects any other size.
+                let dense: Vec<_> = texts.iter().map(|_| vec![0.5; 1024]).collect();
                 let sparse: Vec<_> = texts
                     .iter()
                     .map(|_| json!({"indices": [1], "values": [0.5]}))
@@ -895,10 +905,11 @@ mod tests {
             "two.pdf.vision.txt",
             "def",
             Some("report"),
-            Some("home"),
+            // Folders are stored in their configured spelling, so only the title differs in case.
+            Some("Home"),
         );
         let plan = build_plan(&f.config, &conn).unwrap();
-        assert_eq!(plan.entries[1].rel, PathBuf::from("home/report (2).pdf"));
+        assert_eq!(plan.entries[1].rel, PathBuf::from("Home/report (2).pdf"));
     }
 
     #[test]
@@ -965,8 +976,18 @@ mod tests {
             Some("Report"),
             Some("../x"),
         );
+        // Safe as a path, but not in `[classify] folders` (a row from before the list existed).
+        add_doc(
+            &f,
+            &conn,
+            "two.pdf.vision.txt",
+            "def",
+            Some("Letter"),
+            Some("Дом"),
+        );
         let plan = build_plan(&f.config, &conn).unwrap();
         assert_eq!(plan.entries[0].folder, classify::UNSORTED);
+        assert_eq!(plan.entries[1].folder, classify::UNSORTED);
         assert!(inside_library(
             &f.config.paths.library_dir,
             &plan.entries[0].rel
