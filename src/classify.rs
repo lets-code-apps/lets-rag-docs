@@ -134,7 +134,10 @@ pub(crate) fn system_prompt(choices: &ClassifyConfig) -> String {
         "You file the user's own scanned documents. The user message contains the start of one \
 document's OCR text inside <document> tags.
 Reply with one JSON object and nothing else, with exactly these keys:
-- \"title\": a short descriptive title in the document's language, e.g. \"Invoice 42/2025 ACME\".
+- \"title\": a short title a person would recognise in a file list, in the document's language: \
+the kind of document and what it concerns (the item, service, person or case), e.g. \
+\"Repayment schedule - car loan\" or \"Invoice ACME - office chair\". Never include account, card, \
+contract or ID numbers.
 - \"type\": exactly one of: {}.
 - \"date\": the document's main date (issue or signing date) as YYYY-MM-DD, or null.
 - \"people\": array of the names of the private persons the document is about or addressed to.
@@ -227,7 +230,7 @@ fn clean(s: &str, cap: usize) -> Option<String> {
 }
 
 /// A real calendar date written exactly as `YYYY-MM-DD`.
-fn is_date(s: &str) -> bool {
+pub(crate) fn is_date(s: &str) -> bool {
     let b = s.as_bytes();
     let digits = |r: std::ops::Range<usize>| b[r].iter().all(u8::is_ascii_digit);
     if b.len() != 10 || b[4] != b'-' || b[7] != b'-' {

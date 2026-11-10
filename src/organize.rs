@@ -33,6 +33,8 @@ const TITLE_CAP: usize = 80;
 const TITLE_BYTES: usize = 200;
 /// Collision suffixes `name`, `name (2)`, ... before giving up on a document.
 const COLLISION_CAP: usize = 1000;
+/// A word with this many digits is a reference number, not a name (see `sanitise`).
+const LONG_NUMBER_DIGITS: usize = 8;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Mode {
@@ -237,7 +239,7 @@ fn build_plan(config: &Config, conn: &Connection) -> anyhow::Result<Built> {
         first_by_hash.insert(hash.clone(), rel.clone());
 
         let folder: String = library_folder(config, meta.folder.as_deref());
-        let name = safe_title(meta.title.as_ref(), hash.to_string());
+        let name = file_name(&meta, hash.to_string());
         let ext = safe_ext(&original);
         let ext_suffix: String = match ext.as_ref() {
             Some(e) => format!(".{e}"),
@@ -599,6 +601,16 @@ fn tally(counts: &mut Counts, applied: Applied) {
     }
 }
 
+/// `YYYY-MM-DD Title`: the date first, so a folder lists oldest to newest in any file browser (the
+/// phone's Files app included). The date is re-checked: the database row is data, not trusted.
+fn file_name(meta: &db::Meta, hash: String) -> String {
+    let title: String = safe_title(meta.title.as_ref(), hash);
+    match meta.date.as_deref().filter(|d| classify::is_date(d)) {
+        Some(date) => format!("{date} {title}"),
+        None => title,
+    }
+}
+
 /// A `title` becomes a safe file stem, or a hash-derived name when there is nothing usable.
 fn safe_title(title: Option<&String>, hash: String) -> String {
     let cleaned: String = title
@@ -618,6 +630,13 @@ fn safe_title(title: Option<&String>, hash: String) -> String {
 /// Keeps letters (any script), digits, space, `-` and `_`; every other character (`/`, `\`, `.`,
 /// control, RTL override, NUL) becomes `-`. Then collapses runs, trims, caps to 80 chars and 200 bytes.
 fn sanitise(s: String) -> String {
+    // Account, card, contract and ID numbers tell a person browsing nothing and should not sit in a
+    // file name on a phone: drop every word with 8 or more digits (the database keeps the full title).
+    let words: Vec<&str> = s
+        .split_whitespace()
+        .filter(|w| w.chars().filter(|c| c.is_ascii_digit()).count() < LONG_NUMBER_DIGITS)
+        .collect();
+    let s: String = words.join(" ");
     let mut mapped: Vec<char> = Vec::new();
     for c in s.chars() {
         if c.is_alphanumeric() || matches!(c, ' ' | '-' | '_') {
@@ -992,6 +1011,33 @@ mod tests {
             &f.config.paths.library_dir,
             &plan.entries[0].rel
         ));
+    }
+
+    #[test]
+    fn file_name_starts_with_the_date_and_drops_long_numbers() {
+        let meta = |title: &str, date: Option<&str>| db::Meta {
+            title: Some(title.to_string()),
+            doc_type: "loan".into(),
+            date: date.map(String::from),
+            people: vec![],
+            issuer: None,
+            folder: None,
+        };
+        let hash = "deadbeefcafe12345678".to_string();
+        let schedule = meta("Repayment Schedule 1234567890123456", Some("2025-03-14"));
+        assert_eq!(
+            file_name(&schedule, hash.clone()),
+            "2025-03-14 Repayment Schedule"
+        );
+        // An IBAN-like word goes whole; a short invoice number stays.
+        let invoice = meta("Invoice 42/2025 PL61109010140000071219812874 ACME", None);
+        assert_eq!(file_name(&invoice, hash.clone()), "Invoice 42-2025 ACME");
+        // A date that is not a real calendar date is not put in front.
+        let bad_date = meta("Report", Some("2025-13-40"));
+        assert_eq!(file_name(&bad_date, hash.clone()), "Report");
+        // Only a number: the hash name, still dated.
+        let only_number = meta("1234567890123456", Some("2025-03-14"));
+        assert_eq!(file_name(&only_number, hash), "2025-03-14 doc-deadbeefcafe");
     }
 
     #[test]

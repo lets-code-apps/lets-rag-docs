@@ -74,7 +74,7 @@ lets-rag-docs add ~/inbox/invoice.pdf     # one document: copy it in, OCR, class
 lets-rag-docs search "when does the warranty end"   # best-matching passages
 lets-rag-docs eval                        # did the right document come back? (evals/rag.jsonl)
 lets-rag-docs ask "when does the warranty end"      # answer with citations from a local LLM
-lets-rag-docs organize --dry-run          # planned copies into library/<folder>/<title>; changes nothing
+lets-rag-docs organize --dry-run          # planned copies into library/<folder>/<date> <title>; changes nothing
 lets-rag-docs organize --apply            # copy originals into the library and re-embed the copies
 lets-rag-docs mcp                         # MCP server over stdio
 ```
@@ -83,11 +83,15 @@ lets-rag-docs mcp                         # MCP server over stdio
 the same time: a rebuild that lands in the middle of an `add` can drop the document `add` is
 indexing (the next `ingest` restores it).
 
-`organize --apply` re-indexes each copy under its new `library/<folder>/<title>` name, and the same
+`organize --apply` re-indexes each copy under its new `library/<folder>/<date> <title>` name, and the same
 rebuild rule applies to it: `ingest` only knows the paths under `data/ocr/`, so it drops the
 organized sources. Run `ingest`, then `organize --apply` again - that order, never the other way
 round. Evals don't change: `eval` names each hit by its OCR file, which `--apply` keeps, so the
 same `evals/rag.jsonl` scores the same before and after organizing.
+
+File names start with the document's date (`2025-03-14 Repayment schedule.pdf`), so every folder
+sorts oldest to newest, also in a phone's file browser. Words with 8 or more digits (account, card,
+contract and ID numbers) are left out of file names; the database keeps the full title.
 
 Folders come from a fixed list, `[classify] folders` in the config, so documents in different
 languages share one folder (no `Home`, `Dom` and `Дом` side by side). A document whose stored
