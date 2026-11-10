@@ -6,10 +6,12 @@ use std::collections::HashSet;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
+use crate::chunk;
 use crate::config::Config;
 use crate::db;
 use crate::embed::EmbedClient;
 use crate::index;
+use crate::organize;
 use crate::search::{self, Passage};
 
 /// Hits fetched per question; the top 5 distinct documents are picked from these.
@@ -24,12 +26,15 @@ struct Row {
     source: String,
 }
 
-/// The first `TOP_DOCS` distinct sources, in hit order (`dict.fromkeys(...)[:5]` in rag.py).
-fn top_docs(hits: &[Passage]) -> Vec<&str> {
+/// The first `TOP_DOCS` distinct documents, in hit order (`dict.fromkeys(...)[:5]` in rag.py).
+/// A document is named from its OCR `file`, not its `source`: `organize --apply` re-indexes a copy
+/// under `<folder>/<title>` but keeps `file`, so eval rows written before (or after) organizing
+/// still match.
+fn top_docs(hits: &[Passage]) -> Vec<String> {
     let mut seen = HashSet::new();
     hits.iter()
-        .map(|h| h.source.as_str())
-        .filter(|s| seen.insert(*s))
+        .map(|h| chunk::source_name(&h.file))
+        .filter(|s| seen.insert(s.clone()))
         .take(TOP_DOCS)
         .collect()
 }
@@ -95,6 +100,10 @@ struct ClassifyRow {
     #[serde(rename = "type")]
     doc_type: String,
     date: Option<String>,
+    /// The library folder `organize` should file it under (`unsorted` for none). Optional, so
+    /// files written before folders were scored still load; a line without it is not scored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    folder: Option<String>,
 }
 
 /// Compares the database with the expected type and date of each document. Without an eval
@@ -115,6 +124,7 @@ pub fn run_classify(config: &Config) -> anyhow::Result<()> {
                 source: d.path,
                 doc_type: d.meta.doc_type,
                 date: d.meta.date,
+                folder: Some(organize::library_folder(config, d.meta.folder.as_deref())),
             };
             out.push_str(&serde_json::to_string(&row)?);
             out.push('\n');
@@ -133,24 +143,36 @@ pub fn run_classify(config: &Config) -> anyhow::Result<()> {
     let text = std::fs::read_to_string(&path)
         .with_context(|| format!("cannot read {}", path.display()))?;
     let (mut types_ok, mut dates_ok, mut total) = (0, 0, 0);
+    let (mut folders_ok, mut folders_total) = (0, 0);
     for (n, line) in text.lines().filter(|l| !l.trim().is_empty()).enumerate() {
         let want: ClassifyRow = serde_json::from_str(line)
             .with_context(|| format!("{}: bad line {}", path.display(), n + 1))?;
         let got = db::get(&conn, &want.hash)?.map(|d| d.meta);
         let type_ok = got.as_ref().is_some_and(|m| m.doc_type == want.doc_type);
         let date_ok = got.as_ref().is_some_and(|m| m.date == want.date);
+        let folder_ok: Option<bool> = want.folder.as_ref().map(|f| {
+            let stored = got.as_ref().and_then(|m| m.folder.as_deref());
+            got.is_some() && organize::library_folder(config, stored) == *f
+        });
         let mark = |ok| if ok { "ok  " } else { "MISS" };
         println!(
-            "type {}  date {}  {}",
+            "type {}  date {}  folder {}  {}",
             mark(type_ok),
             mark(date_ok),
+            folder_ok.map_or("-   ", mark),
             want.source
         );
+        if let Some(ok) = folder_ok {
+            folders_total += 1;
+            folders_ok += usize::from(ok);
+        }
         total += 1;
         types_ok += usize::from(type_ok);
         dates_ok += usize::from(date_ok);
     }
-    println!("type {types_ok}/{total}, date {dates_ok}/{total}");
+    println!(
+        "type {types_ok}/{total}, date {dates_ok}/{total}, folder {folders_ok}/{folders_total}"
+    );
     Ok(())
 }
 
@@ -162,7 +184,7 @@ mod tests {
         Passage {
             text: String::new(),
             source: source.to_string(),
-            file: String::new(),
+            file: format!("{source}.pdf.text.txt"),
             chunk: 0,
             score: 0.0,
         }
@@ -175,6 +197,16 @@ mod tests {
             .map(hit)
             .collect();
         assert_eq!(top_docs(&hits), ["b", "a", "c", "d", "e"]);
+    }
+
+    #[test]
+    fn top_docs_still_names_an_organized_copy_by_its_ocr_file() {
+        let organized = Passage {
+            source: "Home/Report".into(),
+            file: "scans/b.pdf.vision.txt".into(),
+            ..hit("x")
+        };
+        assert_eq!(top_docs(&[organized]), ["scans/b"]);
     }
 
     #[test]
@@ -214,7 +246,7 @@ mod tests {
         let line = std::fs::read_to_string(&draft).unwrap();
         assert_eq!(
             line,
-            "{\"hash\":\"h1\",\"source\":\"a.pdf\",\"type\":\"bank\",\"date\":\"2025-01-31\"}\n"
+            "{\"hash\":\"h1\",\"source\":\"a.pdf\",\"type\":\"bank\",\"date\":\"2025-01-31\",\"folder\":\"unsorted\"}\n"
         );
         // Scoring the draft against the same database passes; a corrected line can miss.
         run_classify(&config).unwrap();

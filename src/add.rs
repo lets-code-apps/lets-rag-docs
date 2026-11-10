@@ -182,8 +182,8 @@ async fn prepare(config: &Config, embed: &EmbedClient, file: &Path) -> anyhow::R
     let meta: db::Meta = match &existing {
         Some(doc) => doc.meta.clone(),
         None => {
-            let system: String = classify::system_prompt(&config.classify.types);
-            classify::classify_text(&config.llm, &config.classify.types, &system, &text)
+            let system: String = classify::system_prompt(&config.classify);
+            classify::classify_text(&config.llm, &config.classify, &system, &text)
                 .await
                 .map_err(|e| {
                     anyhow!(

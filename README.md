@@ -74,12 +74,31 @@ lets-rag-docs add ~/inbox/invoice.pdf     # one document: copy it in, OCR, class
 lets-rag-docs search "when does the warranty end"   # best-matching passages
 lets-rag-docs eval                        # did the right document come back? (evals/rag.jsonl)
 lets-rag-docs ask "when does the warranty end"      # answer with citations from a local LLM
+lets-rag-docs organize --dry-run          # planned copies into library/<folder>/<date> <title>; changes nothing
+lets-rag-docs organize --apply            # copy originals into the library and re-embed the copies
 lets-rag-docs mcp                         # MCP server over stdio
 ```
 
 `ingest` drops the collection and rebuilds it from `data/ocr/`, so never run `add` and `ingest` at
 the same time: a rebuild that lands in the middle of an `add` can drop the document `add` is
 indexing (the next `ingest` restores it).
+
+`organize --apply` re-indexes each copy under its new `library/<folder>/<date> <title>` name, and the same
+rebuild rule applies to it: `ingest` only knows the paths under `data/ocr/`, so it drops the
+organized sources. Run `ingest`, then `organize --apply` again - that order, never the other way
+round. Evals don't change: `eval` names each hit by its OCR file, which `--apply` keeps, so the
+same `evals/rag.jsonl` scores the same before and after organizing.
+
+File names start with the document's date (`2025-03-14 Repayment schedule.pdf`), so every folder
+sorts oldest to newest, also in a phone's file browser. Words with 8 or more digits (account, card,
+contract and ID numbers) are left out of file names; the database keeps the full title.
+
+Folders come from a fixed list, `[classify] folders` in the config, so documents in different
+languages share one folder (no `Home`, `Dom` and `Дом` side by side). A document whose stored
+folder is not on the list is filed under `unsorted/`. Documents classified before the list
+existed, or before you changed it, need `classify --force` first. Before the first `--apply`,
+check the result: `eval --classify` scores type, date and folder against `evals/classify.jsonl`
+(delete that file to get a fresh draft that includes folders), and read the `--dry-run` output.
 
 Register the MCP server with Claude Code (or point any MCP client at the same command):
 
@@ -101,8 +120,8 @@ Evals are JSON lines: `{"id", "lang", "question", "expect", "source"}`; a questi
   `allow_remote = true`.
 - Document text is treated as data, never as instructions: `ask` fences passages in the prompt and
   the model only writes an answer.
-- Your documents, OCR output and eval questions stay out of git: `docs/`, `data/` and
-  `evals/rag.jsonl` are in `.gitignore`.
+- Your documents, OCR output and eval questions stay out of git: `docs/`, `data/`, `library/` (the
+  copies `organize --apply` files) and `evals/rag.jsonl` are in `.gitignore`.
 
 ## Roadmap
 
@@ -110,7 +129,7 @@ Evals are JSON lines: `{"id", "lang", "question", "expect", "source"}`; a questi
 - [x] `ask`: standalone answers with citations through an OpenAI-compatible API
 - [x] Classification at ingestion: title, type, date, people, issuer into SQLite (the facts layer)
 - [x] `add <file>` and an MCP `add_document` tool (used by Let's Triage Mail)
-- [ ] `organize`: copy documents into a named folder structure on request, re-indexed
+- [x] `organize`: copy documents into a named folder structure on request, re-indexed
 - [ ] Desktop app: browse, search, upload
 - [ ] Synthetic sample documents and a public eval set
 - [ ] Page markers, so citations name the page (today they name the document only)
