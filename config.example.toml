@@ -24,7 +24,7 @@ evals = "evals/rag.jsonl"
 docs_dir = "docs"
 # SQLite database with what `classify` found out about each document.
 db = "data/lets-rag-docs.sqlite"
-# Where `organize --apply` copies originals into, under <folder>/<date> <title>. Keep it separate from
+# Where `organize --apply` copies originals into, under <folder>/<owner>/<year>/. Keep it separate from
 # docs_dir and ocr_dir: `organize` refuses to run if the library is inside (or contains) either,
 # so a filed copy can never be OCR'd or classified as a new original.
 library_dir = "library"
@@ -47,7 +47,7 @@ types = [
   "identity", "medical", "invoice", "receipt", "contract", "loan", "insurance", "tax", "bank",
   "warranty", "certificate", "letter", "other",
 ]
-# The library folders `organize` files copies under (`library/<folder>/<date> <title>`). A fixed list, so
+# The library folders `organize` files copies under (`library/<folder>/...`). A fixed list, so
 # one family's documents in four languages don't end up in "Home", "Dom" and "Дом" side by side.
 # An answer outside this list files the copy under `unsorted/`. After changing it, run
 # `classify --force` so stored documents pick from the new list.
@@ -55,6 +55,15 @@ folders = [
   "Identity", "Health", "Finance", "Taxes", "Insurance", "Home", "Car", "Work", "Education",
   "Purchases", "Letters", "Other",
 ]
+# Whose documents these are: the second folder level (`library/<folder>/<owner>/<year>/`). Family
+# members and the family's own companies, spelled the way the folders should read. Each must be a
+# valid folder name (no "/", no leading or trailing "."). Real names belong in your own config only.
+owners = ["Jan Kowalski", "Anna Kowalska", "Kowalski Studio"]
+# The owner folder for documents that belong to nobody on the list, or to several people.
+shared_owner = "Shared"
+# The language for titles and matters in file names, whatever the document's language.
+# Leave it out to keep each document's own language.
+# language = "Polish"
 
 [ocr]
 # How `add <file>` runs OCR: it shells out to this Python script (OCR stays Python for now).

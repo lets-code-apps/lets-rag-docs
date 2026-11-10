@@ -1,5 +1,8 @@
-//! `lets-rag-docs organize`: copy each classified original into a tidy `library/<folder>/<title>`
-//! and re-index the copy under its new source. `--dry-run` prints the plan and changes nothing;
+//! `lets-rag-docs organize`: copy each classified original into a tidy
+//! `library/<folder>/<owner>/<year>/<date> <matter> - <title>` and re-index the copy under its new
+//! source. When a document's planned place changes (re-classified, new layout), the copy filed
+//! before is moved there: a new copy is written first, then the old one is removed - only if it is
+//! inside the library and still holds the original's bytes (an edited copy is left alone). `--dry-run` prints the plan and changes nothing;
 //! `--apply` copies (never moves or renames the originals) and re-embeds the copies.
 //!
 //! The library path is built from segments that are validated or sanitised by construction
@@ -47,12 +50,15 @@ struct Entry {
     ocr_abs: PathBuf,
     original: PathBuf,
     hash: String,
-    folder: String,
+    /// `folder/owner[/year]`, relative to the library: every segment validated or derived.
+    dir: String,
+    /// Where `--apply` filed this document last time (`library_path` in the database), if any.
+    previous: Option<PathBuf>,
     /// The sanitised title (before any collision suffix) and the extension the copy gets: planning
     /// and apply both derive their candidate names from these two fields.
     name: String,
     ext_suffix: String,
-    /// `folder/stem.ext`, relative to the library: the name `resolve_target` picked, checked by
+    /// `dir/stem.ext`, relative to the library: the name `resolve_target` picked, checked by
     /// `inside_library` before a write.
     rel: PathBuf,
     meta: db::Meta,
@@ -64,10 +70,12 @@ struct Counts {
     /// What the plan would do.
     would_copy: usize,
     would_reuse: usize,
+    would_move: usize,
     /// What `--apply` did. A copy that failed counts as failed only and never as copied, so an
     /// operator can read the totals and know whether a retry is needed.
     copied: usize,
     already: usize,
+    moved: usize,
     failed: usize,
     duplicate: usize,
     not_classified: usize,
@@ -104,6 +112,10 @@ pub async fn run(config: &Config, dry_run: bool, apply: bool) -> anyhow::Result<
             );
             return Ok(());
         }
+        if !db::is_current(&conn)? {
+            println!("run `classify --force` first: the database predates owners and matters");
+            return Ok(());
+        }
         let plan = build_plan(config, &conn)?;
         for line in plan.lines {
             println!("{}", line);
@@ -122,7 +134,7 @@ pub async fn run(config: &Config, dry_run: bool, apply: bool) -> anyhow::Result<
     let qdrant = index::connect(&config.qdrant.url)?;
     let mut counts = plan.counts.clone();
     for entry in plan.entries {
-        let applied = apply_entry(config, &embed, Some(&qdrant), entry).await?;
+        let applied = apply_entry(config, &embed, Some(&qdrant), Some(&conn), entry).await?;
         tally(&mut counts, applied);
     }
     println!("{}", apply_line(&counts));
@@ -138,6 +150,31 @@ pub(crate) fn library_folder(config: &Config, folder: Option<&str>) -> String {
             f.to_string()
         }
         _ => classify::UNSORTED.to_string(),
+    }
+}
+
+/// The owner folder: a configured owner, else `shared_owner`. Same distrust of the row as
+/// `library_folder`; shared with `eval --classify`.
+pub(crate) fn library_owner(config: &Config, owner: Option<&str>) -> String {
+    let c = &config.classify;
+    match owner {
+        Some(o) if classify::safe_folder(o) && c.owners.iter().any(|x| x == o) => o.to_string(),
+        _ if classify::safe_folder(&c.shared_owner) => c.shared_owner.clone(),
+        _ => classify::UNSORTED.to_string(),
+    }
+}
+
+/// `folder/owner/year` for a document; without a valid date the year level is left out, so an
+/// undated document sits right in its owner's folder.
+fn library_dir_for(config: &Config, meta: &db::Meta) -> String {
+    let base = format!(
+        "{}/{}",
+        library_folder(config, meta.folder.as_deref()),
+        library_owner(config, meta.owner.as_deref())
+    );
+    match meta.date.as_deref().filter(|d| classify::is_date(d)) {
+        Some(date) => format!("{base}/{}", &date[..4]),
+        None => base,
     }
 }
 
@@ -186,8 +223,10 @@ fn build_plan(config: &Config, conn: &Connection) -> anyhow::Result<Built> {
     let mut counts = Counts {
         would_copy: 0,
         would_reuse: 0,
+        would_move: 0,
         copied: 0,
         already: 0,
+        moved: 0,
         failed: 0,
         duplicate: 0,
         not_classified: 0,
@@ -238,7 +277,11 @@ fn build_plan(config: &Config, conn: &Connection) -> anyhow::Result<Built> {
         }
         first_by_hash.insert(hash.clone(), rel.clone());
 
-        let folder: String = library_folder(config, meta.folder.as_deref());
+        let dir: String = library_dir_for(config, &meta);
+        // Untrusted like the rest of the row: only a plain relative path inside the library counts.
+        let previous: Option<PathBuf> = db::library_path(conn, &hash)?
+            .map(PathBuf::from)
+            .filter(|p| inside_library(library, p));
         let name = file_name(&meta, hash.to_string());
         let ext = safe_ext(&original);
         let ext_suffix: String = match ext.as_ref() {
@@ -247,21 +290,28 @@ fn build_plan(config: &Config, conn: &Connection) -> anyhow::Result<Built> {
         };
 
         let (stem, already, ok) =
-            resolve_target(library, &folder, &name, &ext_suffix, &hash, &claimed);
+            resolve_target(library, &dir, &name, &ext_suffix, &hash, &claimed);
         if !ok {
             counts.failed += 1;
             continue;
         }
-        claimed.insert(target_key(&folder, &stem).to_lowercase());
-        let rel_path: PathBuf = rel_for(&folder, &stem, &ext_suffix);
+        claimed.insert(target_key(&dir, &stem).to_lowercase());
+        let rel_path: PathBuf = rel_for(&dir, &stem, &ext_suffix);
+        let moving: Option<&PathBuf> = previous
+            .as_ref()
+            .filter(|p| **p != rel_path && library.join(p).exists());
 
         if already {
-            lines.push(format!(
-                "already there  {orel} -> {folder}/{stem}{ext_suffix}"
-            ));
+            lines.push(format!("already there  {orel} -> {dir}/{stem}{ext_suffix}"));
             counts.would_reuse += 1;
+        } else if let Some(old) = moving {
+            lines.push(format!(
+                "move  {} -> {dir}/{stem}{ext_suffix}",
+                old.display()
+            ));
+            counts.would_move += 1;
         } else {
-            lines.push(format!("copy  {orel} -> {folder}/{stem}{ext_suffix}"));
+            lines.push(format!("copy  {orel} -> {dir}/{stem}{ext_suffix}"));
             counts.would_copy += 1;
         }
         entry_by_hash.insert(hash.clone(), entries.len());
@@ -270,7 +320,8 @@ fn build_plan(config: &Config, conn: &Connection) -> anyhow::Result<Built> {
             ocr_abs: path.to_path_buf(),
             original,
             hash,
-            folder,
+            dir,
+            previous,
             name,
             ext_suffix,
             rel: rel_path,
@@ -347,6 +398,8 @@ fn rel_for(folder: &str, stem: &str, ext_suffix: &str) -> PathBuf {
 enum Applied {
     Copied,
     Reused,
+    /// Copied to its new place, and the copy filed before was removed.
+    Moved,
     Failed,
 }
 
@@ -361,19 +414,21 @@ struct Filed {
 /// Does one planned entry: create the folder (refusing a symlink), copy the bytes owner-only, then
 /// embed and re-index under the source the copy actually landed under. Embed and Qdrant errors abort
 /// the whole run (the service is down, so continuing is pointless); a per-file copy or folder error
-/// is just counted and the run moves on. The `Option` `qdrant` is a seam: tests without a Qdrant pass
-/// `None` and still exercise the copy and the embed.
+/// is just counted and the run moves on. The `Option`s are seams: tests without a Qdrant or a
+/// database pass `None` and still exercise the copy and the embed.
 async fn apply_entry(
     config: &Config,
     embed: &EmbedClient,
     qdrant: Option<&Qdrant>,
+    conn: Option<&Connection>,
     entry: Entry,
 ) -> anyhow::Result<Applied> {
-    debug_assert!(inside_library(&config.paths.library_dir, &entry.rel));
-    if !ensure_folder(&config.paths.library_dir, &entry.folder) {
+    let library = &config.paths.library_dir;
+    debug_assert!(inside_library(library, &entry.rel));
+    if !ensure_folder(library, &entry.dir) {
         tracing::warn!(
             "refusing to write into a non-directory or symlinked folder {}",
-            entry.folder
+            entry.dir
         );
         return Ok(Applied::Failed);
     }
@@ -396,11 +451,55 @@ async fn apply_entry(
         index::upsert(client, &config.qdrant.collection, re.points).await?;
     }
     tracing::debug!("re-indexed {} under {}", entry.ocr_rel, re.source);
-    Ok(if filed.wrote {
-        Applied::Copied
-    } else {
-        Applied::Reused
+    // Record the new place before removing the old copy: a crash in between leaves a stray copy,
+    // never a database pointing at nothing.
+    if let Some(conn) = conn {
+        db::set_library_path(conn, &entry.hash, &filed.rel.to_string_lossy())?;
+    }
+    let moved: bool = match &entry.previous {
+        Some(old) if *old != filed.rel => remove_old_copy(library, old, &entry.hash),
+        _ => false,
+    };
+    Ok(match (filed.wrote, moved) {
+        (_, true) => Applied::Moved,
+        (true, false) => Applied::Copied,
+        (false, false) => Applied::Reused,
     })
+}
+
+/// Removes the copy filed at `old` (relative to the library) after the document moved, then the
+/// folders that became empty. Only a plain path inside the library, and only while the file still
+/// holds the original's bytes: a copy someone edited is theirs now and stays.
+fn remove_old_copy(library: &Path, old: &Path, hash: &str) -> bool {
+    if !inside_library(library, old) {
+        return false;
+    }
+    let path: PathBuf = library.join(old);
+    match classify::hash_file(&path) {
+        Ok(seen) if seen == hash => {}
+        Ok(_) => {
+            tracing::warn!(
+                "left {} in place: it was edited after filing",
+                old.display()
+            );
+            return false;
+        }
+        // Already gone (removed by hand, or iCloud-evicted): nothing to move.
+        Err(_) => return false,
+    }
+    if std::fs::remove_file(&path).is_err() {
+        tracing::warn!("could not remove the old copy {}", old.display());
+        return false;
+    }
+    // `remove_dir` only removes an empty folder, so this stops at the first one still in use.
+    let mut dir: Option<&Path> = old.parent();
+    while let Some(d) = dir.filter(|d| !d.as_os_str().is_empty()) {
+        if std::fs::remove_dir(library.join(d)).is_err() {
+            break;
+        }
+        dir = d.parent();
+    }
+    true
 }
 
 /// Embeds one document's OCR text under its new source and builds the points to write. Split out
@@ -416,7 +515,7 @@ struct Reindex {
 async fn reembed(embed: &EmbedClient, entry: &Entry, filed: &Filed) -> anyhow::Result<Reindex> {
     let text = std::fs::read_to_string(&entry.ocr_abs)
         .with_context(|| format!("cannot read {}", entry.ocr_abs.display()))?;
-    let source: String = format!("{}/{}", entry.folder, filed.stem);
+    let source: String = format!("{}/{}", entry.dir, filed.stem);
     let parts = chunk::chunks(&text);
     let inputs: Vec<String> = parts.iter().map(|c| format!("{source}\n{c}")).collect();
     let embeddings = embed.embed(&inputs).await?;
@@ -455,7 +554,7 @@ async fn reembed(embed: &EmbedClient, entry: &Entry, filed: &Filed) -> anyhow::R
 fn copy_with_probe(library: &Path, entry: &Entry) -> Option<Filed> {
     for n in 1..=COLLISION_CAP {
         let stem: String = stem_for(&entry.name, n);
-        let target: PathBuf = candidate_path(library, &entry.folder, &stem, &entry.ext_suffix);
+        let target: PathBuf = candidate_path(library, &entry.dir, &stem, &entry.ext_suffix);
         match copy_attempt(entry, &target) {
             Attempt::Wrote => return Some(filed_for(library, entry, &stem, true)),
             Attempt::Reused => return Some(filed_for(library, entry, &stem, false)),
@@ -473,7 +572,7 @@ fn copy_with_probe(library: &Path, entry: &Entry) -> Option<Filed> {
 
 /// The `Filed` for one candidate name.
 fn filed_for(library: &Path, entry: &Entry, stem: &str, wrote: bool) -> Filed {
-    let rel: PathBuf = rel_for(&entry.folder, stem, &entry.ext_suffix);
+    let rel: PathBuf = rel_for(&entry.dir, stem, &entry.ext_suffix);
     debug_assert!(inside_library(library, &rel));
     Filed {
         stem: stem.to_string(),
@@ -550,26 +649,39 @@ fn remove_partial(target: &Path) {
     }
 }
 
-/// Creates `<library>/<folder>` but refuses if it is not a real directory: a planted symlink must not
-/// redirect writes outside the library.
-fn ensure_folder(library: &Path, folder: &str) -> bool {
-    let dir: PathBuf = PathBuf::from(format!("{lib}/{folder}", lib = library.display()));
-    if std::fs::create_dir_all(&dir).is_err() {
+/// Creates `<library>/<dir>` one level at a time and refuses if any level is not a real directory:
+/// a planted symlink anywhere on the way (`Home` -> `/etc`) must not redirect writes outside.
+fn ensure_folder(library: &Path, dir: &str) -> bool {
+    if std::fs::create_dir_all(library).is_err() {
         return false;
     }
-    match std::fs::symlink_metadata(&dir) {
+    let mut path: PathBuf = library.to_path_buf();
+    for part in Path::new(dir).components() {
+        let Component::Normal(name) = part else {
+            return false;
+        };
+        path.push(name);
+        match std::fs::create_dir(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(_) => return false,
+        }
         // `symlink_metadata` does not follow links, so a symlink reports as a symlink, not a directory.
-        Ok(st) => st.is_dir() && !st.is_symlink(),
-        Err(_) => false,
+        match std::fs::symlink_metadata(&path) {
+            Ok(st) if st.is_dir() && !st.is_symlink() => {}
+            _ => return false,
+        }
     }
+    true
 }
 
 /// What the plan would do.
 fn plan_line(c: &Counts) -> String {
     format!(
-        "planned {}: {} to copy, {} already there, {} failed, {} duplicate, {} not classified, {} missing original",
-        c.would_copy + c.would_reuse,
+        "planned {}: {} to copy, {} to move, {} already there, {} failed, {} duplicate, {} not classified, {} missing original",
+        c.would_copy + c.would_move + c.would_reuse,
         c.would_copy,
+        c.would_move,
         c.would_reuse,
         c.failed,
         c.duplicate,
@@ -581,9 +693,10 @@ fn plan_line(c: &Counts) -> String {
 /// What `--apply` did: only copies that really landed count as copied.
 fn apply_line(c: &Counts) -> String {
     format!(
-        "organized {}: {} copied, {} already there, {} failed, {} duplicate, {} not classified, {} missing original",
-        c.copied + c.already,
+        "organized {}: {} copied, {} moved, {} already there, {} failed, {} duplicate, {} not classified, {} missing original",
+        c.copied + c.moved + c.already,
         c.copied,
+        c.moved,
         c.already,
         c.failed,
         c.duplicate,
@@ -597,14 +710,21 @@ fn tally(counts: &mut Counts, applied: Applied) {
     match applied {
         Applied::Copied => counts.copied += 1,
         Applied::Reused => counts.already += 1,
+        Applied::Moved => counts.moved += 1,
         Applied::Failed => counts.failed += 1,
     }
 }
 
-/// `YYYY-MM-DD Title`: the date first, so a folder lists oldest to newest in any file browser (the
-/// phone's Files app included). The date is re-checked: the database row is data, not trusted.
+/// `YYYY-MM-DD Matter - Title`: the date first, so a folder lists oldest to newest in any file
+/// browser (the phone's Files app included), and the matter so the name still says what it is
+/// about in search results and attachments, where the folder is not shown. The date is re-checked:
+/// the database row is data, not trusted.
 fn file_name(meta: &db::Meta, hash: String) -> String {
     let title: String = safe_title(meta.title.as_ref(), hash);
+    let title: String = match meta.matter.clone().map(sanitise).filter(|m| !m.is_empty()) {
+        Some(matter) => sanitise(format!("{matter} - {title}")),
+        None => title,
+    };
     match meta.date.as_deref().filter(|d| classify::is_date(d)) {
         Some(date) => format!("{date} {title}"),
         None => title,
@@ -774,6 +894,8 @@ mod tests {
             people: Vec::new(),
             issuer: None,
             folder: folder.map(|s| s.to_string()),
+            owner: None,
+            matter: None,
         };
         db::put(
             conn,
@@ -784,6 +906,13 @@ mod tests {
             },
         )
         .unwrap();
+    }
+
+    // Changes the stored metadata of the only document, as a `classify --force` would.
+    fn reclassify(conn: &Connection, change: impl FnOnce(&mut db::Meta)) {
+        let mut doc = db::all(conn).unwrap().remove(0);
+        change(&mut doc.meta);
+        db::put(conn, &doc).unwrap();
     }
 
     // Embed mock that answers with real vectors only when every text begins with `prefix`; any other
@@ -872,11 +1001,11 @@ mod tests {
         let plan = build_plan(&f.config, &conn).unwrap();
         assert!(plan.entries.len() == 1);
         let e = plan.entries.first().unwrap();
-        assert_eq!(e.folder, "Home");
-        assert_eq!(e.rel, PathBuf::from("Home/Report.pdf"));
+        assert_eq!(e.dir, "Home/Shared");
+        assert_eq!(e.rel, PathBuf::from("Home/Shared/Report.pdf"));
         assert_eq!(
             plan_line(&plan.counts),
-            "planned 1: 1 to copy, 0 already there, 0 failed, 0 duplicate, 0 not classified, 0 missing original",
+            "planned 1: 1 to copy, 0 to move, 0 already there, 0 failed, 0 duplicate, 0 not classified, 0 missing original",
         );
     }
 
@@ -902,8 +1031,11 @@ mod tests {
         );
         let plan = build_plan(&f.config, &conn).unwrap();
         assert!(plan.entries.len() == 2);
-        assert_eq!(plan.entries[0].rel, PathBuf::from("Home/Report.pdf"));
-        assert_eq!(plan.entries[1].rel, PathBuf::from("Home/Report (2).pdf"));
+        assert_eq!(plan.entries[0].rel, PathBuf::from("Home/Shared/Report.pdf"));
+        assert_eq!(
+            plan.entries[1].rel,
+            PathBuf::from("Home/Shared/Report (2).pdf")
+        );
     }
 
     #[test]
@@ -928,7 +1060,10 @@ mod tests {
             Some("Home"),
         );
         let plan = build_plan(&f.config, &conn).unwrap();
-        assert_eq!(plan.entries[1].rel, PathBuf::from("Home/report (2).pdf"));
+        assert_eq!(
+            plan.entries[1].rel,
+            PathBuf::from("Home/Shared/report (2).pdf")
+        );
     }
 
     #[test]
@@ -952,8 +1087,11 @@ mod tests {
             Some("Home"),
         );
         let plan = build_plan(&f.config, &conn).unwrap();
-        assert_eq!(plan.entries[0].rel, PathBuf::from("Home/Report.pdf"));
-        assert_eq!(plan.entries[1].rel, PathBuf::from("Home/Report (2).jpg"));
+        assert_eq!(plan.entries[0].rel, PathBuf::from("Home/Shared/Report.pdf"));
+        assert_eq!(
+            plan.entries[1].rel,
+            PathBuf::from("Home/Shared/Report (2).jpg")
+        );
     }
 
     #[test]
@@ -1005,8 +1143,8 @@ mod tests {
             Some("Дом"),
         );
         let plan = build_plan(&f.config, &conn).unwrap();
-        assert_eq!(plan.entries[0].folder, classify::UNSORTED);
-        assert_eq!(plan.entries[1].folder, classify::UNSORTED);
+        assert_eq!(plan.entries[0].dir, "unsorted/Shared");
+        assert_eq!(plan.entries[1].dir, "unsorted/Shared");
         assert!(inside_library(
             &f.config.paths.library_dir,
             &plan.entries[0].rel
@@ -1022,6 +1160,8 @@ mod tests {
             people: vec![],
             issuer: None,
             folder: None,
+            owner: None,
+            matter: None,
         };
         let hash = "deadbeefcafe12345678".to_string();
         let schedule = meta("Repayment Schedule 1234567890123456", Some("2025-03-14"));
@@ -1121,7 +1261,7 @@ mod tests {
         );
         let plan = build_plan(&f.config, &conn).unwrap();
         let entry = plan.entries.first().unwrap();
-        assert!(ensure_folder(&f.config.paths.library_dir, &entry.folder));
+        assert!(ensure_folder(&f.config.paths.library_dir, &entry.dir));
         let filed = copy_with_probe(&f.config.paths.library_dir, entry).unwrap();
         assert!(filed.wrote);
         let target = f.config.paths.library_dir.join(&filed.rel);
@@ -1182,7 +1322,10 @@ mod tests {
             plan2.lines[0].starts_with("already there"),
             "same bytes at the target means already there",
         );
-        assert_eq!(plan2.entries[0].rel, PathBuf::from("Home/Report.pdf"));
+        assert_eq!(
+            plan2.entries[0].rel,
+            PathBuf::from("Home/Shared/Report.pdf")
+        );
     }
 
     #[test]
@@ -1208,7 +1351,150 @@ mod tests {
             !ensure_folder(&f.config.paths.library_dir, "Home"),
             "a symlinked folder is refused"
         );
+        assert!(
+            !ensure_folder(&f.config.paths.library_dir, "Home/Shared/2025"),
+            "a symlink on the way to a deeper folder is refused too"
+        );
         assert_eq!(fs::read_dir(other.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn layout_is_folder_owner_year_then_dated_name() {
+        let mut f = fixture();
+        f.config.classify.owners = vec!["Jan Kowalski".into()];
+        let conn = open(&f);
+        add_doc(
+            &f,
+            &conn,
+            "one.pdf.vision.txt",
+            "abc",
+            Some("Invoice"),
+            Some("Home"),
+        );
+        reclassify(&conn, |m| {
+            m.owner = Some("Jan Kowalski".into());
+            m.date = Some("2025-03-14".into());
+            m.matter = Some("Office chair".into());
+        });
+        let plan = build_plan(&f.config, &conn).unwrap();
+        assert_eq!(
+            plan.entries[0].rel,
+            PathBuf::from("Home/Jan Kowalski/2025/2025-03-14 Office chair - Invoice.pdf")
+        );
+        // An owner no longer on the list falls back to the shared folder.
+        f.config.classify.owners.clear();
+        let plan = build_plan(&f.config, &conn).unwrap();
+        assert_eq!(plan.entries[0].dir, "Home/Shared/2025");
+    }
+
+    // Files the only document once (no owner yet, so under `Home/Shared`) and returns the library.
+    async fn file_once(f: &Fixture, conn: &Connection, embed: &EmbedClient) -> PathBuf {
+        let entry = build_plan(&f.config, conn).unwrap().entries.remove(0);
+        let applied = apply_entry(&f.config, embed, None, Some(conn), entry)
+            .await
+            .unwrap();
+        assert_eq!(applied, Applied::Copied);
+        let lib = f.config.paths.library_dir.clone();
+        assert!(lib.join("Home/Shared/Report.pdf").exists());
+        lib
+    }
+
+    #[tokio::test]
+    async fn a_reclassified_document_moves_its_copy() {
+        let mut f = fixture();
+        f.config.classify.owners = vec!["Jan Kowalski".into()];
+        let conn = open(&f);
+        add_doc(
+            &f,
+            &conn,
+            "one.pdf.vision.txt",
+            "abc",
+            Some("Report"),
+            Some("Home"),
+        );
+        let server = embed_ok_mock().await;
+        let embed = EmbedClient::new(&server.uri());
+        let lib = file_once(&f, &conn, &embed).await;
+
+        reclassify(&conn, |m| m.owner = Some("Jan Kowalski".into()));
+        let plan = build_plan(&f.config, &conn).unwrap();
+        assert_eq!(
+            plan.lines[0],
+            "move  Home/Shared/Report.pdf -> Home/Jan Kowalski/Report.pdf"
+        );
+        let entry = plan.entries.into_iter().next().unwrap();
+        let applied = apply_entry(&f.config, &embed, None, Some(&conn), entry)
+            .await
+            .unwrap();
+        assert_eq!(applied, Applied::Moved);
+        assert!(lib.join("Home/Jan Kowalski/Report.pdf").exists());
+        assert!(
+            !lib.join("Home/Shared").exists(),
+            "the emptied folder is gone"
+        );
+        assert!(lib.join("Home").exists(), "a folder still in use stays");
+        let hash: String = db::all(&conn).unwrap()[0].hash.clone();
+        assert_eq!(
+            db::library_path(&conn, &hash).unwrap().as_deref(),
+            Some("Home/Jan Kowalski/Report.pdf")
+        );
+        assert_eq!(
+            fs::read_to_string(f.config.paths.docs_dir.join("one.pdf")).unwrap(),
+            "abc",
+            "the original is never touched"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_edited_old_copy_is_left_alone() {
+        let mut f = fixture();
+        f.config.classify.owners = vec!["Jan Kowalski".into()];
+        let conn = open(&f);
+        add_doc(
+            &f,
+            &conn,
+            "one.pdf.vision.txt",
+            "abc",
+            Some("Report"),
+            Some("Home"),
+        );
+        let server = embed_ok_mock().await;
+        let embed = EmbedClient::new(&server.uri());
+        let lib = file_once(&f, &conn, &embed).await;
+        fs::write(lib.join("Home/Shared/Report.pdf"), "my notes").unwrap();
+
+        reclassify(&conn, |m| m.owner = Some("Jan Kowalski".into()));
+        let entry = build_plan(&f.config, &conn).unwrap().entries.remove(0);
+        let applied = apply_entry(&f.config, &embed, None, Some(&conn), entry)
+            .await
+            .unwrap();
+        assert_eq!(applied, Applied::Copied, "a new copy, but nothing removed");
+        assert_eq!(
+            fs::read_to_string(lib.join("Home/Shared/Report.pdf")).unwrap(),
+            "my notes"
+        );
+        assert!(lib.join("Home/Jan Kowalski/Report.pdf").exists());
+    }
+
+    #[test]
+    fn a_tampered_library_path_is_ignored() {
+        let f = fixture();
+        let conn = open(&f);
+        add_doc(
+            &f,
+            &conn,
+            "one.pdf.vision.txt",
+            "abc",
+            Some("Report"),
+            Some("Home"),
+        );
+        let hash: String = db::all(&conn).unwrap()[0].hash.clone();
+        for bad in ["../../outside.pdf", "/etc/passwd"] {
+            db::set_library_path(&conn, &hash, bad).unwrap();
+            let plan = build_plan(&f.config, &conn).unwrap();
+            assert_eq!(plan.entries[0].previous, None, "{bad}");
+            assert!(plan.lines[0].starts_with("copy  "), "{}", plan.lines[0]);
+        }
     }
 
     #[test]
@@ -1332,10 +1618,12 @@ mod tests {
         let entry = plan.entries.into_iter().next().unwrap();
         let target = f.config.paths.library_dir.join(&entry.rel);
         // Every embedded chunk must start with the library name, not the old OCR source.
-        let prefix: String = format!("{}/{}\n", entry.folder, entry.name);
+        let prefix: String = format!("{}/{}\n", entry.dir, entry.name);
         let server = embed_prefix_mock(&prefix).await;
         let embed = EmbedClient::new(&server.uri());
-        let applied = apply_entry(&f.config, &embed, None, entry).await.unwrap();
+        let applied = apply_entry(&f.config, &embed, None, None, entry)
+            .await
+            .unwrap();
         assert_eq!(applied, Applied::Copied);
         assert!(
             fs::exists(&target).unwrap_or(false),
@@ -1377,7 +1665,7 @@ mod tests {
             wrote: true,
         };
         let re = reembed(&embed, &entry, &filed).await.unwrap();
-        assert_eq!(re.source, "Home/Report");
+        assert_eq!(re.source, "Home/Shared/Report");
         assert_eq!(re.delete.len(), 2);
         assert_eq!(re.delete[0], "one.pdf.vision.txt");
         assert_eq!(re.delete[1], "two.pdf.vision.txt");
@@ -1401,7 +1689,7 @@ mod tests {
         )
         .id;
         assert_eq!(p.id, expected_id);
-        assert_eq!(payload_string(&p, "source"), "Home/Report");
+        assert_eq!(payload_string(&p, "source"), "Home/Shared/Report");
         assert_eq!(payload_string(&p, "file"), "one.pdf.vision.txt");
         assert_eq!(payload_string(&p, "type"), "invoice");
     }
@@ -1426,13 +1714,19 @@ mod tests {
         let original = entry.original.clone();
         fs::create_dir_all(planned.parent().unwrap()).unwrap();
         fs::write(&planned, "someone else's file").unwrap();
-        let prefix: String = format!("{}/{} (2)\n", entry.folder, entry.name);
+        let prefix: String = format!("{}/{} (2)\n", entry.dir, entry.name);
         let server = embed_prefix_mock(&prefix).await;
         let embed = EmbedClient::new(&server.uri());
-        let applied = apply_entry(&f.config, &embed, None, entry).await.unwrap();
+        let applied = apply_entry(&f.config, &embed, None, None, entry)
+            .await
+            .unwrap();
         assert_eq!(applied, Applied::Copied);
         assert_eq!(fs::read_to_string(&planned).unwrap(), "someone else's file");
-        let moved = f.config.paths.library_dir.join("Home/Report (2).pdf");
+        let moved = f
+            .config
+            .paths
+            .library_dir
+            .join("Home/Shared/Report (2).pdf");
         assert!(
             fs::exists(&moved).unwrap_or(false),
             "the copy took the next free name"
@@ -1458,7 +1752,7 @@ mod tests {
             Some("Report"),
             Some("Home"),
         );
-        let planned = f.config.paths.library_dir.join("Home/Report.pdf");
+        let planned = f.config.paths.library_dir.join("Home/Shared/Report.pdf");
         fs::create_dir_all(planned.parent().unwrap()).unwrap();
         fs::write(&planned, "abc").unwrap();
         let plan = build_plan(&f.config, &conn).unwrap();
@@ -1470,10 +1764,12 @@ mod tests {
         let entry = plan.entries.into_iter().next().unwrap();
         fs::write(&planned, "swapped in by someone else").unwrap();
 
-        let prefix: String = format!("{}/{} (2)\n", entry.folder, entry.name);
+        let prefix: String = format!("{}/{} (2)\n", entry.dir, entry.name);
         let server = embed_prefix_mock(&prefix).await;
         let embed = EmbedClient::new(&server.uri());
-        let applied = apply_entry(&f.config, &embed, None, entry).await.unwrap();
+        let applied = apply_entry(&f.config, &embed, None, None, entry)
+            .await
+            .unwrap();
         assert_eq!(
             applied,
             Applied::Copied,
@@ -1483,7 +1779,11 @@ mod tests {
             fs::read_to_string(&planned).unwrap(),
             "swapped in by someone else"
         );
-        let moved = f.config.paths.library_dir.join("Home/Report (2).pdf");
+        let moved = f
+            .config
+            .paths
+            .library_dir
+            .join("Home/Shared/Report (2).pdf");
         assert!(
             fs::exists(&moved).unwrap_or(false),
             "the copy took the next free name"
@@ -1512,7 +1812,9 @@ mod tests {
         let target = f.config.paths.library_dir.join(&entry.rel);
         fs::create_dir_all(&target).unwrap();
         let embed = EmbedClient::new(&f.config.embed.url);
-        let applied = apply_entry(&f.config, &embed, None, entry).await.unwrap();
+        let applied = apply_entry(&f.config, &embed, None, None, entry)
+            .await
+            .unwrap();
         assert_eq!(applied, Applied::Failed);
         let mut counts = plan.counts.clone();
         tally(&mut counts, applied);
@@ -1520,7 +1822,7 @@ mod tests {
         assert_eq!(counts.failed, 1);
         assert_eq!(
             apply_line(&counts),
-            "organized 0: 0 copied, 0 already there, 1 failed, 0 duplicate, 0 not classified, 0 missing original",
+            "organized 0: 0 copied, 0 moved, 0 already there, 1 failed, 0 duplicate, 0 not classified, 0 missing original",
         );
     }
 
@@ -1574,7 +1876,7 @@ mod tests {
         assert_eq!(count_points(&client, &f.config.qdrant.collection).await, 2);
         let entry = plan.entries.into_iter().next().unwrap();
         assert_eq!(entry.ocr_rel, "one.pdf.vision.txt");
-        let applied = apply_entry(&f.config, &embed, Some(&client), entry)
+        let applied = apply_entry(&f.config, &embed, Some(&client), None, entry)
             .await
             .unwrap();
         assert_eq!(applied, Applied::Copied);
