@@ -65,7 +65,7 @@ enum Command {
         file: PathBuf,
     },
     #[group(required = true, multiple = false)]
-    /// Copy each classified original into `library/<folder>/<date> <title>` and re-index the copy
+    /// Copy each classified original into `library/<folder>/<owner>/<year>/` and re-index the copy
     Organize {
         /// Print the planned copies and change nothing
         #[arg(long)]
