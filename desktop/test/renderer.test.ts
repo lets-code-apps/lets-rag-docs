@@ -7,15 +7,40 @@ const RENDERER = join(import.meta.dirname, '..', 'renderer');
 
 test('renderer has exactly the ask and filing nav entries', () => {
 	const html = readFileSync(join(RENDERER, 'index.html'), 'utf8');
-	assert.ok(html.includes('id="askView"'));
-	assert.ok(html.includes('id="filingView"'));
-	assert.ok(html.includes('>ask</button>'));
-	assert.ok(html.includes('>filing</button>'));
+	const sections = [...html.matchAll(/data-section="([a-z]+)"/g)].map((match) => match[1]);
+	assert.deepEqual(sections, ['ask', 'filing']);
+	// Each entry has its 18px design glyph left of the label: search for ask, archive for filing.
+	assert.ok(html.includes('<use href="#i-search"></use></svg><span>ask</span></button>'));
+	assert.ok(html.includes('<use href="#i-archive"></use></svg><span>filing</span></button>'));
+});
+
+test('every inline glyph has an explicit size', () => {
+	const html = readFileSync(join(RENDERER, 'index.html'), 'utf8');
+	const uses = [...html.matchAll(/<svg class="icon"([^>]*)>/g)];
+	assert.ok(uses.length > 5);
+	for (const [, attrs] of uses) assert.match(attrs, /width="(16|18|20)" height="(16|18|20)"/);
+	const js = readFileSync(join(RENDERER, 'app.js'), 'utf8');
+	assert.ok(js.includes("svg.setAttribute('width', String(px))"));
+});
+
+test('the ask form sits at the bottom of the conversation, the AppBar holds only the emblem', () => {
+	const html = readFileSync(join(RENDERER, 'index.html'), 'utf8');
+	const appBar = html.slice(html.indexOf('<header id="appBar"'), html.indexOf('</header>'));
+	assert.equal(appBar.includes('input'), false);
+	assert.ok(appBar.includes('class="emblem"'));
+	const conversation = html.slice(html.indexOf('<main class="conversation">'), html.indexOf('</main>'));
+	assert.ok(conversation.indexOf('id="conversationPane"') < conversation.indexOf('id="askForm"'));
+	assert.ok(conversation.includes('id="askInput"'));
+});
+
+test('the page has no demo or sample mode', () => {
+	const js = readFileSync(join(RENDERER, 'app.js'), 'utf8') + readFileSync(join(RENDERER, 'model.js'), 'utf8');
+	for (const token of ['demo', 'SAMPLE', 'location.hash', 'Acme']) assert.equal(js.includes(token), false, token);
 });
 
 test('renderer has the design surfaces needed for ask and filing', () => {
 	const html = readFileSync(join(RENDERER, 'index.html'), 'utf8');
-	for (const id of ['appBar', 'askInput', 'askButton', 'libraryRows', 'conversationPane', 'citations', 'filingScreen', 'listPane', 'detailPane', 'viewSwitch', 'filingRows', 'pathTokens', 'noticeCard', 'movesSection', 'nameInput', 'saveButton', 'removeButton']) {
+	for (const id of ['appBar', 'askForm', 'askInput', 'askButton', 'libraryRows', 'conversationPane', 'citations', 'filingScreen', 'listPane', 'addButton', 'detailPane', 'viewSwitch', 'filingRows', 'pathTokens', 'noticeCard', 'noticePill', 'resortButton', 'movesSection', 'applyButton', 'showAllButton', 'laterButton', 'nameInput', 'nameHelper', 'saveButton', 'removeButton']) {
 		assert.ok(html.includes(`id="${id}"`), `renderer missing #${id}`);
 	}
 });
@@ -43,7 +68,7 @@ test('renderer stacks columns under 480px', () => {
 });
 
 test('renderer uses no HTML injection sinks', () => {
-	const js = readFileSync(join(RENDERER, 'app.js'), 'utf8');
+	const js = readFileSync(join(RENDERER, 'app.js'), 'utf8') + readFileSync(join(RENDERER, 'model.js'), 'utf8');
 	for (const token of ['innerHTML', 'outerHTML', 'insertAdjacentHTML', 'document.write']) {
 		assert.equal(js.includes(token), false);
 	}

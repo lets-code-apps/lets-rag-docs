@@ -44,7 +44,21 @@ export type EngineOutcome = {
 	stdout: string;
 	stderrTail: string[];
 	exitCode: number | null;
+	timedOut: boolean;
 };
+
+/** Time budgets per call. Reads are quick; the dry-run hashes every original; apply copies and
+ * re-embeds a whole batch through the local model, so it gets a deliberate long-job budget. */
+export const TIMEOUTS = {
+	readMs: 10_000,
+	dryRunMs: 10 * 60_000,
+	applyMs: 60 * 60_000,
+	askMs: 6 * 60_000,
+} as const;
+
+function minutes(ms: number): string {
+	return ms >= 60_000 ? `${Math.round(ms / 60_000)} min` : `${Math.round(ms / 1000)} s`;
+}
 
 export type EngineResult<T> = { ok: true; value: T } | { ok: false; error: string };
 
@@ -55,15 +69,19 @@ export class Engine {
 	private readonly resourcesPath: string | undefined;
 	private readonly readTimeoutMs: number;
 	private readonly askTimeoutMs: number;
+	private readonly dryRunTimeoutMs: number;
+	private readonly applyTimeoutMs: number;
 	private askChild: EngineProcess | null = null;
 
 	constructor(
 		env: NodeJS.ProcessEnv,
 		repoRoot: string,
 		spawn: SpawnLike = defaultSpawn,
-		readTimeoutMs: number = 10_000,
-		askTimeoutMs: number = 6 * 60_000,
+		readTimeoutMs: number = TIMEOUTS.readMs,
+		askTimeoutMs: number = TIMEOUTS.askMs,
 		resourcesPath: string | undefined = undefined,
+		dryRunTimeoutMs: number = TIMEOUTS.dryRunMs,
+		applyTimeoutMs: number = TIMEOUTS.applyMs,
 	) {
 		this.env = env;
 		this.repoRoot = repoRoot;
@@ -71,6 +89,8 @@ export class Engine {
 		this.readTimeoutMs = readTimeoutMs;
 		this.askTimeoutMs = askTimeoutMs;
 		this.resourcesPath = resourcesPath;
+		this.dryRunTimeoutMs = dryRunTimeoutMs;
+		this.applyTimeoutMs = applyTimeoutMs;
 	}
 
 	resolve(): { file: string; baseArgs: string[] } {
@@ -84,6 +104,7 @@ export class Engine {
 		let stdout = '';
 		const stderrTail: string[] = [];
 		let exitCode: number | null = null;
+		let timedOut = false;
 
 		if (child.stdout) child.stdout.on('data', (chunk: unknown) => { stdout += String(chunk); });
 		if (child.stderr) {
@@ -112,6 +133,7 @@ export class Engine {
 				delay(timeoutMs).then(() => 'timeout' as const),
 			]);
 			if (outcome === 'timeout') {
+				timedOut = true;
 				child.kill('SIGKILL');
 				await closed;
 			}
@@ -119,7 +141,7 @@ export class Engine {
 			await closed;
 		}
 
-		return { stdout, stderrTail, exitCode };
+		return { stdout, stderrTail, exitCode, timedOut };
 	}
 
 	private parse<T>(parsed: Parse<T>): EngineResult<T> {
@@ -127,14 +149,20 @@ export class Engine {
 		return { ok: false, error: parsed.error };
 	}
 
+	/** A killed child may have printed half a report: say it timed out instead of parsing it. */
+	private finish<T>(outcome: EngineOutcome, call: string, timeoutMs: number, parse: (o: EngineOutcome) => Parse<T>): EngineResult<T> {
+		if (outcome.timedOut) return { ok: false, error: `${call} timed out after ${minutes(timeoutMs)} and was stopped` };
+		return this.parse(parse(outcome));
+	}
+
 	async documents(): Promise<EngineResult<DocumentsReport>> {
 		const outcome = await this.collect(['documents', '--json']);
-		return this.parse(parseDocuments(outcome.stdout, outcome.stderrTail));
+		return this.finish(outcome, 'documents', this.readTimeoutMs, (o) => parseDocuments(o.stdout, o.stderrTail));
 	}
 
 	async filingShow(): Promise<EngineResult<FilingShowReport>> {
 		const outcome = await this.collect(['filing', 'show', '--json']);
-		return this.parse(parseFilingShow(outcome.stdout, outcome.stderrTail));
+		return this.finish(outcome, 'filing show', this.readTimeoutMs, (o) => parseFilingShow(o.stdout, o.stderrTail));
 	}
 
 	async filingSave(draft: unknown, check: boolean): Promise<EngineResult<FilingSaveReport>> {
@@ -144,17 +172,17 @@ export class Engine {
 		}
 		const subArgs = check ? ['filing', 'save', '--check'] : ['filing', 'save'];
 		const outcome = await this.collect(subArgs, `${JSON.stringify(draft)}\n`);
-		return this.parse(parseFilingSave(outcome.stdout, outcome.stderrTail));
+		return this.finish(outcome, 'filing save', this.readTimeoutMs, (o) => parseFilingSave(o.stdout, o.stderrTail));
 	}
 
 	async dryRun(): Promise<EngineResult<OrganizeReport>> {
-		const outcome = await this.collect(['organize', '--dry-run', '--json']);
-		return this.parse(parseOrganize(outcome.stdout, outcome.stderrTail));
+		const outcome = await this.collect(['organize', '--dry-run', '--json'], undefined, this.dryRunTimeoutMs);
+		return this.finish(outcome, 'organize --dry-run', this.dryRunTimeoutMs, (o) => parseOrganize(o.stdout, o.stderrTail));
 	}
 
 	async apply(): Promise<EngineResult<OrganizeReport>> {
-		const outcome = await this.collect(['organize', '--apply', '--json']);
-		return this.parse(parseOrganize(outcome.stdout, outcome.stderrTail));
+		const outcome = await this.collect(['organize', '--apply', '--json'], undefined, this.applyTimeoutMs);
+		return this.finish(outcome, 'organize --apply', this.applyTimeoutMs, (o) => parseOrganize(o.stdout, o.stderrTail));
 	}
 
 	async ask(question: string): Promise<EngineResult<AskReport>> {
@@ -204,6 +232,7 @@ export class Engine {
 		if (outcome === 'timeout') {
 			child.kill('SIGKILL');
 			await closed;
+			return { ok: false, error: `ask timed out after ${minutes(this.askTimeoutMs)} and was stopped` };
 		}
 
 		return this.parse(parseAsk(stdout, stderrTail));

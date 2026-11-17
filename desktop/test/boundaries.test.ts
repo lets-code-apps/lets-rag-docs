@@ -73,6 +73,10 @@ test('every IPC handler checks senderFrame', () => {
 	const main = readFileSync(join(SRC, 'main.ts'), 'utf8');
 	const handles = main.split('ipcMain.handle(').slice(1);
 	assert.equal(handles.length, 7, 'all declared channels need handlers');
+	// The renderer reaches apply in one place only: the explicit "move N copies" button.
+	const page = readFileSync(join(RENDERER, 'app.js'), 'utf8');
+	assert.equal(page.split('api.resort(').length - 1, 1);
+	assert.ok(page.includes("$('applyButton').addEventListener('click', () => void apply())"));
 	for (const block of handles) {
 		assert.ok(block.includes('fromUs(event.senderFrame)'), 'handlers must reject foreign senders');
 	}
@@ -88,7 +92,11 @@ test('smoke and shots hard-set the fake engine', () => {
 test('main loads and template-tints the menu icon without setTitle', () => {
 	const main = readFileSync(join(SRC, 'main.ts'), 'utf8');
 	assert.ok(main.includes('menubarTemplate.png'));
-	assert.ok(main.includes('setTemplateImage'));
+	// setTemplateImage is a NativeImage method: the Tray must be built from the prepared image.
+	assert.ok(main.includes('nativeImage.createFromPath(TRAY_ICON)'));
+	assert.ok(main.includes('image.setTemplateImage(true)'));
+	assert.ok(main.includes('new Tray(image)'));
+	assert.equal(/\(t as unknown/.test(main), false);
 	assert.equal(main.includes('setTitle'), false);
 	assert.ok(main.includes('PRODUCT_NAME'));
 });

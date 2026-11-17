@@ -3,132 +3,144 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Let's RAG Docs</title>
+  <!-- Lock the page down: nothing loads, nothing is fetched, only local script, style, images and font. -->
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'" />
+  <title>Let's RAG Docs</title>
   <link rel="stylesheet" href="tokens.css" />
   <link rel="stylesheet" href="app.css" />
+  <script type="module" src="app.js"></script>
 </head>
-<body class="lc-root">
-  <div id="app">
-    <header id="appBar">
-      <div id="emblem" aria-hidden="true">
-        <svg class="emblemSvg" viewBox="0 0 36 36">
-          <path d="M9 7h13l6 6v18H9z" />
-          <path d="M13 13h7M13 17h7M13 21h4" />
-          <circle cx="24" cy="24" r="5" />
-          <path d="M28 28l3 3" />
-        </svg>
-      </div>
-      <label class="searchField">
-        <span class="fieldLabel" id="askFieldLabel">ask about your documents</span>
-        <span class="field">
-          <svg class="glyph" viewBox="0 0 24 24" aria-hidden="true">
-            <circle cx="11" cy="11" r="7" />
-            <path d="M20 20l-4-4" />
-          </svg>
-          <input id="askInput" type="search" placeholder="e.g. when is the next payment due?" autocomplete="off" />
-        </span>
-      </label>
-      <button id="askButton" type="button" class="primary lg">ask</button>
-    </header>
+<body>
+  <!-- The design's Icon glyphs: 1.75px strokes on a 24 grid. Every use sets its own size. -->
+  <svg class="sprite" width="0" height="0" aria-hidden="true">
+    <symbol id="i-search" viewBox="0 0 24 24"><path d="M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14ZM20 20l-4-4"></path></symbol>
+    <symbol id="i-archive" viewBox="0 0 24 24"><path d="M4 5h16v4H4zM6 9v10h12V9M10 13h4"></path></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"></path></symbol>
+    <symbol id="i-send" viewBox="0 0 24 24"><path d="M4 12 20 4l-6 16-3-7-7-1Z"></path></symbol>
+    <symbol id="i-sparkle" viewBox="0 0 24 24"><path d="M12 4c.6 4 2 5.4 6 6-4 .6-5.4 2-6 6-.6-4-2-5.4-6-6 4-.6 5.4-2 6-6Z"></path></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24"><path d="M7 3h7l4 4v14H7zM14 3v4h4M10 12h5M10 16h5"></path></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.5 10 17 19 7"></path></symbol>
+  </svg>
 
-    <div id="screens">
-      <nav id="sections" aria-label="views">
-        <button id="askView" type="button" class="navEntry">ask</button>
-        <button id="filingView" type="button" class="navEntry">filing</button>
-      </nav>
+  <!-- AppBar, emblem only: inset on the left for the window buttons, emblem at the right end. -->
+  <header id="appBar" class="appbar">
+    <span class="emblem" role="img" aria-label="Let's RAG Docs"></span>
+  </header>
 
-      <section id="askScreen">
-        <aside id="libraryPane">
-          <div class="paneHead">
-            <h2>library</h2>
-            <span id="libraryCount"></span>
-          </div>
-          <div id="libraryRows"></div>
-        </aside>
-        <main id="conversationPane">
-          <div id="questionBubble"></div>
-          <div id="answerMeta">answer from documents</div>
-          <p id="answer"></p>
-          <div id="citations"></div>
-          <div id="conversationActions">
-            <button id="copyAnswerButton" type="button" class="ghost">copy answer</button>
-            <button id="openSourceButton" type="button" class="secondary">open source</button>
-          </div>
-          <div class="samplePills" aria-label="Sample data">
-            <span data-sample="true" data-key="citationSnippet">Sample data: citation snippet</span>
-            <span data-sample="true" data-key="documentSize">Sample data: document size</span>
-            <span data-sample="true" data-key="indexHealth">Sample data: index health</span>
-          </div>
-        </main>
-      </section>
+  <div class="panes">
+    <nav class="nav" aria-label="sections">
+      <button id="askView" type="button" data-section="ask" aria-current="page"><svg class="icon" width="18" height="18" aria-hidden="true"><use href="#i-search"></use></svg><span>ask</span></button>
+      <button id="filingView" type="button" data-section="filing"><svg class="icon" width="18" height="18" aria-hidden="true"><use href="#i-archive"></use></svg><span>filing</span></button>
+    </nav>
 
-      <section id="filingScreen" hidden>
-        <aside id="listPane">
-          <div class="paneHead">
+    <!-- ask: the library on the left, the conversation and the question form on the right -->
+    <div id="askScreen" class="screen ask">
+      <aside class="library" aria-label="library">
+        <div class="library-head">
+          <h2>library</h2>
+          <span id="libraryMeta" class="meta"></span>
+        </div>
+        <div id="libraryRows" class="rows"></div>
+      </aside>
+      <main class="conversation">
+        <div id="conversationPane" class="turn" aria-live="polite">
+          <p id="askHint" class="hint">Ask a question about your documents. The answer comes from the model on this Mac and names the documents it used.</p>
+          <div id="questionBubble" class="bubble" hidden></div>
+          <div id="answerBlock" class="answer" hidden>
+            <span id="answerLabel" class="answer-label"><svg class="icon" width="16" height="16" aria-hidden="true"><use href="#i-sparkle"></use></svg><span id="answerLabelText"></span></span>
+            <p id="answerText" class="answer-text"></p>
+            <div id="citations" class="citations"></div>
+            <div class="answer-actions">
+              <button id="copyAnswer" type="button" class="btn ghost"><svg class="icon" width="18" height="18" aria-hidden="true"><use href="#i-file"></use></svg><span id="copyAnswerLabel">copy answer</span></button>
+            </div>
+          </div>
+          <div id="askBusy" class="busy" hidden>
+            <span class="busy-dot" aria-hidden="true"></span>
+            <span>Reading your documents. The model on this Mac can take a minute.</span>
+            <button id="cancelAsk" type="button" class="btn ghost">cancel</button>
+          </div>
+          <p id="askError" class="error" role="alert" hidden></p>
+        </div>
+        <form id="askForm" class="ask-form">
+          <label class="field-wrap">
+            <span class="field-label">ask about your documents</span>
+            <span class="field">
+              <svg class="icon" width="18" height="18" aria-hidden="true"><use href="#i-search"></use></svg>
+              <input id="askInput" type="text" placeholder="e.g. when is the next payment due?" autocomplete="off" />
+            </span>
+          </label>
+          <button id="askButton" type="submit" class="btn primary lg"><svg class="icon" width="20" height="20" aria-hidden="true"><use href="#i-send"></use></svg><span>ask</span></button>
+        </form>
+      </main>
+    </div>
+
+    <!-- filing: folders / owners list, then the path example and the name form or the re-sort notice -->
+    <div id="filingScreen" class="screen filing" hidden>
+      <section id="listPane" class="list" aria-label="filing lists">
+        <div class="list-head">
+          <div class="list-title">
             <h1>filing</h1>
-            <button id="addEntryButton" type="button" class="icon" aria-label="add entry" aria-hidden="false">
-              <span aria-hidden="true">+</span>
-            </button>
+            <button id="addButton" type="button" class="btn icon-only" aria-label="add folder"><svg class="icon" width="18" height="18" aria-hidden="true"><use href="#i-plus"></use></svg></button>
           </div>
           <div id="viewSwitch" class="seg" role="radiogroup" aria-label="list">
-            <button id="foldersSwitch" type="button" class="segOn">folders</button>
-            <button id="ownersSwitch" type="button" class="segOff">owners</button>
+            <button type="button" role="radio" aria-checked="true" data-view="folders">folders</button>
+            <button type="button" role="radio" aria-checked="false" data-view="owners">owners</button>
           </div>
-          <span id="listMeta"></span>
-          <div id="filingRows"></div>
-        </aside>
-
-        <article id="detailPane">
-          <section id="pathSection">
-            <h2>where a copy goes</h2>
-            <div id="pathTokens"></div>
-            <span id="pathNote"></span>
-          </section>
-
-          <div id="noticeCard" class="noticeCard" hidden>
-            <span id="noticePill" class="statusPill"><span class="dot"></span><span id="noticeLabel"></span></span>
-            <p id="noticeText"></p>
-            <span id="noticeNote"></span>
-            <button id="reSortNoticeButton" type="button" class="primary" hidden>re-sort documents</button>
-          </div>
-
-          <section id="movesSection" hidden>
-            <h2>what will move</h2>
-            <div id="moveRows"></div>
-            <span id="moveNote"></span>
-            <div class="moveActions">
-              <button id="applyMoveButton" type="button" class="primary" hidden>move copies</button>
-              <button id="showAllButton" type="button" class="secondary" hidden>show all</button>
-              <button id="laterButton" type="button" class="ghost" hidden>later</button>
-            </div>
-          </section>
-
-          <form id="nameForm">
-            <div class="formHead">
-              <h2 id="formTitle"></h2>
-              <span id="formMeta"></span>
-            </div>
-            <label class="fieldWrap">
-              <span id="formLabel" class="fieldLabel">name</span>
-              <span class="field">
-                <svg class="glyph" viewBox="0 0 24 24" aria-hidden="true">
-                  <path d="M7 17 17 7M9 7h8v8" />
-                </svg>
-                <input id="nameInput" autocomplete="off" />
-              </span>
-              <span id="formHelper" class="helper"></span>
-            </label>
-            <div id="formActions">
-              <button id="saveButton" type="button" class="primary">save name</button>
-              <button id="removeButton" type="button" class="secondary">remove</button>
-            </div>
-            <p id="formNote"></p>
-          </form>
-        </article>
+          <span id="listMeta" class="meta"></span>
+        </div>
+        <div id="filingRows" class="rows"></div>
       </section>
+
+      <article id="detailPane" class="detail">
+        <p id="filingError" class="error" role="alert" hidden></p>
+        <div class="where">
+          <h2 class="caption">where a copy goes</h2>
+          <div id="pathTokens" class="path"></div>
+          <span id="pathNote" class="meta note"></span>
+        </div>
+
+        <div id="noticeCard" class="notice" hidden>
+          <div class="card">
+            <span id="noticePill" class="pill attention"></span>
+            <p id="noticeText"></p>
+            <span id="noticeNote" class="meta note"></span>
+            <div class="card-actions">
+              <button id="resortButton" type="button" class="btn primary">re-sort documents</button>
+              <button id="noticeDone" type="button" class="btn secondary" hidden>done</button>
+            </div>
+          </div>
+          <div id="movesSection" class="moves" hidden>
+            <h2 class="subhead">what will move</h2>
+            <div id="moveRows" class="rows"></div>
+            <span id="movesMore" class="meta more"></span>
+            <div class="card-actions">
+              <button id="applyButton" type="button" class="btn primary"></button>
+              <button id="showAllButton" type="button" class="btn secondary"></button>
+              <button id="laterButton" type="button" class="btn ghost">later</button>
+            </div>
+          </div>
+        </div>
+
+        <form id="nameForm" class="name-form" hidden>
+          <div class="form-head">
+            <h2 id="formTitle"></h2>
+            <span id="formMeta" class="meta"></span>
+          </div>
+          <label class="field-wrap">
+            <span id="nameLabel" class="field-label"></span>
+            <span class="field">
+              <input id="nameInput" type="text" autocomplete="off" spellcheck="false" aria-describedby="nameHelper" />
+            </span>
+            <span id="nameHelper" class="helper" hidden></span>
+          </label>
+          <div class="form-actions">
+            <button id="saveButton" type="submit" class="btn primary"><svg id="saveGlyph" class="icon" width="18" height="18" aria-hidden="true" hidden><use href="#i-plus"></use></svg><span id="saveLabel"></span></button>
+            <button id="removeButton" type="button" class="btn secondary"></button>
+          </div>
+          <p id="formNote" class="meta note"></p>
+        </form>
+      </article>
     </div>
   </div>
-  <script src="app.js"></script>
 </body>
 </html>

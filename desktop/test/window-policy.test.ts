@@ -5,9 +5,10 @@ import { denyNavigation, isOwnFile, windowOpenHandler, windowOptions } from '../
 
 test('windowOptions locks the renderer down and sets a preload', () => {
 	const options = windowOptions();
-	assert.equal(options.width, 720);
-	assert.equal(options.height, 480);
+	assert.equal(options.width, 1200);
+	assert.equal(options.height, 820);
 	assert.equal(options.minWidth, 360);
+	assert.equal(options.titleBarStyle, 'hiddenInset');
 	assert.equal(options.webPreferences.contextIsolation, true);
 	assert.equal(options.webPreferences.sandbox, true);
 	assert.equal(options.webPreferences.nodeIntegration, false);

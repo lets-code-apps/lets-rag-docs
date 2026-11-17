@@ -24,9 +24,29 @@ test('cancel releases ask', () => {
 test('apply needs fresh dry-run', () => {
 	const jobs = new Jobs();
 	jobs.recordDryRun(report);
-	assert.equal(jobs.tryBeginApply(), true);
-	jobs.endApply();
 	jobs.recordSave();
 	assert.equal(jobs.tryBeginApply(), false);
 	assert.equal(jobs.applyReason(), 'run a fresh dry-run after saving filing lists');
+});
+test('only a successful dry-run unlocks apply', () => {
+	for (const bad of [
+		{ ...report, status: 'outdated' },
+		{ ...report, status: 'no_database' },
+		{ ...report, status: 'something_new' },
+		{ ...report, mode: 'apply' },
+	]) {
+		const jobs = new Jobs();
+		jobs.recordDryRun(bad);
+		assert.equal(jobs.tryBeginApply(), false, JSON.stringify(bad));
+		assert.equal(jobs.applyReason(), 'run a dry-run first');
+	}
+});
+
+test('an apply spends its preview', () => {
+	const jobs = new Jobs();
+	jobs.recordDryRun(report);
+	assert.equal(jobs.tryBeginApply(), true);
+	assert.equal(jobs.tryBeginAsk(), false, 'ask waits while apply runs');
+	jobs.endApply();
+	assert.equal(jobs.tryBeginApply(), false, 'a second apply needs a new dry-run');
 });

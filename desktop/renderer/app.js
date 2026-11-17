@@ -1,478 +1,618 @@
-// Renderer: ask and filing screens driven by the sandboxed `window.ragDocs` bridge for live data,
-// and by local synthetic demo states for the design screenshots. No HTML injection, no network.
+// The RAG Docs window. Every value on screen comes from an engine report (through the preload's
+// `window.ragDocs`) or from what the user typed: no canned or made-up content. The page never
+// builds argv: it sends a question, a draft of the two lists, or nothing. Engine text is written
+// with textContent only.
+
+import * as m from './model.js';
 
 const api = window.ragDocs;
-const root = document.body;
+const $ = (id) => document.getElementById(id);
+const SVG = 'http://www.w3.org/2000/svg';
+const PREVIEW_ROWS = 3;
+const ALL_ROWS = 200;
 
-const byId = (id) => document.getElementById(id);
-
-function clearEl(el) {
-	while (el && el.firstChild !== null) {
-		el.removeChild(el.firstChild);
-	}
-}
-
-function clear(id) {
-	const el = byId(id);
-	if (el !== null) clearEl(el);
-}
-
-function text(el, value) {
-	if (el !== null) el.textContent = value;
-}
-
-function hidden(id, value) {
-	const el = byId(id);
-	if (value === true) el.setAttribute('hidden', '');
-	else el.removeAttribute('hidden');
-}
-
-function toggleClass(id, className, add) {
-	const el = byId(id);
-	if (add) el.classList.add(className);
-	else el.classList.remove(className);
-}
-
-function initials(title) {
-	const words = title.split(/\s+/).filter((w) => w !== '');
-	const fromWords = words.map((w) => w[0] ?? '').join('').slice(0, 2).toUpperCase();
-	return fromWords !== '' ? fromWords : title.slice(0, 2).toUpperCase();
-}
-
-function makeRow(row) {
-	const entry = document.createElement('div');
-	entry.className = 'entryRow';
-
-	const avatar = document.createElement('span');
-	avatar.className = 'initials';
-	avatar.textContent = initials(row.title);
-
-	const main = document.createElement('div');
-	main.className = 'rowMain';
-
-	const title = document.createElement('div');
-	title.className = 'rowTitle';
-	title.textContent = row.title;
-
-	const meta = document.createElement('div');
-	meta.className = 'rowMeta';
-	meta.textContent = row.meta ?? row.preview ?? '';
-
-	main.appendChild(title);
-	main.appendChild(meta);
-
-	if (row.selected) entry.classList.add('selected');
-	entry.appendChild(avatar);
-	entry.appendChild(main);
-
-	if (row.pill) {
-		const pill = document.createElement('span');
-		pill.className = 'rowPill';
-		pill.textContent = row.pill;
-		entry.appendChild(pill);
-	}
-
-	return entry;
-}
-
-function appendRows(targetId, rows) {
-	const target = byId(targetId);
-	for (const row of rows) target.appendChild(makeRow(row));
-}
-
-function appendPath(tokens) {
-	const target = byId('pathTokens');
-	for (const token of tokens) {
-		const wrap = document.createElement('span');
-		wrap.className = 'pathToken';
-
-		const cap = document.createElement('span');
-		cap.className = 'pathTokenLabel';
-		cap.textContent = token.cap;
-
-		const val = document.createElement('span');
-		val.className = 'pathTokenValue';
-		val.textContent = token.val;
-		if (token.active) val.classList.add('active');
-
-		wrap.appendChild(cap);
-		wrap.appendChild(val);
-		target.appendChild(wrap);
-	}
-}
-
-function setNotice(notice) {
-	const hasNotice = notice !== null && notice !== undefined;
-	clear('noticePill');
-	clear('moveRows');
-	text(byId('noticeLabel'), hasNotice ? notice.pill : '');
-	text(byId('noticeText'), hasNotice ? notice.text : '');
-	text(byId('noticeNote'), hasNotice ? notice.note : '');
-
-	if (!hasNotice) {
-		hidden('noticeCard', true);
-		hidden('movesSection', true);
-		return;
-	}
-
-	const pill = byId('noticePill');
-	pill.className = notice.danger ? 'statusPill danger' : 'statusPill attention';
-	hidden('noticeCard', false);
-	hidden('reSortNoticeButton', !notice.ask);
-	hidden('movesSection', !notice.preview);
-
-	if (notice.preview && notice.moves) {
-		for (const move of notice.moves) {
-			const row = makeRow({
-				title: move.title,
-				meta: `${move.to} · ${move.from}`,
-				preview: move.to,
-				pill: move.pill,
-			});
-			byId('moveRows').appendChild(row);
-		}
-		text(byId('moveNote'), notice.actions ? 'Only filed copies move. Originals are never touched.' : '');
-		hidden('applyMoveButton', !notice.actions);
-		hidden('showAllButton', !notice.actions);
-		hidden('laterButton', !notice.actions);
-	}
-}
-
-function setForm(form) {
-	const hasForm = form !== null && form !== undefined;
-	text(byId('formTitle'), hasForm ? form.title : '');
-	text(byId('formMeta'), hasForm ? form.meta : '');
-	text(byId('formLabel'), hasForm ? form.label : 'name');
-	text(byId('formHelper'), hasForm ? form.helper : '');
-	text(byId('formNote'), hasForm ? form.note : '');
-
-	const input = byId('nameInput');
-	input.value = hasForm ? form.value : '';
-	if (hasForm && form.error) input.setAttribute('aria-invalid', 'true');
-	else input.removeAttribute('aria-invalid');
-
-	if (hasForm && form.error) {
-		input.classList.add('isError');
-		byId('formHelper').classList.add('isError');
-	} else {
-		input.classList.remove('isError');
-		byId('formHelper').classList.remove('isError');
-	}
-
-	hidden('removeButton', !(hasForm && form.canRemove === true));
-	text(byId('removeButton'), hasForm ? form.remove : 'remove');
-}
-
-function setLists(folders, owners, active) {
-	currentDraft.folders = folders;
-	currentDraft.owners = owners;
-	currentDraft.active = active;
-}
-
-function setSwitch(view) {
-	toggleClass('foldersSwitch', 'segOn', view === 'folders');
-	toggleClass('ownersSwitch', 'segOn', view === 'owners');
-	byId('foldersSwitch').setAttribute('aria-checked', view === 'folders' ? 'true' : 'false');
-	byId('ownersSwitch').setAttribute('aria-checked', view === 'owners' ? 'true' : 'false');
-}
-
-function showView(view) {
-	root.dataset.view = view;
-	toggleClass('askView', 'isCurrent', view === 'ask');
-	toggleClass('filingView', 'isCurrent', view === 'filing');
-	hidden('askScreen', view !== 'ask');
-	hidden('filingScreen', view !== 'filing');
-}
-
-const currentDraft = {
-	folders: ['Finance'],
-	owners: ['Shared'],
-	active: 'owners',
+const state = {
+  section: 'ask',
+  docs: null,
+  docsError: null,
+  ask: { question: '', busy: false, report: null, error: null, cancelled: false, copied: false },
+  filing: {
+    loaded: false,
+    saved: null,
+    error: null,
+    view: 'folders',
+    selected: null, // {kind:'item', index} | {kind:'shared'} | {kind:'add'} | null (notice shown)
+    touched: false,
+    value: '',
+    fieldError: null,
+    saving: false,
+    changes: [], // saved this session: {kind, list, from/to | name}
+    notice: null, // null | 'ask' | 'running' | 'preview' | 'applying' | 'done'
+    pendingText: null, // a re-sort the engine reported on opening, before any change here
+    dry: null,
+    showAll: false,
+    applied: null,
+  },
 };
 
-const folderNames = ['Identity', 'Health', 'Finance', 'Taxes', 'Insurance', 'Home', 'Car', 'Work', 'Education', 'Purchases', 'Letters', 'Other'];
-const ownerNames = ['Ava Lin', 'Studio Beta', 'Northwind LLC'];
-const pathNote = 'The model picks one folder and one owner per document. Nothing moves until you preview the re-sort.';
+// ---- small DOM helpers ----
 
-function demoCounts(view) {
-	const m = new Map();
-	if (view === 'folders') {
-		[6, 14, 31, 12, 9, 11, 9, 13, 5, 10, 4, 2].forEach((n, i) => m.set(folderNames[i] ?? '', n));
-		m.set('Vehicles', 9);
-		return m;
-	}
-	m.set('Ava Lin', 64);
-	m.set('Studio Beta', 41);
-	m.set('Northwind LLC', 15);
-	return m;
+/** In-flight engine calls, so smoke and screenshot runs can wait for a settled page. */
+let pending = 0;
+async function track(promise) {
+  pending += 1;
+  document.body.dataset.pending = String(pending);
+  try {
+    return await promise;
+  } finally {
+    pending -= 1;
+    document.body.dataset.pending = String(pending);
+  }
 }
 
-function listRows(view, counts, shared, selected, extras) {
-	const source = view === 'folders' ? folderNames : ownerNames;
-	const rows = source.map((title) => ({
-		title,
-		meta: counts.get(title) === 1 ? '1 document' : `${counts.get(title) ?? 0} documents`,
-		selected: title === selected,
-		pill: extras[title] ?? '',
-	}));
-
-	if (view === 'owners') {
-		rows.push({ title: shared, meta: 'Nobody on the list, or several people.', selected: selected === shared, pill: 'shared owner' });
-	} else {
-		rows.push({ title: 'unsorted', meta: 'Documents that fit no folder.', preview: 'Documents that fit no folder.', selected: selected === 'unsorted' });
-	}
-	return rows;
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
 }
 
-function applyDemoState(view, state) {
-	root.dataset.state = `${view}-${state}`;
-	if (state === 'small') root.dataset.small = 'true';
-	else root.removeAttribute('data-small');
-
-	if (view === 'ask') {
-		showView('ask');
-		text(byId('libraryCount'), '128 documents');
-		clear('libraryRows');
-		appendRows('libraryRows', [
-			{ title: 'contract-2026.pdf', meta: 'Acme Corp · 12 pages', pill: 'cited' },
-			{ title: 'kickoff-notes.md', meta: 'meeting notes · 2 pages', pill: 'cited' },
-			{ title: 'brand-guidelines.pdf', meta: '38 pages' },
-			{ title: 'q3-report.xlsx', meta: '4 sheets' },
-			{ title: 'scan-0412.pdf', meta: 'scanned · 64 MB', pill: 'not indexed: over 50 MB' },
-		]);
-		text(byId('questionBubble'), 'What did we agree with Acme about invoice deadlines?');
-		text(byId('answerMeta'), 'answer from 2 documents');
-		text(byId('answer'), 'Invoices are due within 14 days of the end of each month [1]. If a deliverable slips, the invoice for that month waits until it is accepted, and the 14 days count from acceptance [2].');
-		clear('citations');
-		const c1 = document.createElement('span');
-		c1.className = 'citation';
-		c1.textContent = '[1] contract-2026.pdf, p. 4';
-		const c2 = document.createElement('span');
-		c2.className = 'citation';
-		c2.textContent = '[2] kickoff-notes.md';
-		byId('citations').appendChild(c1);
-		byId('citations').appendChild(c2);
-		setNotice(null);
-		setForm(null);
-		return;
-	}
-
-	const ownersView = state === 'owners' || state === 'owners-empty' || state === 'adding' || state === 'error' || state === 'shared';
-	showView('filing');
-	setSwitch(ownersView ? 'owners' : 'folders');
-
-	const counts = demoCounts(ownersView ? 'owners' : 'folders');
-	const rows = state === 'owners-empty'
-		? []
-		: listRows(ownersView ? 'owners' : 'folders', counts, 'Shared', state === 'folders' || state === 'editing' || state === 'small' ? (state === 'folders' || state === 'small' ? 'Finance' : 'Car') : (state === 'owners' ? 'Ava Lin' : state === 'shared' ? 'Shared' : state === 'adding' ? 'Studio Beta' : ''), {
-			Car: '',
-			Vehicles: 'was Car',
-			'Studio Beta': 'new',
-		});
-
-	text(byId('listMeta'), state === 'owners-empty' ? '128 documents, no owners' : ownersView ? '128 documents, 3 owners' : '128 documents in 12 folders');
-	clear('filingRows');
-	appendRows('filingRows', rows);
-
-	const active = ownersView ? 'owner' : 'folder';
-	appendPath([
-		{ cap: '', val: 'library' },
-		{ cap: 'folder', val: state === 'editing' || state === 'changed' || state === 'preview' ? 'Vehicles' : 'Finance', active: active === 'folder' },
-		{ cap: 'owner', val: state === 'adding' ? 'Studio Beta' : state === 'shared' ? 'Shared' : 'Ava Lin', active: active === 'owner' },
-		{ cap: 'year', val: '2025' },
-		{ cap: 'date, matter and title', val: 'invoice-deadlines.pdf' },
-	]);
-	text(byId('pathNote'), pathNote);
-
-	if (state === 'changed') {
-		setNotice({
-			pill: 're-sort needed',
-			text: 'You renamed Car to Vehicles and added the owner Studio Beta. The model on this Mac has to read all 128 documents again and pick from the new lists.',
-			note: 'Nothing moves yet. You get a preview first, and your original files are never touched.',
-			ask: true,
-		});
-		setForm(null);
-		return;
-	}
-
-	if (state === 'preview') {
-		setNotice({
-			pill: '14 copies will move',
-			text: 'Re-sorting is done. Check the moves below, then apply them.',
-			note: 'Only the filed copies move. Originals are never touched, and a copy you edited after filing is never removed.',
-			preview: true,
-			actions: true,
-			moves: [
-				{ title: 'invoice-deadlines.pdf', from: 'from Car / Ava Lin / 2025', to: 'to Vehicles / Ava Lin / 2025' },
-				{ title: 'invoice-vat.pdf', from: 'from Finance / Shared / 2025', to: 'to Finance / Studio Beta / 2025' },
-				{ title: 'inspection-cert.pdf', from: 'from Car / Northwind LLC / 2024', to: 'to Vehicles / Northwind LLC / 2024', pill: 'old copy stays: you edited it' },
-			],
-		});
-		setForm(null);
-		return;
-	}
-
-	setNotice(null);
-	if (state === 'owners-empty') {
-		setForm({ title: 'add owner', meta: 'Spell it the way the folder should read.', label: 'owner name', value: '', note: 'Until owners exist, every copy is filed under Shared.' });
-	} else if (state === 'adding' || state === 'error') {
-		setForm({
-			title: 'add owner',
-			meta: 'Spell it the way the folder should read.',
-			label: 'owner name',
-			value: state === 'error' ? 'Studio/Beta' : 'Studio Beta',
-			helper: state === 'error' ? 'Take out the "/". The name becomes a folder, so it can\'t contain "/" or start or end with a dot.' : '',
-			error: state === 'error',
-			note: 'Saving changes the lists only. Documents are re-sorted when you ask, and nothing moves before you see the preview.',
-		});
-	} else if (state === 'shared') {
-		setForm({ title: 'Shared', meta: '8 documents filed here', label: 'shared folder name', value: 'Shared', helper: 'For documents that belong to nobody on the list, or to several people.', note: 'The shared owner catches the rest.' });
-	} else if (state === 'editing') {
-		setForm({ title: 'Car', meta: '9 documents filed here', label: 'folder name', value: 'Vehicles', canRemove: true, remove: 'remove folder', note: 'Removing a folder deletes no documents. They are re-sorted into the folders that are left.' });
-	} else if (state === 'owners') {
-		setForm({ title: 'Ava Lin', meta: '64 documents filed here', label: 'owner name', value: 'Ava Lin', canRemove: true, remove: 'remove owner', note: 'Removing an owner deletes no documents. They are re-sorted to the owners that are left, or to Shared.' });
-	} else {
-		setForm({ title: 'Finance', meta: '31 documents filed here', label: 'folder name', value: 'Finance', canRemove: true, remove: 'remove folder', note: 'Removing a folder deletes no documents. They are re-sorted into the folders that are left.' });
-	}
+function icon(name, px) {
+  const svg = document.createElementNS(SVG, 'svg');
+  svg.setAttribute('class', 'icon');
+  svg.setAttribute('width', String(px));
+  svg.setAttribute('height', String(px));
+  svg.setAttribute('aria-hidden', 'true');
+  const use = document.createElementNS(SVG, 'use');
+  use.setAttribute('href', `#i-${name}`);
+  svg.append(use);
+  return svg;
 }
 
-window.applyDemoState = applyDemoState;
-
-function renderDocuments(result) {
-	text(byId('libraryCount'), `${result?.report?.documents?.length ?? 0} documents`);
-	clear('libraryRows');
-	const docs = result?.report?.documents ?? [];
-	if (docs.length === 0) {
-		const row = document.createElement('div');
-		row.className = 'entryRow';
-		const main = document.createElement('div');
-		main.className = 'rowMain';
-		const title = document.createElement('div');
-		title.className = 'rowTitle';
-		title.textContent = 'No documents yet.';
-		main.appendChild(title);
-		row.appendChild(main);
-		byId('libraryRows').appendChild(row);
-		return;
-	}
-	for (const doc of docs) {
-		appendRows('libraryRows', [{
-			title: doc.title,
-			meta: `${doc.folder ?? 'unsorted'} / ${doc.owner ?? 'shared'}`,
-			preview: doc.filed_as ?? '',
-		}]);
-	}
+const TONES = new Set(['neutral', 'positive', 'attention', 'danger']);
+function setPill(node, label, tone) {
+  node.className = `pill ${TONES.has(tone) ? tone : 'neutral'}`;
+  node.replaceChildren(el('span', '', label));
 }
 
-function renderAsk(result) {
-	text(byId('answer'), result?.report?.answer ?? 'No answer yet.');
-	clear('citations');
-	for (const source of result?.report?.sources ?? []) {
-		const pill = document.createElement('span');
-		pill.className = 'citation';
-		pill.textContent = `${source.source} [${source.file}, chunk ${source.chunk}] score ${source.score.toFixed(2)}`;
-		byId('citations').appendChild(pill);
-	}
+function pill(label, tone) {
+  const node = el('span');
+  setPill(node, label, tone);
+  return node;
 }
 
-function renderFilingShow(result) {
-	if (!result?.ok) {
-		text(byId('listMeta'), 'Filing unavailable.');
-		return;
-	}
-	setLists(result.report?.folders ?? [], result.report?.owners ?? [], currentDraft.active);
-	text(byId('listMeta'), `${result.report?.folders?.length ?? 0} folders, ${result.report?.owners?.length ?? 0} owners`);
-	clear('filingRows');
-	for (const folder of result.report?.folders ?? []) appendRows('filingRows', [{ title: folder, meta: 'folder' }]);
-	for (const owner of result.report?.owners ?? []) appendRows('filingRows', [{ title: owner, meta: 'owner' }]);
-	appendRows('filingRows', [{ title: result.report?.shared_owner ?? 'Shared', meta: 'shared owner' }]);
+/** The design's ListRow. A button when it can be picked, a plain row otherwise. */
+function listRow(row, onPick) {
+  const node = el(onPick ? 'button' : 'div', 'row');
+  if (onPick) {
+    node.type = 'button';
+    node.setAttribute('aria-pressed', row.selected ? 'true' : 'false');
+    node.addEventListener('click', onPick);
+  } else if (row.selected) {
+    node.classList.add('selected');
+  }
+  node.append(el('span', 'avatar', row.initials));
+  const text = el('span', 'row-text');
+  const line = el('span', 'row-line');
+  line.append(el('span', 'row-title', row.title));
+  if (row.time) line.append(el('span', 'row-time', row.time));
+  text.append(line);
+  if (row.subject) text.append(el('span', 'row-subject', row.subject));
+  if (row.preview) text.append(el('span', 'row-preview', row.preview));
+  if (row.pill) text.append(pill(row.pill, row.tone ?? 'neutral'));
+  node.append(text);
+  node.title = row.title;
+  return node;
 }
 
-function renderDryRun(result) {
-	if (!result?.ok) return;
-	const counts = result.report?.counts ?? {};
-	const moves = (counts.would_copy ?? 0) + (counts.would_move ?? 0);
-	setNotice(moves > 0 ? {
-		pill: `${moves} document(s) would move`,
-		text: 'A re-sort is available after the filing lists change.',
-		note: 'Nothing moves before you see the preview.',
-		ask: true,
-	} : null);
-	if (moves > 0 && result.report?.items) {
-		for (const item of result.report.items.slice(0, 20)) {
-			appendRows('moveRows', [{ title: item.from, meta: item.to ?? 'unsorted', preview: item.to ?? 'unsorted' }]);
-		}
-	}
+// ---- navigation ----
+
+function render() {
+  for (const button of document.querySelectorAll('.nav button')) {
+    const on = button.dataset.section === state.section;
+    if (on) button.setAttribute('aria-current', 'page');
+    else button.removeAttribute('aria-current');
+  }
+  $('askScreen').hidden = state.section !== 'ask';
+  $('filingScreen').hidden = state.section !== 'filing';
+  renderAsk();
+  renderFiling();
 }
 
-function askNow() {
-	const q = byId('askInput').value.trim() || 'What is the next deadline?';
-	void api?.documents().then(renderDocuments);
-	void api?.ask(q).then(renderAsk);
+function showSection(section) {
+  state.section = section;
+  render();
+  if (section === 'filing' && !state.filing.loaded) void loadFiling();
 }
 
-function filingNow() {
-	void api?.filing?.().then(renderFilingShow);
-	void api?.dryRun?.().then(renderDryRun);
+// ---- ask ----
+
+async function loadDocs() {
+  const res = await track(api.documents());
+  if (res && res.ok) {
+    state.docs = res.report;
+    state.docsError = null;
+  } else {
+    state.docsError = res?.error ?? 'The engine did not answer.';
+  }
+  render();
 }
 
-byId('askView').addEventListener('click', () => {
-	showView('ask');
-	askNow();
-});
+function renderAsk() {
+  const a = state.ask;
+  const sources = a.report?.sources ?? [];
 
-byId('filingView').addEventListener('click', () => {
-	showView('filing');
-	filingNow();
-});
+  // library
+  $('libraryMeta').textContent = state.docs ? m.libraryMeta(state.docs) : '';
+  const rows = $('libraryRows');
+  rows.replaceChildren();
+  if (state.docsError) {
+    rows.append(el('p', 'empty error', state.docsError));
+  } else if (state.docs) {
+    const notice = m.libraryNotice(state.docs);
+    if (notice) rows.append(el('p', 'empty', notice));
+    for (const row of m.libraryRows(state.docs.documents, sources)) {
+      rows.append(listRow({ ...row, selected: row.cited, pill: row.cited ? 'cited' : '', tone: 'positive' }, null));
+    }
+  }
 
-byId('askButton').addEventListener('click', askNow);
+  // conversation
+  const asked = a.question !== '';
+  $('askHint').hidden = asked;
+  $('questionBubble').hidden = !asked;
+  $('questionBubble').textContent = a.question;
+  $('askBusy').hidden = !a.busy;
+  $('askError').hidden = a.error === null;
+  $('askError').textContent = a.error ?? '';
 
-byId('nameInput').addEventListener('input', () => {
-	if (currentDraft.active === 'folders') {
-		clear('pathTokens');
-		appendPath([
-			{ cap: '', val: 'library' },
-			{ cap: 'folder', val: byId('nameInput').value || 'Finance', active: true },
-			{ cap: 'owner', val: 'Ava Lin' },
-			{ cap: 'year', val: '2025' },
-			{ cap: 'date, matter and title', val: 'invoice-deadlines.pdf' },
-		]);
-	}
-});
-
-byId('saveButton').addEventListener('click', () => {
-	const draft = {
-		folders: [...currentDraft.folders],
-		owners: [...currentDraft.owners],
-	};
-	void api?.saveFiling?.(draft, true).then((result) => {
-		if (!result?.ok || result.report?.ok) {
-			text(byId('formHelper'), result?.report?.ok ? 'Draft is valid.' : 'Save unavailable.');
-			byId('formHelper').classList.remove('isError');
-			return;
-		}
-		const first = result.report?.errors?.[0];
-		text(byId('formHelper'), `${first?.list ?? 'draft'} ${first?.message ?? 'invalid'}`);
-		byId('formHelper').classList.add('isError');
-	});
-});
-
-byId('removeButton').addEventListener('click', () => {
-	text(byId('formHelper'), 'Removing does not delete documents. They are re-sorted after a preview.');
-});
-
-const hash = (window.location.hash || '').replace(/^#/, '');
-const stateMatch = /^demo-(ask|filing)-(.+)$/.exec(hash);
-if (stateMatch !== null) {
-	applyDemoState(stateMatch[1], stateMatch[2]);
-	showView(stateMatch[1]);
-} else {
-	applyDemoState('ask', 'ask');
-	applyDemoState('filing', 'folders');
-	showView('ask');
-	if (!hash.startsWith('demo-')) {
-		filingNow();
-		askNow();
-	}
+  const report = a.report;
+  $('answerBlock').hidden = report === null;
+  if (report) {
+    const has = report.answer !== null;
+    $('answerLabel').hidden = !has;
+    $('answerLabelText').textContent = has ? m.answerLabel(sources) : '';
+    $('answerText').textContent = has ? report.answer : m.NO_ANSWER;
+    $('citations').replaceChildren(...m.citations(sources).map((label) => pill(label, 'neutral')));
+    $('copyAnswer').hidden = !has;
+    $('copyAnswerLabel').textContent = a.copied ? 'copied' : 'copy answer';
+  }
+  $('askButton').disabled = a.busy;
 }
+
+async function ask(event) {
+  event.preventDefault();
+  const question = $('askInput').value.trim();
+  if (question === '' || state.ask.busy) return;
+  state.ask = { question, busy: true, report: null, error: null, cancelled: false, copied: false };
+  render();
+  const res = await track(api.ask(question));
+  state.ask.busy = false;
+  if (res && res.ok) {
+    state.ask.report = res.report;
+    $('askInput').value = '';
+  } else if (state.ask.cancelled) {
+    state.ask.error = 'Stopped. Ask again when you are ready.';
+  } else {
+    state.ask.error = res?.error === 'busy' ? 'The model is busy with another job. Try again in a moment.' : (res?.error ?? 'The engine did not answer.');
+  }
+  render();
+}
+
+async function cancelAsk() {
+  state.ask.cancelled = true;
+  await track(api.cancelAsk());
+}
+
+async function copyAnswer() {
+  const answer = state.ask.report?.answer;
+  if (!answer) return;
+  try {
+    await navigator.clipboard.writeText(answer);
+    state.ask.copied = true;
+    render();
+  } catch {
+    // The clipboard can refuse while the window is not focused; the answer stays on screen.
+  }
+}
+
+// ---- filing ----
+
+function f() {
+  return state.filing;
+}
+
+function currentList() {
+  const s = f().saved;
+  return f().view === 'folders' ? s.folders : s.owners;
+}
+
+function selectDefault() {
+  const list = currentList();
+  f().selected = list.length > 0 ? { kind: 'item', index: 0 } : { kind: 'add' };
+  f().value = list.length > 0 ? list[0] : '';
+  f().fieldError = null;
+}
+
+async function loadFiling() {
+  f().loaded = true;
+  const res = await track(api.filing());
+  if (!res || !res.ok) {
+    f().error = res?.error ?? 'The engine did not answer.';
+    render();
+    return;
+  }
+  f().saved = res.report;
+  f().error = null;
+  selectDefault();
+  render();
+  // The current lists may already file some copies elsewhere (lists edited by hand, new documents):
+  // ask the engine, without moving anything, and say so if the user has not started editing.
+  const dry = await track(api.dryRun());
+  if (dry && dry.ok && dry.report.status === 'ok' && m.moveCount(dry.report) > 0 && f().changes.length === 0) {
+    f().pendingText = `${m.copiesLabel(m.moveCount(dry.report))} are not where the current lists put them.`;
+    if (!f().touched) {
+      f().selected = null;
+      f().notice = 'ask';
+      render();
+    }
+  }
+}
+
+function pick(selected, value) {
+  f().touched = true;
+  f().selected = selected;
+  f().value = value;
+  f().fieldError = null;
+  f().error = null;
+  render();
+}
+
+function currentOp() {
+  const sel = f().selected;
+  const name = f().value.trim();
+  if (!sel || name === '') return null;
+  if (sel.kind === 'item') return name === currentList()[sel.index] ? null : { kind: 'rename', index: sel.index, name };
+  if (sel.kind === 'add') return { kind: 'add', name };
+  return null;
+}
+
+function changeFor(op) {
+  const list = f().view;
+  if (op.kind === 'rename') return { kind: 'rename', list, from: currentList()[op.index], to: op.name };
+  if (op.kind === 'add') return { kind: 'add', list, name: op.name };
+  return { kind: 'remove', list, name: currentList()[op.index] };
+}
+
+/** Splits the engine's issues: the one about the edited name goes under the field, the rest above. */
+function placeIssues(op, issues) {
+  const index = m.editedIndex(f().saved, f().view, op);
+  const shared = f().saved.shared_owner;
+  const mine = issues.filter((i) => i.list === f().view && i.index === index);
+  const rest = issues.filter((i) => !mine.includes(i));
+  f().fieldError = mine.length > 0 ? m.friendlyError(mine[0], shared) : null;
+  f().error = rest.length > 0 ? rest.map((i) => `${i.list}${i.name ? ` "${i.name}"` : ''}: ${m.friendlyError(i, shared)}`).join(' ') : null;
+}
+
+let checkTimer = null;
+function scheduleCheck() {
+  clearTimeout(checkTimer);
+  checkTimer = setTimeout(() => void check(), 250);
+}
+
+/** Live validation with the engine's own rule (`filing save --check` never writes). */
+async function check() {
+  const op = currentOp();
+  if (!op) {
+    f().fieldError = null;
+    renderFiling();
+    return;
+  }
+  const value = f().value;
+  const res = await track(api.saveFiling(m.draftFor(f().saved, f().view, op), true));
+  if (f().value !== value) return; // typed on since; a newer check is coming
+  if (res && res.ok && !res.report.ok) placeIssues(op, res.report.errors);
+  else {
+    f().fieldError = null;
+    if (res && !res.ok) f().error = res.error ?? null;
+  }
+  renderFiling();
+}
+
+async function save(op) {
+  if (!op || f().saving) return;
+  clearTimeout(checkTimer);
+  f().saving = true;
+  renderFiling();
+  const res = await track(api.saveFiling(m.draftFor(f().saved, f().view, op), false));
+  f().saving = false;
+  if (!res || !res.ok) {
+    f().error = res?.error ?? 'The engine did not answer.';
+  } else if (!res.report.ok) {
+    placeIssues(op, res.report.errors);
+  } else {
+    f().changes.push(changeFor(op));
+    f().saved = { ...f().saved, folders: res.report.folders, owners: res.report.owners };
+    f().error = null;
+    f().fieldError = null;
+    f().selected = null;
+    f().value = '';
+    f().dry = null;
+    f().showAll = false;
+    f().notice = 'ask';
+  }
+  render();
+}
+
+async function resort() {
+  f().notice = 'running';
+  f().error = null;
+  render();
+  const res = await track(api.dryRun());
+  if (!res || !res.ok) {
+    f().error = res?.error ?? 'The engine did not answer.';
+    f().notice = 'ask';
+  } else {
+    f().dry = res.report;
+    f().showAll = false;
+    f().notice = 'preview';
+  }
+  render();
+}
+
+async function apply() {
+  if (f().notice !== 'preview') return;
+  f().notice = 'applying';
+  render();
+  const res = await track(api.resort());
+  if (!res || !res.ok) {
+    f().error = res?.error ?? 'The engine did not answer.';
+    f().notice = 'preview';
+  } else {
+    f().applied = res.report;
+    f().changes = [];
+    f().pendingText = null;
+    f().dry = null;
+    f().notice = 'done';
+    void loadDocs();
+  }
+  render();
+}
+
+function closeNotice() {
+  f().notice = null;
+  f().pendingText = null;
+  selectDefault();
+  render();
+}
+
+function documentCount(name) {
+  if (!state.docs) return 0;
+  const key = f().view === 'folders' ? 'folder' : 'owner';
+  return state.docs.documents.filter((doc) => doc[key] === name).length;
+}
+
+function renderFiling() {
+  const s = f();
+  $('filingError').hidden = s.error === null;
+  $('filingError').textContent = s.error ?? '';
+  if (!s.saved) {
+    $('nameForm').hidden = true;
+    $('noticeCard').hidden = true;
+    return;
+  }
+  const docs = state.docs?.documents ?? [];
+  const folders = s.view === 'folders';
+
+  // list pane
+  $('addButton').setAttribute('aria-label', folders ? 'add folder' : 'add owner');
+  for (const button of $('viewSwitch').querySelectorAll('button')) {
+    button.setAttribute('aria-checked', button.dataset.view === s.view ? 'true' : 'false');
+  }
+  $('listMeta').textContent = m.listMeta(s.view, s.saved, docs.length);
+  const rows = $('filingRows');
+  rows.replaceChildren();
+  if (!folders && s.saved.owners.length === 0) {
+    rows.append(el('p', 'empty', `No owners yet. Add the people and companies whose documents these are. Until then every copy is filed under ${s.saved.shared_owner}.`));
+  }
+  for (const row of m.filingRows(s.view, s.saved, docs, s.changes, s.selected)) {
+    if (row.kind === 'item') rows.append(listRow(row, () => pick({ kind: 'item', index: row.index }, row.title)));
+    else if (row.kind === 'shared') rows.append(listRow(row, () => pick({ kind: 'shared' }, s.saved.shared_owner)));
+    else rows.append(listRow(row, null));
+  }
+
+  // path example: follows the field; with the notice up, it shows the last change
+  const sel = s.selected;
+  let focus = { original: null, value: '', placeholder: '' };
+  if (sel?.kind === 'item') focus = { original: currentList()[sel.index], value: s.value, placeholder: '' };
+  else if (sel?.kind === 'add') focus = { original: null, value: s.value, placeholder: '' };
+  else if (sel?.kind === 'shared') focus = { original: null, value: s.saved.shared_owner, placeholder: '' };
+  else {
+    const last = [...s.changes].reverse().find((c) => c.list === s.view && c.kind !== 'remove');
+    if (last) focus = { original: last.kind === 'rename' ? last.to : null, value: last.kind === 'rename' ? last.to : last.name, placeholder: '' };
+  }
+  const path = $('pathTokens');
+  path.replaceChildren(
+    ...m.examplePath(s.view, s.saved, docs, s.changes, focus).map((level) => {
+      const node = el('span', level.on ? 'level on' : 'level');
+      node.append(el('span', 'level-cap', level.cap));
+      const val = el('span', 'level-val', level.val);
+      if (level.sep) val.append(el('span', 'level-sep', level.sep));
+      node.append(val);
+      return node;
+    }),
+  );
+  $('pathNote').textContent = folders ? m.FOLDER_NOTE : m.OWNER_NOTE;
+
+  const showNotice = s.notice !== null && sel === null;
+  $('noticeCard').hidden = !showNotice;
+  $('nameForm').hidden = showNotice || sel === null;
+  if (showNotice) renderNotice();
+  else if (sel) renderForm();
+}
+
+function renderNotice() {
+  const s = f();
+  const card = { pill: 're-sort needed', tone: 'attention', text: '', note: '', resort: true, done: false };
+  const renamed = s.changes.some((c) => c.kind !== 'add');
+  if (s.notice === 'ask' || s.notice === 'running') {
+    card.text = s.changes.length > 0 ? `${m.changeSummary(s.changes)} Re-sorting shows where every filed copy goes with the new lists.` : (s.pendingText ?? '');
+    card.note = 'Nothing moves yet. You get a preview first, and your original files are never touched.';
+    if (renamed) card.note += ' Documents still filed under a renamed or removed name go to unsorted (or the shared owner) until the model re-reads them with “lets-rag-docs classify --force”.';
+  } else if (s.notice === 'preview' || s.notice === 'applying') {
+    const problem = m.dryRunProblem(s.dry);
+    const count = problem ? 0 : m.moveCount(s.dry);
+    card.resort = false;
+    card.note = 'Only the filed copies move. Originals are never touched, and a copy you edited after filing is never removed.';
+    if (problem) {
+      card.pill = 'nothing to re-sort';
+      card.tone = 'danger';
+      card.text = problem;
+    } else if (count === 0) {
+      card.pill = 'nothing to move';
+      card.tone = 'positive';
+      card.text = 'Every filed copy is already where the lists put it.';
+    } else {
+      card.pill = `${m.copiesLabel(count)} will move`;
+      card.text = 'Here is where the filed copies go with the current lists. Check the moves below, then apply them.';
+    }
+    card.done = problem !== null || count === 0;
+  } else if (s.notice === 'done') {
+    card.pill = 'filed';
+    card.tone = 'positive';
+    card.text = m.applySummary(s.applied);
+    card.resort = false;
+    card.done = true;
+  }
+  setPill($('noticePill'), card.pill, card.tone);
+  $('noticeText').textContent = card.text;
+  $('noticeNote').textContent = card.note;
+  $('noticeNote').hidden = card.note === '';
+  $('resortButton').hidden = !card.resort;
+  $('resortButton').disabled = s.notice === 'running';
+  $('resortButton').textContent = s.notice === 'running' ? 're-sorting…' : 're-sort documents';
+  $('noticeDone').hidden = !card.done;
+
+  const plan = (s.notice === 'preview' || s.notice === 'applying') && m.dryRunProblem(s.dry) === null ? m.movePlan(s.dry) : null;
+  const moves = plan !== null && plan.count > 0;
+  $('movesSection').hidden = !moves;
+  if (!moves) return;
+  const shown = plan.rows.slice(0, s.showAll ? ALL_ROWS : PREVIEW_ROWS);
+  $('moveRows').replaceChildren(
+    ...shown.map((row) => listRow({ initials: m.fileType(row.title), title: row.title, subject: row.to, preview: row.from, pill: row.pill }, null)),
+  );
+  const more = plan.count - shown.length;
+  $('movesMore').hidden = more <= 0;
+  $('movesMore').textContent = more > 0 ? `and ${more} more` : '';
+  $('applyButton').textContent = s.notice === 'applying' ? 'moving…' : `move ${m.copiesLabel(plan.count)}`;
+  $('applyButton').disabled = s.notice === 'applying';
+  $('showAllButton').textContent = `show all ${plan.count}`;
+  $('showAllButton').hidden = s.showAll || plan.count <= PREVIEW_ROWS;
+  $('laterButton').disabled = s.notice === 'applying';
+}
+
+function renderForm() {
+  const s = f();
+  const sel = s.selected;
+  const folders = s.view === 'folders';
+  const word = folders ? 'folder' : 'owner';
+  const form = { title: '', meta: '', label: `${word} name`, placeholder: '', save: 'save name', glyph: false, remove: '', note: m.RESORT_NOTE, helper: '', readonly: false };
+  if (sel.kind === 'item') {
+    const name = currentList()[sel.index];
+    form.title = name;
+    form.meta = `${m.docsLabel(documentCount(name))} filed here`;
+    form.remove = `remove ${word}`;
+    if (s.value.trim() === name) {
+      form.note = folders
+        ? 'Removing a folder deletes no documents. They are re-sorted into the folders that are left.'
+        : `Removing an owner deletes no documents. They are re-sorted to the owners that are left, or to ${s.saved.shared_owner}.`;
+    }
+  } else if (sel.kind === 'add') {
+    form.title = `add ${word}`;
+    form.meta = 'Spell it the way the folder should read.';
+    form.placeholder = folders ? 'e.g. Vehicles' : 'e.g. Alex Example';
+    form.save = `add ${word}`;
+    form.glyph = true;
+  } else {
+    const shared = s.saved.shared_owner;
+    const n = state.docs ? state.docs.documents.filter((doc) => doc.owner === null || doc.owner === shared || !s.saved.owners.includes(doc.owner)).length : 0;
+    form.title = shared;
+    form.meta = `${m.docsLabel(n)} filed here`;
+    form.label = 'shared folder name';
+    form.helper = 'For documents that belong to nobody on the list, or to several people.';
+    form.note = 'This name is shared_owner in config.toml. The app shows it but does not change it.';
+    form.readonly = true;
+  }
+  $('formTitle').textContent = form.title;
+  $('formMeta').textContent = form.meta;
+  $('nameLabel').textContent = form.label;
+  const input = $('nameInput');
+  if (input.value !== s.value) input.value = s.value;
+  input.placeholder = form.placeholder;
+  input.readOnly = form.readonly;
+  input.setAttribute('aria-invalid', s.fieldError ? 'true' : 'false');
+  const helper = $('nameHelper');
+  helper.textContent = s.fieldError ?? form.helper;
+  helper.hidden = !s.fieldError && !form.helper;
+  helper.classList.toggle('error-text', Boolean(s.fieldError));
+  $('saveLabel').textContent = s.saving ? 'saving…' : form.save;
+  $('saveGlyph').toggleAttribute('hidden', !form.glyph); // an SVG element has no .hidden property
+  $('saveButton').disabled = form.readonly || s.saving || s.fieldError !== null || currentOp() === null;
+  $('removeButton').hidden = form.remove === '';
+  $('removeButton').textContent = form.remove;
+  $('removeButton').disabled = s.saving || (folders && s.saved.folders.length <= 1);
+  $('formNote').textContent = form.note;
+}
+
+// ---- wiring ----
+
+function wire() {
+  for (const button of document.querySelectorAll('.nav button')) {
+    button.addEventListener('click', () => showSection(button.dataset.section));
+  }
+  $('askForm').addEventListener('submit', (event) => void ask(event));
+  $('cancelAsk').addEventListener('click', () => void cancelAsk());
+  $('copyAnswer').addEventListener('click', () => void copyAnswer());
+
+  for (const button of $('viewSwitch').querySelectorAll('button')) {
+    button.addEventListener('click', () => {
+      if (!f().saved || f().view === button.dataset.view) return;
+      f().view = button.dataset.view;
+      f().touched = true;
+      f().error = null;
+      if (f().notice !== null) f().selected = null;
+      else selectDefault();
+      render();
+    });
+  }
+  $('addButton').addEventListener('click', () => {
+    if (f().saved) pick({ kind: 'add' }, '');
+    $('nameInput').focus();
+  });
+  $('nameInput').addEventListener('input', () => {
+    f().value = $('nameInput').value;
+    f().fieldError = null;
+    renderFiling();
+    scheduleCheck();
+  });
+  $('nameForm').addEventListener('submit', (event) => {
+    event.preventDefault();
+    void save(currentOp());
+  });
+  $('removeButton').addEventListener('click', () => {
+    const sel = f().selected;
+    if (sel?.kind === 'item') void save({ kind: 'remove', index: sel.index });
+  });
+  $('resortButton').addEventListener('click', () => void resort());
+  $('applyButton').addEventListener('click', () => void apply());
+  $('showAllButton').addEventListener('click', () => {
+    f().showAll = true;
+    render();
+  });
+  $('laterButton').addEventListener('click', closeNotice);
+  $('noticeDone').addEventListener('click', closeNotice);
+}
+
+document.body.dataset.pending = '0';
+wire();
+render();
+void loadDocs();

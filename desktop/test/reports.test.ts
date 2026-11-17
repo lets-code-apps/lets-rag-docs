@@ -47,3 +47,13 @@ test('empty stdout uses the engine\'s stderr reason', () => {
 	assert.ok(!bad.ok);
 	assert.equal(bad.error, 'ask: cannot read config');
 });
+test('an untitled document keeps the whole library readable', () => {
+	const report = JSON.parse(read('documents.json')) as { documents: { title: unknown }[] };
+	report.documents[0].title = null;
+	const parsed = parseDocuments(JSON.stringify(report), []);
+	assert.ok(parsed.ok);
+	assert.equal(parsed.value.documents.length, 2);
+	assert.equal(parsed.value.documents[0].title, null);
+	report.documents[0].title = 42;
+	assert.equal(parseDocuments(JSON.stringify(report), []).ok, false);
+});

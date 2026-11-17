@@ -1,7 +1,9 @@
 # Let's RAG Docs — desktop
 
-A macOS menu-bar Electron companion for the `lets-rag-docs` Rust engine. It opens **one hidden window
-by default**, shows ask/filing screens, and calls the engine one-shot over its command line. It never
+A macOS menu-bar Electron companion for the `lets-rag-docs` Rust engine. It lives in the menu bar
+(click the icon to show or focus the window, right-click for Open/Quit), shows the **ask** and
+**filing** screens from the approved RagAsk/RagFiling designs, and calls the engine one-shot over its
+command line. It never
 reads the repository's local model, database, config file or document folders itself, and it never
 points the app at real data: `npm run smoke` and `npm run shots` hard-set `test/fixtures/fake-engine.mjs`.
 
@@ -23,7 +25,8 @@ Run from this `desktop/` directory.
 | Build | `npm run build` | `tsc -p tsconfig.build.json` into `dist/` and copy `preload.cjs` |
 | Dev launch | `npm start` | build, then open a visible window (`RAG_DOCS_START_WINDOW=1 electron .`) |
 | Smoke | `npm run smoke` | build, then hidden Electron with the fake engine; exits `SMOKE OK` / `SMOKE FAIL` |
-| Screenshots | `npm run shots` | build, then Electron `capturePage` writes the ask state and all 10 design filing states in light and dark under `screenshots/` |
+| Screenshots | `npm run shots` | build, then drive the real page against the fake engine (type, click, save, re-sort) and `capturePage` ask plus the 10 RagFiling states (and the 360px form, scrolled) in light and dark: 24 PNGs under `screenshots/` |
+| Icons | `npm run icons` | re-render `assets/*.png` from SVG (see below) |
 
 ## Engine contract
 
@@ -37,27 +40,31 @@ data; real failures exit non-zero with empty stdout and a reason on stderr.
 | `filing show --json` | `rag.filing()` | `{version, folders, owners, shared_owner}` |
 | `filing save [--check]` (stdin JSON draft) | `rag.saveFiling()` | `{version, ok, saved, folders, owners, errors}` |
 | `organize --dry-run --json` | `rag.dryRun()` | `{version, mode, status, items, counts}` |
-| `organize --apply --json` | `rag.resort()` | same shape as dry-run; apply is refused unless a fresh successful dry-run is cached |
+| `organize --apply --json` | `rag.resort()` | same shape as dry-run; refused unless the last report was a dry-run with `status:"ok"`, with no save and no apply since |
+
+Time budgets: reads 10 s, dry-run 10 min (it hashes every original), apply 60 min (it copies and
+re-embeds a batch through the local model), ask 6 min. A call over budget is stopped and reported as
+"… timed out", never parsed as half a report. `ask` and `apply` share one slot (local LLM, concurrency 1).
 
 Binary lookup: `RAG_DOCS_ENGINE_PATH`, then `<resources>/engine/lets-rag-docs`, then
 `<repo>/target/debug/lets-rag-docs`. `--config` is added only when `RAG_DOCS_CONFIG` is set.
 
 ## Sample data
 
-| Key | What the engine supplies today | What the UI marks as sample |
-|---|---|---|
-| citationSnippet | The engine supplies source, file and chunk numbers, but not page/snippet text. | citation snippet text |
-| documentSize | The engine does not supply per-document size. | document size |
-| indexHealth | The engine does not expose index freshness/health. | index health |
+None. Every value on screen comes from an engine report or from what the user typed; the page has no
+demo or sample mode (a test checks). Designed details the engine cannot supply yet are left out and
+listed as follow-ups in the PR: page counts and sizes in the library, "not indexed" pills, page numbers
+in citations, "open" for a cited document, the AppBar search and "add documents", editing the shared
+owner's name, and a rename that also re-files documents (today they go to unsorted until
+`lets-rag-docs classify --force`).
 
-Every sample element is rendered with a visible `Sample data` pill and `data-sample="true"`.
+## Icons
 
-## Icon generation
-
-Run `node scripts/make-assets.mjs` from `desktop/` to write `assets/menubarTemplate.png`,
-`assets/menubarTemplate@2x.png` and `assets/icon.png`. The assets are synthetic PNGs generated locally;
-macOS tints the menu-bar glyph through `setTemplateImage(true)`, and the app icon is set only when running
-unpackaged.
+`npm run icons` (`scripts/make-icons.mjs`) renders the PNGs with Electron's own Chromium, no image
+library: `assets/menubarTemplate.png` / `@2x` (18 and 36 px, black on transparent) are drawn like Triage
+Mail's `menubar.svg` with the RAG emblem's two text lines; `assets/icon.png` (1024 px) is a grain tile
+(radius 23%) with the white emblem from `renderer/emblem.svg` at 64%. macOS tints the template through
+`nativeImage.setTemplateImage(true)`; the dock icon is set only when running unpackaged.
 
 ## Boundary rules
 

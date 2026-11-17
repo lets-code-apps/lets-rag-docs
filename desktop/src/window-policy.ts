@@ -5,6 +5,9 @@ export function windowOptions(): {
 	width: number;
 	height: number;
 	minWidth: number;
+	minHeight: number;
+	titleBarStyle: 'hiddenInset';
+	trafficLightPosition: { x: number; y: number };
 	webPreferences: {
 		preload: string;
 		contextIsolation: true;
@@ -13,9 +16,14 @@ export function windowOptions(): {
 	};
 } {
 	return {
-		width: 720,
-		height: 480,
+		// The design's window: wide enough for nav | list | detail; at 360px the panes stack.
+		width: 1200,
+		height: 820,
 		minWidth: 360,
+		minHeight: 480,
+		// The AppBar is the title bar: its left inset leaves room for the window buttons.
+		titleBarStyle: 'hiddenInset',
+		trafficLightPosition: { x: 20, y: 22 },
 		webPreferences: {
 			preload: 'preload.cjs',
 			contextIsolation: true,

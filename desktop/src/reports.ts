@@ -11,7 +11,7 @@ export type DocumentsReport = {
 
 export type DocumentRow = {
 	path: string;
-	title: string;
+	title: string | null;
 	type: string;
 	date: string | null;
 	folder: string | null;
@@ -128,9 +128,11 @@ export function parseDocuments(stdout: string, stderrTail: string[]): Parse<Docu
 		if (typeof row !== 'object' || row === null) return err('documents row is not an object');
 		const obj = row as { path: unknown; title: unknown; type: unknown; date: unknown; folder: unknown; owner: unknown; filed_as: unknown };
 		const path = stringOrNull(obj.path);
-		const title = stringOrNull(obj.title);
 		const type = stringOrNull(obj.type);
-		if (path === null || title === null || type === null) return err('documents row has a missing text field');
+		if (path === null || type === null) return err('documents row has a missing text field');
+		// A document the model could not title is still a document: the engine sends `null`.
+		if (obj.title !== null && typeof obj.title !== 'string') return err('documents row title must be text or null');
+		const title = stringOrNull(obj.title);
 		docs.push({
 			path,
 			title,
