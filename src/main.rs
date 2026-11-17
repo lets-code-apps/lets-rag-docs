@@ -84,7 +84,12 @@ enum Command {
     /// Serve `search_docs` to an MCP client over stdio
     Mcp,
     /// Answer a question from the documents with a local LLM, with citations
-    Ask { question: String },
+    Ask {
+        /// Machine-readable output: `{answer, sources}` instead of answer text plus source lines
+        #[arg(long)]
+        json: bool,
+        question: String,
+    },
 }
 
 #[tokio::main]
@@ -108,7 +113,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Organize { dry_run, apply } => organize::run(&config, dry_run, apply).await,
         Command::Documents { json } => documents::run(&config, json),
         Command::Mcp => mcp::run(&config).await,
-        Command::Ask { question } => ask::run(&config, &question).await,
+        Command::Ask { question, json } => ask::run(&config, &question, json).await,
     }
 }
 

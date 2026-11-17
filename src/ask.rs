@@ -53,7 +53,26 @@ pub enum AskError {
     EmptyAnswer,
 }
 
-pub async fn run(config: &Config, question: &str) -> anyhow::Result<()> {
+pub async fn run(config: &Config, question: &str, json: bool) -> anyhow::Result<()> {
+    let answered = answer(config, question).await?;
+    if json {
+        print_json(answered)?;
+    } else {
+        print_text(&answered);
+    }
+    Ok(())
+}
+
+/// The retrieval + one LLM call, without printing: `run` picks a printer, and the JSON tests
+/// build an `Answered` directly. No passages is a normal outcome (answer `null`), not an error;
+/// a refused `base_url`, a dead LLM or an empty answer are real failures (non-zero exit).
+#[derive(Debug)]
+pub(crate) struct Answered {
+    pub(crate) answer: Option<String>,
+    pub(crate) passages: Vec<Passage>,
+}
+
+pub(crate) async fn answer(config: &Config, question: &str) -> anyhow::Result<Answered> {
     // Before any request, so no document text can reach a non-local server.
     check_base_url(&config.llm)?;
 
@@ -62,8 +81,10 @@ pub async fn run(config: &Config, question: &str) -> anyhow::Result<()> {
     let passages =
         search::search_docs(&embed, &qdrant, &config.qdrant.collection, question, TOP).await?;
     if passages.is_empty() {
-        println!("No passages found. Has `lets-rag-docs ingest` been run?");
-        return Ok(());
+        return Ok(Answered {
+            answer: None,
+            passages: Vec::new(),
+        });
     }
 
     let answer = chat(
@@ -73,10 +94,64 @@ pub async fn run(config: &Config, question: &str) -> anyhow::Result<()> {
         false,
     )
     .await?;
+    Ok(Answered {
+        answer: Some(answer),
+        passages,
+    })
+}
+
+/// The text output, byte-identical to before the split.
+fn print_text(answered: &Answered) {
+    if answered.passages.is_empty() {
+        println!("No passages found. Has `lets-rag-docs ingest` been run?");
+        return;
+    }
+    // chat() refuses an empty answer, so passages imply an answer.
+    let answer: String = answered.answer.clone().unwrap_or_default();
     println!("{answer}\n\nSources:");
-    for p in &passages {
+    for p in &answered.passages {
         println!("- {}, chunk {}", p.source, p.chunk);
     }
+}
+
+/// `ask --json`: one JSON object on stdout; passage text stays out of it - citations are
+/// `source` + `chunk` exactly as the text printer shows them.
+#[derive(Serialize)]
+struct Report {
+    /// Wire format version: a consumer that speaks 1 refuses anything else.
+    version: u8,
+    answer: Option<String>,
+    sources: Vec<Source>,
+}
+
+#[derive(Serialize)]
+struct Source {
+    source: String,
+    file: String,
+    chunk: i64,
+    score: f32,
+}
+
+/// The JSON body as a value, so the fixture-lock tests serialize without printing.
+fn report_of(answered: Answered) -> Report {
+    Report {
+        version: 1,
+        answer: answered.answer,
+        sources: answered
+            .passages
+            .iter()
+            .map(|p| Source {
+                source: p.source.to_string(),
+                file: p.file.to_string(),
+                chunk: p.chunk,
+                score: p.score,
+            })
+            .collect(),
+    }
+}
+
+fn print_json(answered: Answered) -> anyhow::Result<()> {
+    println!("{}", serde_json::to_string(&report_of(answered))?);
     Ok(())
 }
 
@@ -308,6 +383,89 @@ mod tests {
             check_base_url(&llm("https://127.0.0.1/v1", false)),
             Err(AskError::NotHttp)
         ));
+    }
+
+    use std::path::PathBuf;
+
+    // Fixture lock shared with the TS tests and the fake engine (see documents.rs):
+    // `testdata/desktop/<name>.json` holds the exact bytes; LOCK_FIXTURES=1 rewrites them.
+    fn lock(name: &str, actual: &str) {
+        let path: PathBuf = PathBuf::from("testdata/desktop").join(name);
+        if std::env::var("LOCK_FIXTURES")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+        {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, actual).unwrap();
+            return;
+        }
+        let want: String = std::fs::read_to_string(&path)
+            .expect("fixture missing: run the tests once with LOCK_FIXTURES=1");
+        assert_eq!(
+            actual,
+            want.as_str(),
+            "JSON shape changed (or the fixture is stale)"
+        );
+    }
+
+    #[tokio::test]
+    async fn json_has_answer_and_sources() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [{"message": {"content": "Blue. [manual, chunk 2]"}}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let passages: Vec<Passage> = [Passage {
+            text: "The box is blue.".into(),
+            source: "manual".into(),
+            file: "manual.pdf.text.txt".into(),
+            chunk: 2,
+            score: 0.5,
+        }]
+        .into_iter()
+        .collect();
+        let config = llm(&format!("{}/v1", server.uri()), false);
+        let answer = chat(
+            &config,
+            SYSTEM_PROMPT,
+            &user_prompt("What colour?", &passages),
+            false,
+        )
+        .await
+        .unwrap();
+        let json: String = serde_json::to_string(&report_of(Answered {
+            answer: Some(answer),
+            passages,
+        }))
+        .unwrap();
+        assert!(
+            !json.contains("The box"),
+            "passage text must stay out of the JSON"
+        );
+        assert!(
+            json.contains("\"answer\":\"Blue. [manual, chunk 2]"),
+            "{json}"
+        );
+        assert!(
+            json.contains("\"sources\":[{\"source\":\"manual\""),
+            "{json}"
+        );
+        lock("ask.json", &json);
+    }
+
+    #[test]
+    fn json_without_passages_is_null_answer() {
+        let json: String = serde_json::to_string(&report_of(Answered {
+            answer: None,
+            passages: Vec::new(),
+        }))
+        .unwrap();
+        assert_eq!(json, "{\"version\":1,\"answer\":null,\"sources\":[]}");
+        lock("ask-no-passages.json", &json);
     }
 
     #[test]
