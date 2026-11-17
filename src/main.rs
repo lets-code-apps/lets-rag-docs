@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 
-use clap::{ArgAction, Parser, Subcommand};
+use clap::{ArgAction, Args, Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 use crate::config::{Config, DEFAULT_CONFIG_PATH, expand_home};
@@ -40,6 +40,17 @@ struct Cli {
 
     #[command(subcommand)]
     command: Command,
+}
+
+#[derive(Debug, Args)]
+#[group(required = true, multiple = false)]
+struct OrganizeMode {
+    /// Print the planned copies and change nothing
+    #[arg(long)]
+    dry_run: bool,
+    /// Copy the documents and re-embed the copies
+    #[arg(long)]
+    apply: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -65,15 +76,14 @@ enum Command {
         /// The file to add
         file: PathBuf,
     },
-    #[group(required = true, multiple = false)]
     /// Copy each classified original into `library/<folder>/<owner>/<year>/` and re-index the copy
     Organize {
-        /// Print the planned copies and change nothing
+        /// Machine-readable output: the single JSON object `{mode, status, items, counts}`
         #[arg(long)]
-        dry_run: bool,
-        /// Copy the documents and re-embed the copies
-        #[arg(long)]
-        apply: bool,
+        json: bool,
+        /// The mode stays exactly one: --dry-run or --apply, never both, never neither
+        #[command(flatten)]
+        mode: OrganizeMode,
     },
     /// List every classified document as JSON (read-only): `documents --json`
     Documents {
@@ -110,7 +120,9 @@ async fn main() -> anyhow::Result<()> {
         Command::Eval { classify: true } => eval::run_classify(&config),
         Command::Classify { force } => classify::run(&config, force).await,
         Command::Add { file } => add::run(&config, &file).await,
-        Command::Organize { dry_run, apply } => organize::run(&config, dry_run, apply).await,
+        Command::Organize { json, mode } => {
+            organize::run(&config, mode.dry_run, mode.apply, json).await
+        }
         Command::Documents { json } => documents::run(&config, json),
         Command::Mcp => mcp::run(&config).await,
         Command::Ask { question, json } => ask::run(&config, &question, json).await,
@@ -199,4 +211,45 @@ fn init_logging(verbosity: u8) {
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .init();
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::Cli;
+
+    // The clap contract the desktop shell and the acceptance tests rely on: `organize --json`
+    // alone is not a mode, and adding --json must not have widened the exactly-one group.
+    #[test]
+    fn organize_requires_exactly_one_mode() {
+        let parses = |extra: &[&str]| {
+            let mut args: Vec<String> = vec!["lets-rag-docs".to_string()];
+            args.extend(extra.iter().map(|a| a.to_string()));
+            Cli::try_parse_from(args).is_ok()
+        };
+        let bad: Vec<Vec<&str>> = vec![
+            vec!["organize"],
+            vec!["organize", "--json"],
+            vec!["organize", "--dry-run", "--apply"],
+            vec!["organize", "--dry-run", "--apply", "--json"],
+        ];
+        for extra in bad {
+            assert!(
+                !parses(extra.as_slice()),
+                "should be rejected: {}",
+                extra.join(" ")
+            );
+        }
+        let good: Vec<Vec<&str>> = vec![
+            vec!["organize", "--dry-run"],
+            vec!["organize", "--apply"],
+            vec!["organize", "--dry-run", "--json"],
+            vec!["organize", "--apply", "--json"],
+        ];
+        for extra in good {
+            let label: String = extra.join(" ");
+            assert!(parses(extra.as_slice()), "should parse: {}", label);
+        }
+    }
 }

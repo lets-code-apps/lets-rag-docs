@@ -21,6 +21,7 @@ use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, anyhow};
 use rusqlite::Connection;
+use serde::Serialize;
 
 use crate::chunk;
 use crate::classify;
@@ -39,7 +40,8 @@ const COLLISION_CAP: usize = 1000;
 /// A word with this many digits is a reference number, not a name (see `sanitise`).
 const LONG_NUMBER_DIGITS: usize = 8;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Mode {
     DryRun,
     Apply,
@@ -65,7 +67,7 @@ struct Entry {
     duplicates: Vec<String>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize)]
 struct Counts {
     /// What the plan would do.
     would_copy: usize,
@@ -82,13 +84,53 @@ struct Counts {
     missing: usize,
 }
 
+/// The plan as data for `--json`: one item per printed line. `build_plan` keeps `lines` (the text
+/// output and its tests assert them) and pushes the structured item beside each - never the
+/// other way round: strings are never parsed back.
+#[derive(Clone, Debug, Serialize)]
+struct PlanItem {
+    action: Action,
+    from: String,
+    to: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum Action {
+    Copy,
+    Move,
+    AlreadyThere,
+    Duplicate,
+    MissingOriginal,
+}
+
+/// `organize --json`: one JSON object. `items` is the plan, `counts` the outcome (dry-run fills
+/// only the would_* fields and the skip counters; apply fills what actually happened as well).
+#[derive(Serialize)]
+struct JsonReport {
+    version: u8,
+    mode: Mode,
+    status: DbStatus,
+    items: Vec<PlanItem>,
+    counts: Counts,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DbStatus {
+    Ok,
+    NoDatabase,
+    Outdated,
+}
+
 struct Built {
     entries: Vec<Entry>,
     counts: Counts,
     lines: Vec<String>,
+    items: Vec<PlanItem>,
 }
 
-pub async fn run(config: &Config, dry_run: bool, apply: bool) -> anyhow::Result<()> {
+pub async fn run(config: &Config, dry_run: bool, apply: bool, json: bool) -> anyhow::Result<()> {
     let mode =
         parse_mode(dry_run, apply).ok_or(anyhow!("pass exactly one of --dry-run or --apply"))?;
     check_library_separation(config)?;
@@ -97,22 +139,52 @@ pub async fn run(config: &Config, dry_run: bool, apply: bool) -> anyhow::Result<
         // A dry-run may read, never write: `db::open` creates the parent folder, the file and its
         // table and tightens permissions, so dry-run goes through `db::open_for_read` - and that
         // helper does not open the file at all when it is missing. The three expected states print
-        // byte-identical hints to before the refactor.
+        // byte-identical hints to before the refactor, or as `status` values under --json.
         match db::open_for_read(&config.paths.db)? {
             db::ReadOutcome::Ready(conn) => {
                 let plan = build_plan(config, &conn)?;
-                for line in plan.lines {
-                    println!("{}", line);
+                if json {
+                    print_json(JsonReport {
+                        version: 1,
+                        mode,
+                        status: DbStatus::Ok,
+                        items: plan.items,
+                        counts: plan.counts,
+                    })?;
+                } else {
+                    for line in plan.lines {
+                        println!("{}", line);
+                    }
+                    println!("{}", plan_line(&plan.counts));
                 }
-                println!("{}", plan_line(&plan.counts));
                 return Ok(());
             }
             db::ReadOutcome::Outdated => {
-                println!("run `classify --force` first: the database predates owners and matters");
+                if json {
+                    print_json(JsonReport {
+                        version: 1,
+                        mode,
+                        status: DbStatus::Outdated,
+                        items: Vec::new(),
+                        counts: zero_counts(),
+                    })?;
+                } else {
+                    println!(
+                        "run `classify --force` first: the database predates owners and matters"
+                    );
+                }
                 return Ok(());
             }
             db::ReadOutcome::NoDatabase { file_exists } => {
-                if file_exists {
+                if json {
+                    print_json(JsonReport {
+                        version: 1,
+                        mode,
+                        status: DbStatus::NoDatabase,
+                        items: Vec::new(),
+                        counts: zero_counts(),
+                    })?;
+                } else if file_exists {
                     println!(
                         "run `classify` first: no documents table in {}",
                         config.paths.db.display()
@@ -131,8 +203,10 @@ pub async fn run(config: &Config, dry_run: bool, apply: bool) -> anyhow::Result<
     // Only `--apply` opens the embed service and Qdrant.
     let conn = db::open(&config.paths.db)?;
     let plan = build_plan(config, &conn)?;
-    for line in plan.lines {
-        println!("{}", line);
+    if !json {
+        for line in plan.lines {
+            println!("{}", line);
+        }
     }
     let embed = EmbedClient::new(&config.embed.url);
     let qdrant = index::connect(&config.qdrant.url)?;
@@ -141,8 +215,41 @@ pub async fn run(config: &Config, dry_run: bool, apply: bool) -> anyhow::Result<
         let applied = apply_entry(config, &embed, Some(&qdrant), Some(&conn), entry).await?;
         tally(&mut counts, applied);
     }
-    println!("{}", apply_line(&counts));
+    if json {
+        // With --json nothing but the report object reaches stdout, in apply too.
+        print_json(JsonReport {
+            version: 1,
+            mode,
+            status: DbStatus::Ok,
+            items: plan.items,
+            counts,
+        })?;
+    } else {
+        println!("{}", apply_line(&counts));
+    }
     Ok(())
+}
+
+/// Serialize the one JSON object; `?` so a broken writer is a real failure.
+fn print_json(report: JsonReport) -> anyhow::Result<()> {
+    println!("{}", serde_json::to_string(&report)?);
+    Ok(())
+}
+
+/// The counts for a plan that never ran.
+fn zero_counts() -> Counts {
+    Counts {
+        would_copy: 0,
+        would_reuse: 0,
+        would_move: 0,
+        copied: 0,
+        already: 0,
+        moved: 0,
+        failed: 0,
+        duplicate: 0,
+        not_classified: 0,
+        missing: 0,
+    }
 }
 
 /// The library folder a stored `folder` files under. The row is data on disk, not trusted, and one
@@ -237,6 +344,7 @@ fn build_plan(config: &Config, conn: &Connection) -> anyhow::Result<Built> {
         missing: 0,
     };
     let mut lines: Vec<String> = Vec::new();
+    let mut items: Vec<PlanItem> = Vec::new();
     // Case-folded key so macOS's case-insensitive filesystem and a shared stem both collide.
     let mut claimed: HashSet<String> = HashSet::new();
     let mut first_by_hash: HashMap<String, String> = HashMap::new();
@@ -250,6 +358,11 @@ fn build_plan(config: &Config, conn: &Connection) -> anyhow::Result<Built> {
             Ok(hash) => hash,
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 lines.push(format!("missing original  {rel}"));
+                items.push(PlanItem {
+                    action: Action::MissingOriginal,
+                    from: rel.to_string(),
+                    to: None,
+                });
                 counts.missing += 1;
                 continue;
             }
@@ -273,6 +386,11 @@ fn build_plan(config: &Config, conn: &Connection) -> anyhow::Result<Built> {
         if let Some(first) = first_by_hash.get(&hash) {
             // Same bytes already planned from another OCR path: one document, no second copy.
             lines.push(format!("duplicate of {first}  {rel}"));
+            items.push(PlanItem {
+                action: Action::Duplicate,
+                from: rel.to_string(),
+                to: Some(first.to_string()),
+            });
             counts.duplicate += 1;
             if let Some(idx) = entry_by_hash.get(&hash) {
                 entries[*idx].duplicates.push(rel);
@@ -305,17 +423,30 @@ fn build_plan(config: &Config, conn: &Connection) -> anyhow::Result<Built> {
             .as_ref()
             .filter(|p| **p != rel_path && library.join(p).exists());
 
+        let target: String = format!("{dir}/{stem}{ext_suffix}");
         if already {
-            lines.push(format!("already there  {orel} -> {dir}/{stem}{ext_suffix}"));
+            lines.push(format!("already there  {orel} -> {target}"));
+            items.push(PlanItem {
+                action: Action::AlreadyThere,
+                from: orel.to_string(),
+                to: Some(target),
+            });
             counts.would_reuse += 1;
         } else if let Some(old) = moving {
-            lines.push(format!(
-                "move  {} -> {dir}/{stem}{ext_suffix}",
-                old.display()
-            ));
+            lines.push(format!("move  {} -> {target}", old.display()));
+            items.push(PlanItem {
+                action: Action::Move,
+                from: old.display().to_string(),
+                to: Some(target),
+            });
             counts.would_move += 1;
         } else {
-            lines.push(format!("copy  {orel} -> {dir}/{stem}{ext_suffix}"));
+            lines.push(format!("copy  {orel} -> {target}"));
+            items.push(PlanItem {
+                action: Action::Copy,
+                from: orel.to_string(),
+                to: Some(target),
+            });
             counts.would_copy += 1;
         }
         entry_by_hash.insert(hash.clone(), entries.len());
@@ -337,6 +468,7 @@ fn build_plan(config: &Config, conn: &Connection) -> anyhow::Result<Built> {
         entries,
         counts,
         lines,
+        items,
     })
 }
 
@@ -1523,7 +1655,7 @@ mod tests {
         );
         let original = f.config.paths.docs_dir.join("one.pdf");
         let before = fs::read_to_string(&original).unwrap();
-        run(&f.config, true, false).await.unwrap();
+        run(&f.config, true, false, false).await.unwrap();
         assert!(
             !fs::exists(f.config.paths.library_dir).unwrap_or(false),
             "dry-run must not create the library"
@@ -1538,7 +1670,7 @@ mod tests {
     #[tokio::test]
     async fn dry_run_without_db_does_not_create_it() {
         let f = fixture();
-        run(&f.config, true, false).await.unwrap();
+        run(&f.config, true, false, false).await.unwrap();
         assert!(
             !fs::exists(&f.config.paths.db).unwrap_or(false),
             "dry-run must not create the database"
@@ -1571,7 +1703,7 @@ mod tests {
         // Deliberately loose: `db::open` would tighten them to 0600, so a write is visible.
         fs::set_permissions(&f.config.paths.db, fs::Permissions::from_mode(0o644)).unwrap();
         let before: Vec<u8> = fs::read(&f.config.paths.db).unwrap();
-        run(&f.config, true, false).await.unwrap();
+        run(&f.config, true, false, false).await.unwrap();
         assert_eq!(
             fs::read(&f.config.paths.db).unwrap(),
             before,
@@ -1599,7 +1731,7 @@ mod tests {
         let f = fixture();
         fs::create_dir_all(f.config.paths.db.parent().unwrap()).unwrap();
         Connection::open(&f.config.paths.db).unwrap();
-        run(&f.config, true, false).await.unwrap();
+        run(&f.config, true, false, false).await.unwrap();
         let ro = db::open_read_only(&f.config.paths.db).unwrap();
         assert!(
             !db::has_documents(&ro).unwrap(),
@@ -1829,6 +1961,144 @@ mod tests {
             apply_line(&counts),
             "organized 0: 0 copied, 0 moved, 0 already there, 1 failed, 0 duplicate, 0 not classified, 0 missing original",
         );
+    }
+
+    // Fixture lock shared with the TS tests and the fake engine (see documents.rs):
+    // `testdata/desktop/<name>.json` holds the exact bytes; LOCK_FIXTURES=1 rewrites them.
+    fn lock(name: &str, actual: &str) {
+        let path = PathBuf::from("testdata/desktop").join(name);
+        if std::env::var("LOCK_FIXTURES")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+        {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, actual).unwrap();
+            return;
+        }
+        let want: String = fs::read_to_string(&path)
+            .expect("fixture missing: run the tests once with LOCK_FIXTURES=1");
+        assert_eq!(
+            actual,
+            want.as_str(),
+            "JSON shape changed (or the fixture is stale)"
+        );
+    }
+
+    #[test]
+    fn json_dry_run_items_and_counts() {
+        let f = fixture();
+        let conn = open(&f);
+        add_doc(
+            &f,
+            &conn,
+            "one.pdf.vision.txt",
+            "abc",
+            Some("Report"),
+            Some("Home"),
+        );
+        // Same bytes: the second OCR file becomes a `duplicate` item, not a second copy.
+        add_doc(
+            &f,
+            &conn,
+            "two.pdf.vision.txt",
+            "abc",
+            Some("Report"),
+            Some("Home"),
+        );
+        // An OCR file whose original is gone becomes `missing_original`.
+        fs::write(f.config.paths.ocr_dir.join("gone.pdf.vision.txt"), "x").unwrap();
+
+        let plan = build_plan(&f.config, &conn).unwrap();
+        let json: String = serde_json::to_string(&JsonReport {
+            version: 1,
+            mode: Mode::DryRun,
+            status: DbStatus::Ok,
+            items: plan.items,
+            counts: plan.counts,
+        })
+        .unwrap();
+        assert!(json.contains("\"action\":\"copy\""), "{json}");
+        assert!(json.contains("\"action\":\"duplicate\""), "{json}");
+        assert!(json.contains("\"action\":\"missing_original\""), "{json}");
+        lock("organize-dry-run.json", &json);
+    }
+
+    #[tokio::test]
+    async fn json_status_when_database_missing() {
+        let f = fixture();
+        let json: String = serde_json::to_string(&JsonReport {
+            version: 1,
+            mode: Mode::DryRun,
+            status: DbStatus::NoDatabase,
+            items: Vec::new(),
+            counts: zero_counts(),
+        })
+        .unwrap();
+        assert!(json.contains("\"status\":\"no_database\""), "{json}");
+        lock("organize-no-database.json", &json);
+        run(&f.config, true, false, true).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn json_dry_run_changes_nothing() {
+        // The same no-write checks as the text dry-run, driven through the --json flag.
+        let f = fixture();
+        {
+            let conn = open(&f);
+            add_doc(
+                &f,
+                &conn,
+                "one.pdf.vision.txt",
+                "abc",
+                Some("Report"),
+                Some("Home"),
+            );
+        }
+        run(&f.config, true, false, true).await.unwrap();
+        assert!(
+            !fs::exists(f.config.paths.library_dir).unwrap_or(false),
+            "dry-run must not create the library"
+        );
+        assert_eq!(
+            fs::read_to_string(f.config.paths.docs_dir.join("one.pdf")).unwrap(),
+            "abc",
+        );
+    }
+
+    #[tokio::test]
+    async fn json_apply_prints_only_json() {
+        // The report `--apply` puts on stdout (and nothing else): items from the plan, counts
+        // from the run. Embed seam as in `apply_embeds_new_source_prefix`; no Qdrant needed.
+        let f = fixture();
+        let conn = open(&f);
+        add_doc(
+            &f,
+            &conn,
+            "one.pdf.vision.txt",
+            "abc",
+            Some("Report"),
+            Some("Home"),
+        );
+        let server = embed_ok_mock().await;
+        let embed = EmbedClient::new(&server.uri());
+        let plan = build_plan(&f.config, &conn).unwrap();
+        let entry = plan.entries.into_iter().next().unwrap();
+        let mut counts = plan.counts.clone();
+        let applied = apply_entry(&f.config, &embed, None, Some(&conn), entry)
+            .await
+            .unwrap();
+        tally(&mut counts, applied);
+        let json: String = serde_json::to_string(&JsonReport {
+            version: 1,
+            mode: Mode::Apply,
+            status: DbStatus::Ok,
+            items: plan.items,
+            counts,
+        })
+        .unwrap();
+        assert!(json.contains("\"mode\":\"apply\""), "{json}");
+        assert!(json.contains("\"copied\":1"), "{json}");
+        lock("organize-apply.json", &json);
     }
 
     #[ignore]

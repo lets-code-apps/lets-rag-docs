@@ -1,0 +1,1 @@
+{"version":1,"mode":"apply","status":"ok","items":[{"action":"copy","from":"one.pdf","to":"Home/Shared/Report.pdf"}],"counts":{"would_copy":1,"would_reuse":0,"would_move":0,"copied":1,"already":0,"moved":0,"failed":0,"duplicate":0,"not_classified":0,"missing":0}}
