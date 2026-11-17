@@ -106,13 +106,21 @@ impl Default for LlmConfig {
     }
 }
 
-/// `[classify]`: the document types and library folders the model may choose. Anything else
-/// becomes `unsorted` (type) or no folder (filed under `unsorted/` by `organize`).
+/// `[classify]`: the document types, library folders and owners the model may choose. Anything
+/// else becomes `unsorted` (type), no folder (filed under `unsorted/`) or no owner (filed under
+/// `shared_owner`).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ClassifyConfig {
     pub types: Vec<String>,
     pub folders: Vec<String>,
+    /// Whose documents these are: family members and the family's own companies. Real names
+    /// belong only in the local config.
+    pub owners: Vec<String>,
+    /// The owner folder for documents that belong to nobody on the list, or to several people.
+    pub shared_owner: String,
+    /// The language titles and matters are written in (e.g. "Polish"). Unset: each document's own.
+    pub language: Option<String>,
 }
 
 impl Default for ClassifyConfig {
@@ -149,6 +157,9 @@ impl Default for ClassifyConfig {
         ClassifyConfig {
             types: types.map(String::from).to_vec(),
             folders: folders.map(String::from).to_vec(),
+            owners: Vec::new(),
+            shared_owner: "Shared".to_string(),
+            language: None,
         }
     }
 }

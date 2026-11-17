@@ -299,6 +299,8 @@ mod tests {
             people: vec![],
             issuer: None,
             folder: None,
+            owner: None,
+            matter: None,
         };
         let points: Vec<PointStruct> = document_points(&embed, &file, text.clone(), Some(&meta))
             .await
@@ -478,6 +480,8 @@ mod tests {
             people: vec![],
             issuer: None,
             folder: None,
+            owner: None,
+            matter: None,
         };
         assert_eq!(
             payload_keys(Some(&meta)),

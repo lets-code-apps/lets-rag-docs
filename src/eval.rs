@@ -104,6 +104,9 @@ struct ClassifyRow {
     /// files written before folders were scored still load; a line without it is not scored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     folder: Option<String>,
+    /// The owner folder `organize` should use (`shared_owner` for none). Optional, like `folder`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    owner: Option<String>,
 }
 
 /// Compares the database with the expected type and date of each document. Without an eval
@@ -125,6 +128,7 @@ pub fn run_classify(config: &Config) -> anyhow::Result<()> {
                 doc_type: d.meta.doc_type,
                 date: d.meta.date,
                 folder: Some(organize::library_folder(config, d.meta.folder.as_deref())),
+                owner: Some(organize::library_owner(config, d.meta.owner.as_deref())),
             };
             out.push_str(&serde_json::to_string(&row)?);
             out.push('\n');
@@ -144,6 +148,7 @@ pub fn run_classify(config: &Config) -> anyhow::Result<()> {
         .with_context(|| format!("cannot read {}", path.display()))?;
     let (mut types_ok, mut dates_ok, mut total) = (0, 0, 0);
     let (mut folders_ok, mut folders_total) = (0, 0);
+    let (mut owners_ok, mut owners_total) = (0, 0);
     for (n, line) in text.lines().filter(|l| !l.trim().is_empty()).enumerate() {
         let want: ClassifyRow = serde_json::from_str(line)
             .with_context(|| format!("{}: bad line {}", path.display(), n + 1))?;
@@ -154,14 +159,23 @@ pub fn run_classify(config: &Config) -> anyhow::Result<()> {
             let stored = got.as_ref().and_then(|m| m.folder.as_deref());
             got.is_some() && organize::library_folder(config, stored) == *f
         });
+        let owner_ok: Option<bool> = want.owner.as_ref().map(|o| {
+            let stored = got.as_ref().and_then(|m| m.owner.as_deref());
+            got.is_some() && organize::library_owner(config, stored) == *o
+        });
         let mark = |ok| if ok { "ok  " } else { "MISS" };
         println!(
-            "type {}  date {}  folder {}  {}",
+            "type {}  date {}  folder {}  owner {}  {}",
             mark(type_ok),
             mark(date_ok),
             folder_ok.map_or("-   ", mark),
+            owner_ok.map_or("-   ", mark),
             want.source
         );
+        if let Some(ok) = owner_ok {
+            owners_total += 1;
+            owners_ok += usize::from(ok);
+        }
         if let Some(ok) = folder_ok {
             folders_total += 1;
             folders_ok += usize::from(ok);
@@ -171,7 +185,8 @@ pub fn run_classify(config: &Config) -> anyhow::Result<()> {
         dates_ok += usize::from(date_ok);
     }
     println!(
-        "type {types_ok}/{total}, date {dates_ok}/{total}, folder {folders_ok}/{folders_total}"
+        "type {types_ok}/{total}, date {dates_ok}/{total}, folder {folders_ok}/{folders_total}, \
+         owner {owners_ok}/{owners_total}"
     );
     Ok(())
 }
@@ -230,6 +245,8 @@ mod tests {
             people: vec![],
             issuer: None,
             folder: None,
+            owner: None,
+            matter: None,
         };
         db::put(
             &conn,
@@ -246,7 +263,7 @@ mod tests {
         let line = std::fs::read_to_string(&draft).unwrap();
         assert_eq!(
             line,
-            "{\"hash\":\"h1\",\"source\":\"a.pdf\",\"type\":\"bank\",\"date\":\"2025-01-31\",\"folder\":\"unsorted\"}\n"
+            "{\"hash\":\"h1\",\"source\":\"a.pdf\",\"type\":\"bank\",\"date\":\"2025-01-31\",\"folder\":\"unsorted\",\"owner\":\"Shared\"}\n"
         );
         // Scoring the draft against the same database passes; a corrected line can miss.
         run_classify(&config).unwrap();

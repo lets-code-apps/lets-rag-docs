@@ -38,7 +38,9 @@ the agent that calls this tool.
 ## Stack
 
 - **OCR** (`ocr.py`, `vision_ocr.swift`): embedded PDF text when present, otherwise Apple Vision
-  (macOS, offline). Writes one text file per document to `data/ocr/`.
+  (macOS, offline). A PDF with text boxes or filled form fields on top (e.g. added in Preview)
+  also goes through Vision, which reads what the page shows. Writes one text file per document to
+  `data/ocr/`. Tests: `.venv/bin/python -m unittest test_ocr`.
 - **`lets-rag-docs`**: one Rust binary for chunking, ingest, search, evals, the MCP server (stdio),
   `ask` and `add <file>` (one document end to end: OCR, classify, index).
 - **Embeddings** (`embed_server.py`): [bge-m3](https://huggingface.co/BAAI/bge-m3), dense + sparse,
@@ -74,7 +76,7 @@ lets-rag-docs add ~/inbox/invoice.pdf     # one document: copy it in, OCR, class
 lets-rag-docs search "when does the warranty end"   # best-matching passages
 lets-rag-docs eval                        # did the right document come back? (evals/rag.jsonl)
 lets-rag-docs ask "when does the warranty end"      # answer with citations from a local LLM
-lets-rag-docs organize --dry-run          # planned copies into library/<folder>/<date> <title>; changes nothing
+lets-rag-docs organize --dry-run          # planned copies and moves in library/; changes nothing
 lets-rag-docs organize --apply            # copy originals into the library and re-embed the copies
 lets-rag-docs mcp                         # MCP server over stdio
 ```
@@ -83,22 +85,35 @@ lets-rag-docs mcp                         # MCP server over stdio
 the same time: a rebuild that lands in the middle of an `add` can drop the document `add` is
 indexing (the next `ingest` restores it).
 
-`organize --apply` re-indexes each copy under its new `library/<folder>/<date> <title>` name, and the same
+`organize --apply` re-indexes each copy under its library name, and the same
 rebuild rule applies to it: `ingest` only knows the paths under `data/ocr/`, so it drops the
 organized sources. Run `ingest`, then `organize --apply` again - that order, never the other way
 round. Evals don't change: `eval` names each hit by its OCR file, which `--apply` keeps, so the
 same `evals/rag.jsonl` scores the same before and after organizing.
 
-File names start with the document's date (`2025-03-14 Repayment schedule.pdf`), so every folder
-sorts oldest to newest, also in a phone's file browser. Words with 8 or more digits (account, card,
-contract and ID numbers) are left out of file names; the database keeps the full title.
+The library is laid out for people browsing by hand (Finder, or a phone's file browser):
 
-Folders come from a fixed list, `[classify] folders` in the config, so documents in different
-languages share one folder (no `Home`, `Dom` and `Дом` side by side). A document whose stored
-folder is not on the list is filed under `unsorted/`. Documents classified before the list
-existed, or before you changed it, need `classify --force` first. Before the first `--apply`,
-check the result: `eval --classify` scores type, date and folder against `evals/classify.jsonl`
-(delete that file to get a fresh draft that includes folders), and read the `--dry-run` output.
+```
+library/<folder>/<owner>/<year>/<date> <matter> - <title>.pdf
+library/Finance/Jan Kowalski/2025/2025-03-14 Car loan - Repayment schedule.pdf
+```
+
+- **folder** comes from `[classify] folders`, **owner** (whose document it is: a family member or
+  the family's own company) from `[classify] owners`. Fixed lists, so one family's documents in
+  four languages share one folder each. Anything not on a list goes to `unsorted/` or to
+  `shared_owner`. A document without a date skips the year level.
+- The **date** comes first so every folder sorts oldest to newest. The **matter** (what the
+  document concerns) keeps the name meaningful in search results and attachments, where the
+  folder is not shown. `[classify] language` writes titles and matters in one language.
+- Words with 8 or more digits (account, card, contract and ID numbers) never go into file names;
+  the database keeps the full title.
+- When a document's place changes (you edited a list, or re-classified), the next `--apply` moves
+  its copy: it writes the new one, then removes the old one and any folder left empty. A copy
+  you edited after filing is never removed. Originals are never touched.
+
+After changing a list, or before the first `--apply`: run `classify --force`, then check the
+result: `eval --classify` scores type, date, folder and owner against `evals/classify.jsonl`
+(delete that file to get a fresh draft), and read the `--dry-run` output.
 
 Register the MCP server with Claude Code (or point any MCP client at the same command):
 
