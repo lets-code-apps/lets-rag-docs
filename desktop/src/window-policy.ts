@@ -1,36 +1,46 @@
-// Window policy: the small, Electron-free decisions the main process makes about its one window.
-// Everything here takes plain values and returns plain values, so the tests run under `node --test`
-// with no BrowserWindow and no display — the same move as keeping `chunk`/`config` free of IO in
-// the Rust crate. `main.ts` supplies the real Electron window behind these functions.
+// Window policy: the Electron-free decisions the main process makes about its one window.
+// `main.ts` turns the preload name into an absolute path when it builds the real BrowserWindow.
 
-// The options for the single placeholder window. A locked-down renderer: context isolation on,
-// the Chromium sandbox on, Node in the page off, and deliberately no `preload` (there is nothing to
-// bridge yet). `main.ts` adds `show` when it builds the real window.
 export function windowOptions(): {
 	width: number;
 	height: number;
-	webPreferences: { contextIsolation: true; sandbox: true; nodeIntegration: false };
+	minWidth: number;
+	minHeight: number;
+	titleBarStyle: 'hiddenInset';
+	trafficLightPosition: { x: number; y: number };
+	webPreferences: {
+		preload: string;
+		contextIsolation: true;
+		sandbox: true;
+		nodeIntegration: false;
+	};
 } {
 	return {
-		width: 800,
-		height: 600,
-		webPreferences: { contextIsolation: true, sandbox: true, nodeIntegration: false },
+		// The design's window: wide enough for nav | list | detail; at 360px the panes stack.
+		width: 1200,
+		height: 820,
+		minWidth: 360,
+		minHeight: 480,
+		// The AppBar is the title bar: its left inset leaves room for the window buttons.
+		titleBarStyle: 'hiddenInset',
+		trafficLightPosition: { x: 20, y: 22 },
+		webPreferences: {
+			preload: 'preload.cjs',
+			contextIsolation: true,
+			sandbox: true,
+			nodeIntegration: false,
+		},
 	};
 }
 
-// Only the app's own local index file is trusted. A `file://` URL is ours only if it points at the
-// exact index page we loaded, never at another file on disk.
 export function isOwnFile(url: string, indexUrl: string): boolean {
 	return url === indexUrl;
 }
 
-// The renderer's `will-navigate` handler. The page must never move off its own file: navigating to
-// a remote or foreign URL is where a hostile document could sneak in, so we always refuse it.
 export function denyNavigation(event: { preventDefault(): void }): void {
 	event.preventDefault();
 }
 
-// The renderer's `setWindowOpenHandler` result. No link, however clicked, may spawn a second window.
 export function windowOpenHandler(): { action: 'deny' } {
 	return { action: 'deny' };
 }

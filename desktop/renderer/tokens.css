@@ -1,0 +1,60 @@
+/* The approved colour tokens (the design language's Theme), as CSS custom properties.
+   Light is the default; the dark block applies when the system asks for dark. Radii, spacing and
+   type sizes do not change with the theme and live in app.css. Nothing is loaded over the
+   network: Poppins is bundled in fonts/ (SIL OFL, licence beside it) and the CSP allows only
+   same-origin fonts. */
+
+@font-face {
+  font-family: 'Poppins';
+  font-weight: 400;
+  font-display: swap;
+  src: url('fonts/poppins-latin-400-normal.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Poppins';
+  font-weight: 500;
+  font-display: swap;
+  src: url('fonts/poppins-latin-500-normal.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Poppins';
+  font-weight: 600;
+  font-display: swap;
+  src: url('fonts/poppins-latin-600-normal.woff2') format('woff2');
+}
+
+:root {
+  color-scheme: light;
+  --bg: #F5F5F7;
+  --surface: #FFFFFF;
+  --raised: #EDEDF1;
+  --line: #DEDEE4;
+  --line-strong: #8A8A94;
+  --fg: #0B0B0E;
+  --muted: #5C5C66;
+  --inverse-bg: #0B0B0E;
+  --inverse-fg: #FFFFFF;
+  --positive: #17703D;
+  --attention: #8A5700;
+  --danger: #C62828;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --bg: #0B0B0E;
+    --surface: #141418;
+    --raised: #1C1C22;
+    --line: #2A2A31;
+    --line-strong: #6A6A74;
+    --fg: #F4F4F6;
+    --muted: #A0A0AA;
+    --inverse-bg: #FFFFFF;
+    --inverse-fg: #0B0B0E;
+    --positive: #5BD08A;
+    --attention: #F2B544;
+    --danger: #FF6B6B;
+  }
+}

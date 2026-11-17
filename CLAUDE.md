@@ -106,7 +106,7 @@ src/mcp.rs
 src/ask.rs
 embed_server.py
 ocr.py, vision_ocr.swift
-desktop/                 # Electron placeholder window (Node/TS): no Cargo involvement, `exclude`d from the crate
+desktop/                 # Electron menu-bar app (Node/TS), ask + filing: no Cargo involvement, `exclude`d from the crate
 ```
 
 ## Implementation plan
@@ -168,6 +168,11 @@ desktop/                 # Electron placeholder window (Node/TS): no Cargo invol
    branch `feature/issue-3`. No features, no backend wiring, no IPC/preload. Stack pinned: Electron 45.2.3,
    TypeScript 5.9.3, Node 24. `desktop/` has no `Cargo.toml` and `Cargo.toml` `exclude`s it, so `cargo`
    ignores it. The Electron-vs-Tauri and final-UX decisions above still stand for later increments.
+   **Ask and filing screens (2026-11-17, #11):** menu-bar app on branch `desktop`. Ask (library from
+   `documents --json`, `ask --json` with citations) and filing (`filing show|save` on `[classify]`
+   folders/owners, `organize --dry-run --json` preview, `--apply --json` only on the explicit button).
+   No sample data on screen. Still to come: upload (`add`), browse by folder, page counts/sizes,
+   page numbers in citations, a rename that re-files documents. See `desktop/README.md`.
 10. Later: synthetic sample docs + public eval set, page markers, reranking (bge-reranker-v2-m3).
 
 ## Environment

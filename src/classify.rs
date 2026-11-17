@@ -4,6 +4,7 @@
 //! The model's answer is untrusted (the document text could steer it), so everything it
 //! returns goes through `validate` before it is stored. Nothing here renames or moves files.
 
+use std::collections::HashSet;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
@@ -290,6 +291,85 @@ pub fn safe_folder(f: &str) -> bool {
         && !f.starts_with('.')
         && !f.ends_with('.')
         && !f.contains("..")
+}
+
+/// A proposed folder/owner list from `filing save`, checked with exactly the rules `classify`
+/// and `organize` already trust (`safe_folder`). Reported as structured issues so the app can
+/// map them to rows; the rules themselves live here, next to the rule they come from:
+///
+/// - `folders` must not be empty (an empty `owners` list is fine: everything goes to the
+///   shared owner);
+/// - every name must pass `safe_folder`;
+/// - no name twice in one list, ignoring case (macOS's filesystem is case-insensitive);
+/// - an owner may not equal `shared_owner`, ignoring case - that folder is `organize`'s
+///   fallback for "nobody on the list", not a person.
+#[derive(Debug, Clone, PartialEq)]
+pub enum NameList {
+    Folders,
+    Owners,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum NameCode {
+    EmptyList,
+    InvalidName,
+    Duplicate,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NameIssue {
+    pub list: NameList,
+    pub index: Option<usize>,
+    pub name: Option<String>,
+    pub code: NameCode,
+}
+
+/// Every problem with the proposed lists, in list order. An empty `Vec` means the draft is
+/// safe to write.
+pub fn check_names(folders: &[String], owners: &[String], shared_owner: String) -> Vec<NameIssue> {
+    let mut issues: Vec<NameIssue> = Vec::new();
+    if folders.is_empty() {
+        issues.push(NameIssue {
+            list: NameList::Folders,
+            index: None,
+            name: None,
+            code: NameCode::EmptyList,
+        });
+    }
+    let shared: String = shared_owner.to_lowercase();
+    for list in [(NameList::Folders, folders), (NameList::Owners, owners)] {
+        let (which, names) = list;
+        let mut seen: HashSet<String> = HashSet::new();
+        for (index, raw) in names.iter().enumerate() {
+            if !safe_folder(raw) {
+                issues.push(NameIssue {
+                    list: which.clone(),
+                    index: Some(index),
+                    name: Some(raw.to_string()),
+                    code: NameCode::InvalidName,
+                });
+                continue;
+            }
+            let key: String = raw.to_lowercase();
+            if !seen.insert(key.to_string()) {
+                issues.push(NameIssue {
+                    list: which.clone(),
+                    index: Some(index),
+                    name: Some(raw.to_string()),
+                    code: NameCode::Duplicate,
+                });
+            }
+            if which == NameList::Owners && key == shared {
+                issues.push(NameIssue {
+                    list: which.clone(),
+                    index: Some(index),
+                    name: Some(raw.to_string()),
+                    code: NameCode::InvalidName,
+                });
+            }
+        }
+    }
+    issues
 }
 
 #[cfg(test)]

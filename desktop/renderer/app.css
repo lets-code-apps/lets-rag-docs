@@ -1,0 +1,820 @@
+/* The RAG Docs window, rebuilt from the approved RagAsk and RagFiling screens and the shared
+   components (AppBar, ListRow, SegmentedControl, TextField, Button, StatusPill, Icon).
+   Colours come from tokens.css; sizes below are the components' own. Wide windows lay the panes
+   side by side, each scrolling on its own; at 480px and narrower they stack and the page scrolls. */
+
+:root {
+  --r-sm: 10px;
+  --r-md: 14px;
+  --r-lg: 24px;
+  --r-pill: 999px;
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 24px;
+  --s6: 32px;
+  --s8: 64px;
+  font-family: 'Poppins', system-ui, -apple-system, sans-serif;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-size: 16px;
+  line-height: 1.55;
+}
+
+button,
+input {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+:focus-visible {
+  outline: 3px solid var(--fg);
+  outline-offset: 2px;
+}
+
+h1,
+h2,
+p {
+  margin: 0;
+}
+
+/* The inline sprite takes no room; every glyph is sized where it is used and never grows. */
+.sprite {
+  position: absolute;
+}
+
+.icon {
+  display: block;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.75;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.meta {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.note {
+  max-width: 62ch;
+  line-height: 1.55;
+}
+
+/* ---- AppBar: 64px, emblem only, left inset clears the macOS window buttons. ---- */
+
+.appbar {
+  box-sizing: border-box;
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: flex-end;
+  height: 64px;
+  padding: 0 20px 0 calc(var(--s8) + var(--s6));
+  border-bottom: 1px solid var(--line);
+  background: var(--bg);
+  -webkit-app-region: drag;
+}
+
+.emblem {
+  display: block;
+  width: 32px;
+  height: 32px;
+  background: currentColor;
+  -webkit-mask: url('emblem.svg') center / contain no-repeat;
+}
+
+/* ---- Window body: nav | screen ---- */
+
+.panes {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.nav {
+  box-sizing: border-box;
+  display: flex;
+  flex: 1 1 200px;
+  flex-direction: column;
+  gap: 2px;
+  max-width: 240px;
+  padding: var(--s4) var(--s3);
+  border-right: 1px solid var(--line);
+  overflow-y: auto;
+}
+
+.nav button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  font-size: 14px;
+  font-weight: 500;
+  text-align: left;
+}
+
+.nav button span {
+  flex: 1;
+}
+
+.nav button[aria-current='page'] {
+  background: var(--raised);
+}
+
+.screen {
+  display: flex;
+  flex: 999 1 0;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* ---- Button: pill, 44px (lg 52px); primary is the one inverse action per view. ---- */
+
+.btn {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  box-sizing: border-box;
+  height: 44px;
+  min-width: 44px;
+  padding: 0 18px;
+  border: 0;
+  border-radius: var(--r-pill);
+  background: transparent;
+  font-size: 15px;
+  font-weight: 500;
+  white-space: nowrap;
+  transition: opacity 120ms ease;
+}
+
+.btn:hover {
+  opacity: 0.86;
+}
+
+.btn.lg {
+  height: 52px;
+  padding: 0 24px;
+  font-size: 16px;
+}
+
+.btn.primary {
+  background: var(--inverse-bg);
+  color: var(--inverse-fg);
+}
+
+.btn.secondary {
+  border: 1.5px solid var(--line-strong);
+}
+
+.btn.icon-only {
+  width: 44px;
+  padding: 0;
+  background: var(--raised);
+}
+
+.btn:disabled,
+.btn[aria-disabled='true'] {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* ---- StatusPill: dot + words on a quiet fill; the tone class picks the dot colour. ---- */
+
+.pill {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  box-sizing: border-box;
+  height: 24px;
+  padding: 0 10px;
+  border-radius: var(--r-pill);
+  background: var(--raised);
+  color: var(--fg);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.pill::before {
+  content: '';
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.pill.positive::before {
+  background: var(--positive);
+}
+
+.pill.attention::before {
+  background: var(--attention);
+}
+
+.pill.danger::before {
+  background: var(--danger);
+}
+
+.pill > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---- ListRow: initials, title + time, optional subject / preview / pill. Split by 1px lines. ---- */
+
+.rows {
+  border-top: 1px solid var(--line);
+}
+
+.row {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  box-sizing: border-box;
+  width: 100%;
+  padding: 14px var(--s4);
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  text-align: left;
+}
+
+button.row:hover {
+  background: color-mix(in srgb, var(--raised) 50%, transparent);
+}
+
+.row[aria-pressed='true'],
+.row.selected {
+  background: var(--raised);
+}
+
+.avatar {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--raised);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+
+.row[aria-pressed='true'] .avatar,
+.row.selected .avatar {
+  background: var(--surface);
+}
+
+.row-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.row-line {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+
+.row-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 15px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.row-time {
+  flex: none;
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.row-subject {
+  overflow: hidden;
+  font-size: 14px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.row-preview {
+  overflow: hidden;
+  font-size: 13px;
+  color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The pill sits on its own line under the text (6px above), so a long one never squeezes the title. */
+.row-text > .pill {
+  align-self: flex-start;
+  margin-top: 3px;
+}
+
+/* ---- TextField: label above, 48px field, helper below; error recolours outline and helper. ---- */
+
+.field-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+}
+
+.field-label {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  box-sizing: border-box;
+  height: 48px;
+  padding: 0 14px;
+  border: 1.5px solid var(--line-strong);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  color: var(--muted);
+}
+
+.field:focus-within {
+  border-color: var(--fg);
+}
+
+.field:has([aria-invalid='true']) {
+  border-color: var(--danger);
+}
+
+.field input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--fg);
+  font-size: 15px;
+}
+
+.field input::placeholder {
+  color: var(--muted);
+}
+
+.field input[readonly] {
+  color: var(--muted);
+}
+
+.helper {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.helper.error-text {
+  color: var(--danger);
+}
+
+.error {
+  max-width: 62ch;
+  font-size: 14px;
+  color: var(--danger);
+  overflow-wrap: anywhere;
+}
+
+/* ---- SegmentedControl ---- */
+
+.seg {
+  display: inline-flex;
+  align-self: flex-start;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  background: var(--surface);
+}
+
+.seg button {
+  height: 38px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: var(--r-pill);
+  background: transparent;
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.seg button[aria-checked='true'] {
+  background: var(--raised);
+  color: var(--fg);
+}
+
+/* ---- ask ---- */
+
+.library {
+  box-sizing: border-box;
+  flex: 0 1 340px;
+  min-width: 240px;
+  border-right: 1px solid var(--line);
+  overflow-y: auto;
+}
+
+.library-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--s3);
+  padding: 20px 16px 12px;
+}
+
+.library-head h2 {
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.library .empty {
+  padding: var(--s5) var(--s4);
+  max-width: 62ch;
+  border-bottom: 1px solid var(--line);
+  font-size: 15px;
+  line-height: 1.55;
+}
+
+.conversation {
+  display: flex;
+  flex: 999 1 520px;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.turn {
+  box-sizing: border-box;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 28px;
+  width: 100%;
+  max-width: 760px;
+  margin: 0 auto;
+  padding: var(--s6) var(--s5);
+  overflow-y: auto;
+}
+
+.hint {
+  max-width: 62ch;
+  font-size: 15px;
+  color: var(--muted);
+}
+
+.bubble {
+  align-self: flex-end;
+  max-width: 80%;
+  padding: 14px 18px;
+  border-radius: var(--r-lg);
+  background: var(--raised);
+  font-size: 16px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.answer {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.answer-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--muted);
+}
+
+.answer-text {
+  max-width: 62ch;
+  font-size: 17px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.citations,
+.answer-actions,
+.card-actions,
+.form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.card-actions,
+.form-actions {
+  gap: 10px;
+}
+
+.busy {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 14px;
+  color: var(--muted);
+}
+
+.busy-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  margin: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: pulse 1s ease-in-out infinite alternate;
+}
+
+@keyframes pulse {
+  from {
+    opacity: 0.3;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .busy-dot {
+    animation: none;
+  }
+
+  .btn {
+    transition: none;
+  }
+}
+
+.ask-form {
+  box-sizing: border-box;
+  display: flex;
+  flex: none;
+  align-items: flex-end;
+  gap: 10px;
+  width: 100%;
+  max-width: 760px;
+  margin: 0 auto;
+  padding: var(--s4) var(--s5) 28px;
+}
+
+.ask-form .field-wrap {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ---- filing ---- */
+
+.list {
+  box-sizing: border-box;
+  flex: 1 1 360px;
+  max-width: 460px;
+  min-width: 0;
+  border-right: 1px solid var(--line);
+  overflow-y: auto;
+}
+
+.list-head {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+  padding: var(--s4) var(--s4) var(--s3);
+}
+
+.list-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s3);
+}
+
+.list-title h1,
+.form-head h2 {
+  font-size: 26px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.2;
+}
+
+.list .empty {
+  max-width: 62ch;
+  padding: var(--s5) var(--s4);
+  border-bottom: 1px solid var(--line);
+  font-size: 16px;
+  line-height: 1.55;
+}
+
+.detail {
+  box-sizing: border-box;
+  display: flex;
+  flex: 999 1 420px;
+  flex-direction: column;
+  gap: var(--s6);
+  min-width: 0;
+  padding: var(--s5) 20px var(--s6);
+  overflow-y: auto;
+}
+
+.where {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+
+/* "where a copy goes" is a small muted label, not a heading-sized title. */
+.caption {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--muted);
+}
+
+.path {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2) var(--s1);
+}
+
+.level {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.level-cap {
+  min-height: 1.4em;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--muted);
+  white-space: pre;
+}
+
+.level-val {
+  font-size: 15px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.level.on .level-val {
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.level-sep {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.notice {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s4);
+  max-width: 640px;
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--s3);
+  padding: var(--s4);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface);
+}
+
+.card p {
+  max-width: 62ch;
+  font-size: 16px;
+  line-height: 1.55;
+}
+
+.moves {
+  display: flex;
+  flex-direction: column;
+}
+
+.subhead {
+  margin: 0 0 var(--s2);
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.more {
+  padding: var(--s3) 0 var(--s4);
+}
+
+.name-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s4);
+  max-width: 520px;
+}
+
+.form-head {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.form-head h2 {
+  overflow-wrap: anywhere;
+}
+
+.form-actions {
+  padding-top: var(--s1);
+}
+
+/* ---- Smallest window (360px): the panes stack and the whole page scrolls. ---- */
+
+@media (max-width: 480px) {
+  body {
+    height: auto;
+    min-height: 100vh;
+  }
+
+  .panes,
+  .screen {
+    flex-direction: column;
+    overflow: visible;
+  }
+
+  .nav {
+    flex: none;
+    max-width: none;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .library,
+  .list {
+    flex: none;
+    max-width: none;
+    min-width: 0;
+    border-right: 0;
+    overflow: visible;
+  }
+
+  .conversation,
+  .detail {
+    flex: none;
+    overflow: visible;
+  }
+
+  .turn {
+    overflow: visible;
+  }
+
+  .ask-form {
+    flex-wrap: wrap;
+  }
+}
+
+.moves .more[hidden] + .card-actions {
+  margin-top: var(--s4);
+}

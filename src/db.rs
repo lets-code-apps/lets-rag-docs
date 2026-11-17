@@ -111,6 +111,36 @@ fn count_row(row: &Row) -> rusqlite::Result<i64> {
     row.get(0)
 }
 
+/// What a read-only reader finds. The three checks `organize --dry-run` made by hand become one
+/// enum, so `documents --json` and `filing show` read the database exactly as carefully: an
+/// expected state (no database yet) is data, a real failure (`cannot read …`) is an error.
+#[derive(Debug)]
+pub enum ReadOutcome {
+    /// Rows can be read through the returned connection.
+    Ready(Connection),
+    /// Nothing to read: the flag says whether the file exists without a `documents` table, so
+    /// the text output can keep its two distinct "run `classify` first" hints.
+    NoDatabase { file_exists: bool },
+    /// The table exists but predates `owner`/`matter`/`library_path`; only a write command may
+    /// add the columns, so a reader asks for `classify --force` instead.
+    Outdated,
+}
+
+/// The read-only open plus the schema checks in one place: never creates a thing.
+pub fn open_for_read(path: &Path) -> anyhow::Result<ReadOutcome> {
+    if !std::fs::exists(path).unwrap_or(false) {
+        return Ok(ReadOutcome::NoDatabase { file_exists: false });
+    }
+    let conn = open_read_only(path)?;
+    if !has_documents(&conn)? {
+        return Ok(ReadOutcome::NoDatabase { file_exists: true });
+    }
+    if !is_current(&conn)? {
+        return Ok(ReadOutcome::Outdated);
+    }
+    Ok(ReadOutcome::Ready(conn))
+}
+
 /// Inserts the document, or updates the row with the same hash (`classify --force`). An upsert,
 /// not a replace: `library_path` belongs to `organize` and must survive a re-classify, or the next
 /// `organize --apply` could not find (and move) the copy it filed before.

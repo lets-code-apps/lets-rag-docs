@@ -1,0 +1,628 @@
+// The RAG Docs window. Every value on screen comes from an engine report (through the preload's
+// `window.ragDocs`) or from what the user typed: no canned or made-up content. The page never
+// builds argv: it sends a question, a draft of the two lists, or nothing. Engine text is written
+// with textContent only.
+
+import * as m from './model.js';
+
+const api = window.ragDocs;
+const $ = (id) => document.getElementById(id);
+const SVG = 'http://www.w3.org/2000/svg';
+const PREVIEW_ROWS = 3;
+const ALL_ROWS = 200;
+
+const state = {
+  section: 'ask',
+  docs: null,
+  docsError: null,
+  ask: { question: '', busy: false, report: null, error: null, cancelled: false, copied: false },
+  filing: {
+    loaded: false,
+    saved: null,
+    error: null,
+    view: 'folders',
+    selected: null, // {kind:'item', index} | {kind:'shared'} | {kind:'add'} | null (notice shown)
+    touched: false,
+    value: '',
+    fieldError: null,
+    saving: false,
+    changes: [], // saved this session: {kind, list, from/to | name}
+    notice: null, // null | 'ask' | 'running' | 'preview' | 'applying' | 'done'
+    pendingText: null, // a re-sort the engine reported on opening, before any change here
+    dry: null,
+    showAll: false,
+    applied: null,
+  },
+};
+
+// ---- small DOM helpers ----
+
+/** In-flight engine calls, so smoke and screenshot runs can wait for a settled page. */
+let pending = 0;
+async function track(promise) {
+  pending += 1;
+  document.body.dataset.pending = String(pending);
+  try {
+    return await promise;
+  } finally {
+    pending -= 1;
+    document.body.dataset.pending = String(pending);
+  }
+}
+
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+function icon(name, px) {
+  const svg = document.createElementNS(SVG, 'svg');
+  svg.setAttribute('class', 'icon');
+  svg.setAttribute('width', String(px));
+  svg.setAttribute('height', String(px));
+  svg.setAttribute('aria-hidden', 'true');
+  const use = document.createElementNS(SVG, 'use');
+  use.setAttribute('href', `#i-${name}`);
+  svg.append(use);
+  return svg;
+}
+
+const TONES = new Set(['neutral', 'positive', 'attention', 'danger']);
+function setPill(node, label, tone) {
+  node.className = `pill ${TONES.has(tone) ? tone : 'neutral'}`;
+  node.replaceChildren(el('span', '', label));
+}
+
+function pill(label, tone) {
+  const node = el('span');
+  setPill(node, label, tone);
+  return node;
+}
+
+/** The design's ListRow. A button when it can be picked, a plain row otherwise. */
+function listRow(row, onPick) {
+  const node = el(onPick ? 'button' : 'div', 'row');
+  if (onPick) {
+    node.type = 'button';
+    node.setAttribute('aria-pressed', row.selected ? 'true' : 'false');
+    node.addEventListener('click', onPick);
+  } else if (row.selected) {
+    node.classList.add('selected');
+  }
+  node.append(el('span', 'avatar', row.initials));
+  const text = el('span', 'row-text');
+  const line = el('span', 'row-line');
+  line.append(el('span', 'row-title', row.title));
+  if (row.time) line.append(el('span', 'row-time', row.time));
+  text.append(line);
+  if (row.subject) text.append(el('span', 'row-subject', row.subject));
+  if (row.preview) text.append(el('span', 'row-preview', row.preview));
+  if (row.pill) text.append(pill(row.pill, row.tone ?? 'neutral'));
+  node.append(text);
+  node.title = row.title;
+  return node;
+}
+
+// ---- navigation ----
+
+function render() {
+  for (const button of document.querySelectorAll('.nav button')) {
+    const on = button.dataset.section === state.section;
+    if (on) button.setAttribute('aria-current', 'page');
+    else button.removeAttribute('aria-current');
+  }
+  $('askScreen').hidden = state.section !== 'ask';
+  $('filingScreen').hidden = state.section !== 'filing';
+  renderAsk();
+  renderFiling();
+}
+
+function showSection(section) {
+  state.section = section;
+  render();
+  if (section === 'filing' && !state.filing.loaded) void loadFiling();
+}
+
+// ---- ask ----
+
+async function loadDocs() {
+  const res = await track(api.documents());
+  if (res && res.ok) {
+    state.docs = res.report;
+    state.docsError = null;
+  } else {
+    state.docsError = res?.error ?? 'The engine did not answer.';
+  }
+  render();
+}
+
+function renderAsk() {
+  const a = state.ask;
+  const sources = a.report?.sources ?? [];
+
+  // library
+  $('libraryMeta').textContent = state.docs ? m.libraryMeta(state.docs) : '';
+  const rows = $('libraryRows');
+  rows.replaceChildren();
+  if (state.docsError) {
+    rows.append(el('p', 'empty error', state.docsError));
+  } else if (state.docs) {
+    const notice = m.libraryNotice(state.docs);
+    if (notice) rows.append(el('p', 'empty', notice));
+    for (const row of m.libraryRows(state.docs.documents, sources)) {
+      rows.append(listRow({ ...row, selected: row.cited, pill: row.cited ? 'cited' : '', tone: 'positive' }, null));
+    }
+  }
+
+  // conversation
+  const asked = a.question !== '';
+  $('askHint').hidden = asked;
+  $('questionBubble').hidden = !asked;
+  $('questionBubble').textContent = a.question;
+  $('askBusy').hidden = !a.busy;
+  $('askError').hidden = a.error === null;
+  $('askError').textContent = a.error ?? '';
+
+  const report = a.report;
+  $('answerBlock').hidden = report === null;
+  if (report) {
+    const has = report.answer !== null;
+    $('answerLabel').hidden = !has;
+    $('answerLabelText').textContent = has ? m.answerLabel(sources) : '';
+    $('answerText').textContent = has ? report.answer : m.NO_ANSWER;
+    $('citations').replaceChildren(...m.citations(sources).map((label) => pill(label, 'neutral')));
+    $('copyAnswer').hidden = !has;
+    $('copyAnswerLabel').textContent = a.copied ? 'copied' : 'copy answer';
+  }
+  $('askButton').disabled = a.busy;
+}
+
+async function ask(event) {
+  event.preventDefault();
+  const question = $('askInput').value.trim();
+  if (question === '' || state.ask.busy) return;
+  state.ask = { question, busy: true, report: null, error: null, cancelled: false, copied: false };
+  render();
+  const res = await track(api.ask(question));
+  state.ask.busy = false;
+  if (res && res.ok) {
+    state.ask.report = res.report;
+    $('askInput').value = '';
+  } else if (state.ask.cancelled) {
+    state.ask.error = 'Stopped. Ask again when you are ready.';
+  } else {
+    state.ask.error = res?.error === 'busy' ? 'The model is busy with another job. Try again in a moment.' : (res?.error ?? 'The engine did not answer.');
+  }
+  render();
+}
+
+async function cancelAsk() {
+  state.ask.cancelled = true;
+  await track(api.cancelAsk());
+}
+
+async function copyAnswer() {
+  const answer = state.ask.report?.answer;
+  if (!answer) return;
+  try {
+    await navigator.clipboard.writeText(answer);
+    state.ask.copied = true;
+    render();
+  } catch {
+    // The clipboard can refuse while the window is not focused; the answer stays on screen.
+  }
+}
+
+// ---- filing ----
+
+function f() {
+  return state.filing;
+}
+
+function currentList() {
+  const s = f().saved;
+  return f().view === 'folders' ? s.folders : s.owners;
+}
+
+function selectDefault() {
+  const list = currentList();
+  f().selected = list.length > 0 ? { kind: 'item', index: 0 } : { kind: 'add' };
+  f().value = list.length > 0 ? list[0] : '';
+  f().fieldError = null;
+}
+
+async function loadFiling() {
+  f().loaded = true;
+  const res = await track(api.filing());
+  if (!res || !res.ok) {
+    f().error = res?.error ?? 'The engine did not answer.';
+    render();
+    return;
+  }
+  f().saved = res.report;
+  f().error = null;
+  selectDefault();
+  render();
+  // The current lists may already file some copies elsewhere (lists edited by hand, new documents):
+  // ask the engine, without moving anything, and say so if the user has not started editing.
+  const generation = saveGeneration;
+  const dry = await track(api.dryRun());
+  if (generation === saveGeneration && dry && dry.ok && dry.report.status === 'ok' && m.moveCount(dry.report) > 0 && f().changes.length === 0) {
+    f().pendingText = `${m.copiesLabel(m.moveCount(dry.report))} are not where the current lists put them.`;
+    if (!f().touched) {
+      f().selected = null;
+      f().notice = 'ask';
+      render();
+    }
+  }
+}
+
+function pick(selected, value) {
+  f().touched = true;
+  f().selected = selected;
+  f().value = value;
+  f().fieldError = null;
+  f().error = null;
+  render();
+}
+
+function currentOp() {
+  const sel = f().selected;
+  const name = f().value.trim();
+  if (!sel || name === '') return null;
+  if (sel.kind === 'item') return name === currentList()[sel.index] ? null : { kind: 'rename', index: sel.index, name };
+  if (sel.kind === 'add') return { kind: 'add', name };
+  return null;
+}
+
+function changeFor(op) {
+  const list = f().view;
+  if (op.kind === 'rename') return { kind: 'rename', list, from: currentList()[op.index], to: op.name };
+  if (op.kind === 'add') return { kind: 'add', list, name: op.name };
+  return { kind: 'remove', list, name: currentList()[op.index] };
+}
+
+/** Splits the engine's issues: the one about the edited name goes under the field, the rest above. */
+function placeIssues(op, issues) {
+  const index = m.editedIndex(f().saved, f().view, op);
+  const shared = f().saved.shared_owner;
+  const mine = issues.filter((i) => i.list === f().view && i.index === index);
+  const rest = issues.filter((i) => !mine.includes(i));
+  f().fieldError = mine.length > 0 ? m.friendlyError(mine[0], shared) : null;
+  f().error = rest.length > 0 ? rest.map((i) => `${i.list}${i.name ? ` "${i.name}"` : ''}: ${m.friendlyError(i, shared)}`).join(' ') : null;
+}
+
+let checkTimer = null;
+function scheduleCheck() {
+  clearTimeout(checkTimer);
+  checkTimer = setTimeout(() => void check(), 250);
+}
+
+/** Live validation with the engine's own rule (`filing save --check` never writes). */
+async function check() {
+  const op = currentOp();
+  if (!op) {
+    f().fieldError = null;
+    renderFiling();
+    return;
+  }
+  const value = f().value;
+  const res = await track(api.saveFiling(m.draftFor(f().saved, f().view, op), true));
+  if (f().value !== value) return; // typed on since; a newer check is coming
+  if (res && res.ok && !res.report.ok) placeIssues(op, res.report.errors);
+  else {
+    f().fieldError = null;
+    if (res && !res.ok) f().error = res.error ?? null;
+  }
+  renderFiling();
+}
+
+/** Bumped when a save starts: a dry-run that began earlier must not show its preview. */
+let saveGeneration = 0;
+
+async function save(op) {
+  if (!op || f().saving) return;
+  clearTimeout(checkTimer);
+  saveGeneration += 1;
+  f().saving = true;
+  renderFiling();
+  const res = await track(api.saveFiling(m.draftFor(f().saved, f().view, op), false));
+  f().saving = false;
+  if (!res || !res.ok) {
+    f().error = res?.error ?? 'The engine did not answer.';
+  } else if (!res.report.ok) {
+    placeIssues(op, res.report.errors);
+  } else {
+    f().changes.push(changeFor(op));
+    f().saved = { ...f().saved, folders: res.report.folders, owners: res.report.owners };
+    f().error = null;
+    f().fieldError = null;
+    f().selected = null;
+    f().value = '';
+    f().dry = null;
+    f().showAll = false;
+    f().notice = 'ask';
+  }
+  render();
+}
+
+async function resort() {
+  f().notice = 'running';
+  f().error = null;
+  render();
+  const generation = saveGeneration;
+  const res = await track(api.dryRun());
+  if (generation !== saveGeneration || res?.stale) {
+    // The lists were saved while this ran: its preview describes the old lists. Ask again.
+    f().notice = 'ask';
+    f().error = 'The lists changed while re-sorting. Re-sort again to see the current moves.';
+  } else if (!res || !res.ok) {
+    f().error = res?.error ?? 'The engine did not answer.';
+    f().notice = 'ask';
+  } else {
+    f().dry = res.report;
+    f().showAll = false;
+    f().notice = 'preview';
+  }
+  render();
+}
+
+async function apply() {
+  if (f().notice !== 'preview') return;
+  f().notice = 'applying';
+  render();
+  const res = await track(api.resort());
+  if (!res || !res.ok) {
+    f().error = res?.error ?? 'The engine did not answer.';
+    f().notice = 'preview';
+  } else {
+    f().applied = res.report;
+    f().changes = [];
+    f().pendingText = null;
+    f().dry = null;
+    f().notice = 'done';
+    void loadDocs();
+  }
+  render();
+}
+
+function closeNotice() {
+  f().notice = null;
+  f().pendingText = null;
+  selectDefault();
+  render();
+}
+
+function documentCount(name) {
+  if (!state.docs) return 0;
+  const key = f().view === 'folders' ? 'folder' : 'owner';
+  return state.docs.documents.filter((doc) => doc[key] === name).length;
+}
+
+function renderFiling() {
+  const s = f();
+  $('filingError').hidden = s.error === null;
+  $('filingError').textContent = s.error ?? '';
+  if (!s.saved) {
+    $('nameForm').hidden = true;
+    $('noticeCard').hidden = true;
+    return;
+  }
+  const docs = state.docs?.documents ?? [];
+  const folders = s.view === 'folders';
+
+  // list pane
+  $('addButton').setAttribute('aria-label', folders ? 'add folder' : 'add owner');
+  for (const button of $('viewSwitch').querySelectorAll('button')) {
+    button.setAttribute('aria-checked', button.dataset.view === s.view ? 'true' : 'false');
+  }
+  $('listMeta').textContent = m.listMeta(s.view, s.saved, docs.length);
+  const rows = $('filingRows');
+  rows.replaceChildren();
+  if (!folders && s.saved.owners.length === 0) {
+    rows.append(el('p', 'empty', `No owners yet. Add the people and companies whose documents these are. Until then every copy is filed under ${s.saved.shared_owner}.`));
+  }
+  for (const row of m.filingRows(s.view, s.saved, docs, s.changes, s.selected)) {
+    if (row.kind === 'item') rows.append(listRow(row, () => pick({ kind: 'item', index: row.index }, row.title)));
+    else if (row.kind === 'shared') rows.append(listRow(row, () => pick({ kind: 'shared' }, s.saved.shared_owner)));
+    else rows.append(listRow(row, null));
+  }
+
+  // path example: follows the field; with the notice up, it shows the last change
+  const sel = s.selected;
+  let focus = { original: null, value: '', placeholder: '' };
+  if (sel?.kind === 'item') focus = { original: currentList()[sel.index], value: s.value, placeholder: '' };
+  else if (sel?.kind === 'add') focus = { original: null, value: s.value, placeholder: '' };
+  else if (sel?.kind === 'shared') focus = { original: null, value: s.saved.shared_owner, placeholder: '' };
+  else {
+    const last = [...s.changes].reverse().find((c) => c.list === s.view && c.kind !== 'remove');
+    if (last) focus = { original: last.kind === 'rename' ? last.to : null, value: last.kind === 'rename' ? last.to : last.name, placeholder: '' };
+  }
+  const path = $('pathTokens');
+  path.replaceChildren(
+    ...m.examplePath(s.view, s.saved, docs, s.changes, focus).map((level) => {
+      const node = el('span', level.on ? 'level on' : 'level');
+      node.append(el('span', 'level-cap', level.cap));
+      const val = el('span', 'level-val', level.val);
+      if (level.sep) val.append(el('span', 'level-sep', level.sep));
+      node.append(val);
+      return node;
+    }),
+  );
+  $('pathNote').textContent = folders ? m.FOLDER_NOTE : m.OWNER_NOTE;
+
+  const showNotice = s.notice !== null && sel === null;
+  $('noticeCard').hidden = !showNotice;
+  $('nameForm').hidden = showNotice || sel === null;
+  if (showNotice) renderNotice();
+  else if (sel) renderForm();
+}
+
+function renderNotice() {
+  const s = f();
+  const card = { pill: 're-sort needed', tone: 'attention', text: '', note: '', resort: true, done: false };
+  const renamed = s.changes.some((c) => c.kind !== 'add');
+  if (s.notice === 'ask' || s.notice === 'running') {
+    card.text = s.changes.length > 0 ? `${m.changeSummary(s.changes)} Re-sorting shows where every filed copy goes with the new lists.` : (s.pendingText ?? '');
+    card.note = 'Nothing moves yet. You get a preview first, and your original files are never touched.';
+    if (renamed) card.note += ' Documents still filed under a renamed or removed name go to unsorted (or the shared owner) until the model re-reads them with “lets-rag-docs classify --force”.';
+  } else if (s.notice === 'preview' || s.notice === 'applying') {
+    const problem = m.dryRunProblem(s.dry);
+    const count = problem ? 0 : m.moveCount(s.dry);
+    card.resort = false;
+    card.note = 'Only the filed copies move. Originals are never touched, and a copy you edited after filing is never removed.';
+    if (problem) {
+      card.pill = 'nothing to re-sort';
+      card.tone = 'danger';
+      card.text = problem;
+    } else if (count === 0) {
+      card.pill = 'nothing to move';
+      card.tone = 'positive';
+      card.text = 'Every filed copy is already where the lists put it.';
+    } else {
+      card.pill = `${m.copiesLabel(count)} will move`;
+      card.text = 'Here is where the filed copies go with the current lists. Check the moves below, then apply them.';
+    }
+    card.done = problem !== null || count === 0;
+  } else if (s.notice === 'done') {
+    card.pill = 'filed';
+    card.tone = 'positive';
+    card.text = m.applySummary(s.applied);
+    card.resort = false;
+    card.done = true;
+  }
+  setPill($('noticePill'), card.pill, card.tone);
+  $('noticeText').textContent = card.text;
+  $('noticeNote').textContent = card.note;
+  $('noticeNote').hidden = card.note === '';
+  $('resortButton').hidden = !card.resort;
+  $('resortButton').disabled = s.notice === 'running' || s.saving;
+  $('resortButton').textContent = s.notice === 'running' ? 're-sorting…' : 're-sort documents';
+  $('noticeDone').hidden = !card.done;
+
+  const plan = (s.notice === 'preview' || s.notice === 'applying') && m.dryRunProblem(s.dry) === null ? m.movePlan(s.dry) : null;
+  const moves = plan !== null && plan.count > 0;
+  $('movesSection').hidden = !moves;
+  if (!moves) return;
+  const shown = plan.rows.slice(0, s.showAll ? ALL_ROWS : PREVIEW_ROWS);
+  $('moveRows').replaceChildren(
+    ...shown.map((row) => listRow({ initials: m.fileType(row.title), title: row.title, subject: row.to, preview: row.from, pill: row.pill }, null)),
+  );
+  const more = plan.count - shown.length;
+  $('movesMore').hidden = more <= 0;
+  $('movesMore').textContent = more > 0 ? `and ${more} more` : '';
+  $('applyButton').textContent = s.notice === 'applying' ? 'moving…' : `move ${m.copiesLabel(plan.count)}`;
+  $('applyButton').disabled = s.notice === 'applying' || s.saving;
+  $('showAllButton').textContent = `show all ${plan.count}`;
+  $('showAllButton').hidden = s.showAll || plan.count <= PREVIEW_ROWS;
+  $('laterButton').disabled = s.notice === 'applying';
+}
+
+function renderForm() {
+  const s = f();
+  const sel = s.selected;
+  const folders = s.view === 'folders';
+  const word = folders ? 'folder' : 'owner';
+  const form = { title: '', meta: '', label: `${word} name`, placeholder: '', save: 'save name', glyph: false, remove: '', note: m.RESORT_NOTE, helper: '', readonly: false };
+  if (sel.kind === 'item') {
+    const name = currentList()[sel.index];
+    form.title = name;
+    form.meta = `${m.docsLabel(documentCount(name))} filed here`;
+    form.remove = `remove ${word}`;
+    if (s.value.trim() === name) {
+      form.note = folders
+        ? 'Removing a folder deletes no documents. They are re-sorted into the folders that are left.'
+        : `Removing an owner deletes no documents. They are re-sorted to the owners that are left, or to ${s.saved.shared_owner}.`;
+    }
+  } else if (sel.kind === 'add') {
+    form.title = `add ${word}`;
+    form.meta = 'Spell it the way the folder should read.';
+    form.placeholder = folders ? 'e.g. Vehicles' : 'e.g. Alex Example';
+    form.save = `add ${word}`;
+    form.glyph = true;
+  } else {
+    const shared = s.saved.shared_owner;
+    const n = state.docs ? state.docs.documents.filter((doc) => doc.owner === null || doc.owner === shared || !s.saved.owners.includes(doc.owner)).length : 0;
+    form.title = shared;
+    form.meta = `${m.docsLabel(n)} filed here`;
+    form.label = 'shared folder name';
+    form.helper = 'For documents that belong to nobody on the list, or to several people.';
+    form.note = 'This name is shared_owner in config.toml. The app shows it but does not change it.';
+    form.readonly = true;
+  }
+  $('formTitle').textContent = form.title;
+  $('formMeta').textContent = form.meta;
+  $('nameLabel').textContent = form.label;
+  const input = $('nameInput');
+  if (input.value !== s.value) input.value = s.value;
+  input.placeholder = form.placeholder;
+  input.readOnly = form.readonly;
+  input.setAttribute('aria-invalid', s.fieldError ? 'true' : 'false');
+  const helper = $('nameHelper');
+  helper.textContent = s.fieldError ?? form.helper;
+  helper.hidden = !s.fieldError && !form.helper;
+  helper.classList.toggle('error-text', Boolean(s.fieldError));
+  $('saveLabel').textContent = s.saving ? 'saving…' : form.save;
+  $('saveGlyph').toggleAttribute('hidden', !form.glyph); // an SVG element has no .hidden property
+  $('saveButton').disabled = form.readonly || s.saving || s.fieldError !== null || currentOp() === null;
+  $('removeButton').hidden = form.remove === '';
+  $('removeButton').textContent = form.remove;
+  $('removeButton').disabled = s.saving || (folders && s.saved.folders.length <= 1);
+  $('formNote').textContent = form.note;
+}
+
+// ---- wiring ----
+
+function wire() {
+  for (const button of document.querySelectorAll('.nav button')) {
+    button.addEventListener('click', () => showSection(button.dataset.section));
+  }
+  $('askForm').addEventListener('submit', (event) => void ask(event));
+  $('cancelAsk').addEventListener('click', () => void cancelAsk());
+  $('copyAnswer').addEventListener('click', () => void copyAnswer());
+
+  for (const button of $('viewSwitch').querySelectorAll('button')) {
+    button.addEventListener('click', () => {
+      if (!f().saved || f().view === button.dataset.view) return;
+      f().view = button.dataset.view;
+      f().touched = true;
+      f().error = null;
+      if (f().notice !== null) f().selected = null;
+      else selectDefault();
+      render();
+    });
+  }
+  $('addButton').addEventListener('click', () => {
+    if (f().saved) pick({ kind: 'add' }, '');
+    $('nameInput').focus();
+  });
+  $('nameInput').addEventListener('input', () => {
+    f().value = $('nameInput').value;
+    f().fieldError = null;
+    renderFiling();
+    scheduleCheck();
+  });
+  $('nameForm').addEventListener('submit', (event) => {
+    event.preventDefault();
+    void save(currentOp());
+  });
+  $('removeButton').addEventListener('click', () => {
+    const sel = f().selected;
+    if (sel?.kind === 'item') void save({ kind: 'remove', index: sel.index });
+  });
+  $('resortButton').addEventListener('click', () => void resort());
+  $('applyButton').addEventListener('click', () => void apply());
+  $('showAllButton').addEventListener('click', () => {
+    f().showAll = true;
+    render();
+  });
+  $('laterButton').addEventListener('click', closeNotice);
+  $('noticeDone').addEventListener('click', closeNotice);
+}
+
+document.body.dataset.pending = '0';
+wire();
+render();
+void loadDocs();
