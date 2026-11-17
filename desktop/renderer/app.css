@@ -1,29 +1,77 @@
-#app {
-	margin: 0;
-	padding: 12px;
-	font-family: var(--sans);
-	background: var(--bg);
-	color: var(--fg);
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+  background: var(--lc-bg);
+  color: var(--lc-fg);
+  font-family: var(--lc-font);
 }
 
 #app {
-	max-width: 1100px;
-	margin: 0 auto;
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: var(--lc-s5) var(--lc-s4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--lc-s4);
+}
+
+h1 {
+  margin: 0;
+  font-size: 26px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
 }
 
 #nav {
-	display: flex;
-	gap: 8px;
-	margin-bottom: 12px;
+  display: flex;
+  flex: 1;
+  gap: var(--lc-s2);
+  margin-bottom: var(--lc-s4);
+}
+
+#askScreen,
+#filingScreen {
+  display: flex;
+  flex-direction: column;
+  gap: var(--lc-s4);
+  min-width: 0;
 }
 
 #answer,
 #filingNotice {
-	white-space: pre-wrap;
-	padding: 12px;
-	background: var(--surface);
-	border: 1px solid var(--line);
-	border-radius: 8px;
+  max-width: 62ch;
+  padding: var(--lc-s4);
+  border-radius: var(--lc-r-md);
+  background: var(--lc-surface);
+  border: 1px solid var(--lc-line);
+}
+
+#askView,
+#filingView {
+  height: 44px;
+  min-width: 44px;
+  padding: 0 var(--lc-s4);
+  border-radius: var(--lc-r-pill);
+  border: 1.5px solid var(--lc-line-strong);
+  background: transparent;
+  color: var(--lc-fg);
+  font-size: 15px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: opacity var(--lc-quick) ease;
+}
+
+#askView,
+#filingView {
+  background: var(--lc-raised);
+  border-color: transparent;
+}
+
+#askView[aria-selected="true"],
+#filingView[aria-selected="true"] {
+  background: var(--lc-raised);
+  border-color: transparent;
 }
 
 #citations,
@@ -31,50 +79,134 @@
 #filingRows,
 #filingPreview,
 #saveErrors {
-	display: grid;
-	gap: 8px;
+  display: grid;
+  gap: var(--lc-s3);
+  min-width: 0;
+}
+
+#citations {
+  flex-wrap: wrap;
+}
+
+#citations .row,
+.pill {
+  padding: 0 var(--lc-s3);
+  height: 24px;
+  border-radius: var(--lc-r-pill);
+  background: var(--lc-raised);
+  border: 0;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--lc-s2);
 }
 
 .row {
-	padding: 8px;
-	background: var(--surface);
-	border: 1px solid var(--line);
-	border-radius: 8px;
+  padding: var(--lc-s3) var(--lc-s4);
+  border-bottom: 1px solid var(--lc-line);
+  border-radius: var(--lc-r-sm);
+  background: transparent;
 }
 
-.pill {
-	padding: 4px 8px;
-	border: 1px solid var(--line);
-	border-radius: 999px;
-	background: var(--surface);
+#libraryRows,
+#filingRows,
+#filingPreview,
+#saveErrors {
+  border-bottom: 1px solid var(--lc-line);
 }
 
-[data-sample="true"] {
-	color: var(--warn);
+#filingNotice {
+  white-space: pre-wrap;
+  font-size: 16px;
+  line-height: 1.55;
+}
+
+#saveErrors {
+  color: var(--lc-danger);
 }
 
 #filingPreview {
-	font-family: var(--mono);
-	font-size: 12px;
+  font-size: 13px;
+  color: var(--lc-muted);
+}
+
+.samplePills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--lc-s2);
+  align-items: center;
+  color: var(--lc-muted);
+  font-size: 13px;
+}
+
+[data-sample="true"] {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 var(--lc-s3);
+  border-radius: var(--lc-r-pill);
+  background: var(--lc-raised);
+  color: var(--lc-fg);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+[data-sample="true"]::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--lc-attention);
 }
 
 button,
 button:disabled {
-	font: inherit;
+  font: inherit;
+}
+
+button:focus-visible {
+  outline: 3px solid var(--lc-fg);
+  outline-offset: 2px;
+}
+
+button:hover {
+  opacity: 0.86;
+}
+
+button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  button {
+    transition: none;
+  }
 }
 
 @media (max-width: 480px) {
-	#nav,
-	#citations,
-	#libraryRows,
-	#filingRows,
-	#filingPreview {
-		grid-flow: row;
-		grid-template-columns: 1fr;
-	}
+  #nav,
+  #askScreen,
+  #filingScreen {
+    flex-direction: column;
+    width: 100%;
+  }
 
-	#nav {
-		flex-direction: column;
-		width: 100%;
-	}
+  #askView,
+  #filingView {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  #citations,
+  #libraryRows,
+  #filingRows,
+  #filingPreview,
+  #saveErrors {
+    grid-template-columns: 1fr;
+  }
 }

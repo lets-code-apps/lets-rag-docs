@@ -1,29 +1,99 @@
-:root {
-	--bg: #f7f8fa;
-	--fg: #17191d;
-	--muted: #5b6370;
-	--line: #d6dbe4;
-	--accent: #24517f;
-	--ok: #1d7048;
-	--warn: #92610e;
-	--error: #8c2f2f;
-	--surface: #ffffff;
-	--mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-	--sans: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+/* Theme values copied from the attached design-components source as plain CSS.
+   The design repo uses .lc-dark/.lc-light classes; Electron can also switch through
+   prefers-color-scheme/nativeTheme, so both blocks repeat the shared tokens to keep one source of truth. */
+
+@media (prefers-color-scheme: light) {
+  :root {
+    color-scheme: light;
+    --lc-font: 'Poppins', system-ui, sans-serif;
+
+    --lc-bg: #f5f5f7;
+    --lc-surface: #ffffff;
+    --lc-raised: #ededf1;
+    --lc-line: #dedee4;
+    --lc-line-strong: #8a8a94;
+    --lc-fg: #0b0b0e;
+    --lc-muted: #5c5c66;
+    --lc-inverse-bg: #0b0b0e;
+    --lc-inverse-fg: #ffffff;
+    --lc-positive: #17703d;
+    --lc-attention: #8a5700;
+    --lc-danger: #c62828;
+    --lc-flag-orange: #ff9500;
+    --lc-flag-yellow: #ffcc00;
+    --lc-flag-green: #34c759;
+    --lc-flag-purple: #af52de;
+    --lc-flag-gray: #8e8e93;
+
+    --lc-r-sm: 10px;
+    --lc-r-md: 14px;
+    --lc-r-lg: 24px;
+    --lc-r-pill: 999px;
+
+    --lc-s1: 4px;
+    --lc-s2: 8px;
+    --lc-s3: 12px;
+    --lc-s4: 16px;
+    --lc-s5: 24px;
+    --lc-s6: 32px;
+    --lc-s7: 48px;
+    --lc-s8: 64px;
+
+    --lc-quick: 120ms;
+    --lc-fade: 500ms;
+    --lc-grow: 1.5;
+    --lc-grow-logo: 1.25;
+
+    --lc-white: #ffffff;
+    --lc-black: #000000;
+    --lc-ink: #0b0b0e;
+  }
 }
 
 @media (prefers-color-scheme: dark) {
-	:root {
-		--bg: #15181d;
-		--fg: #f1f3f6;
-		--muted: #a4acb8;
-		--line: #303642;
-		--accent: #84bbe6;
-		--ok: #6cc99a;
-		--warn: #e3b35c;
-		--error: #e09191;
-		--surface: #1d2129;
-		--mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-		--sans: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
-	}
+  :root {
+    color-scheme: dark;
+    --lc-font: 'Poppins', system-ui, sans-serif;
+
+    --lc-bg: #0b0b0e;
+    --lc-surface: #141418;
+    --lc-raised: #1c1c22;
+    --lc-line: #2a2a31;
+    --lc-line-strong: #6a6a74;
+    --lc-fg: #f4f4f6;
+    --lc-muted: #a0a0aa;
+    --lc-inverse-bg: #ffffff;
+    --lc-inverse-fg: #0b0b0e;
+    --lc-positive: #5bd08a;
+    --lc-attention: #f2b544;
+    --lc-danger: #ff6b6b;
+    --lc-flag-orange: #ff9f0a;
+    --lc-flag-yellow: #ffd60a;
+    --lc-flag-green: #30d158;
+    --lc-flag-purple: #bf5af2;
+    --lc-flag-gray: #8e8e93;
+
+    --lc-r-sm: 10px;
+    --lc-r-md: 14px;
+    --lc-r-lg: 24px;
+    --lc-r-pill: 999px;
+
+    --lc-s1: 4px;
+    --lc-s2: 8px;
+    --lc-s3: 12px;
+    --lc-s4: 16px;
+    --lc-s5: 24px;
+    --lc-s6: 32px;
+    --lc-s7: 48px;
+    --lc-s8: 64px;
+
+    --lc-quick: 120ms;
+    --lc-fade: 500ms;
+    --lc-grow: 1.5;
+    --lc-grow-logo: 1.25;
+
+    --lc-white: #ffffff;
+    --lc-black: #000000;
+    --lc-ink: #0b0b0e;
+  }
 }
