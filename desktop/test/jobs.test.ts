@@ -50,3 +50,25 @@ test('an apply spends its preview', () => {
 	jobs.endApply();
 	assert.equal(jobs.tryBeginApply(), false, 'a second apply needs a new dry-run');
 });
+
+test('a dry-run that started before a save cannot arm apply when it finishes after it', () => {
+	const jobs = new Jobs();
+	const startedAt = jobs.beginDryRun(); // dry-run of the old lists starts
+	jobs.beginSave(); // the user saves new lists while it runs
+	jobs.endSave();
+	assert.equal(jobs.recordDryRun(report, startedAt), false, 'the stale preview is refused');
+	assert.equal(jobs.tryBeginApply(), false);
+	const fresh = jobs.beginDryRun(); // a dry-run of the new lists
+	assert.equal(jobs.recordDryRun(report, fresh), true);
+	assert.equal(jobs.tryBeginApply(), true);
+});
+
+test('apply waits while a save is running, and a save disarms an earlier preview', () => {
+	const jobs = new Jobs();
+	jobs.recordDryRun(report, jobs.beginDryRun());
+	jobs.beginSave();
+	assert.equal(jobs.tryBeginApply(), false);
+	assert.equal(jobs.applyReason(), 'a filing save is still running');
+	jobs.endSave();
+	assert.equal(jobs.tryBeginApply(), false, 'the preview predates the save');
+});

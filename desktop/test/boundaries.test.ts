@@ -138,3 +138,10 @@ test('Cargo.toml excludes desktop/ from the crate', () => {
 	const cargo = readFileSync(join(DESKTOP, '..', 'Cargo.toml'), 'utf8');
 	assert.match(cargo, /exclude\s*=\s*\[[^\]]*"desktop\/"/);
 });
+test('main brackets real saves and tags dry-runs with the save generation', () => {
+	const main = readFileSync(join(SRC, 'main.ts'), 'utf8');
+	assert.ok(main.includes('jobs.beginSave();'));
+	assert.ok(main.includes('jobs.endSave();'));
+	assert.ok(main.includes('const startedAt = jobs.beginDryRun();'));
+	assert.ok(main.includes('jobs.recordDryRun(result.ok ? result.value : null, startedAt)'));
+});

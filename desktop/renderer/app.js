@@ -247,8 +247,9 @@ async function loadFiling() {
   render();
   // The current lists may already file some copies elsewhere (lists edited by hand, new documents):
   // ask the engine, without moving anything, and say so if the user has not started editing.
+  const generation = saveGeneration;
   const dry = await track(api.dryRun());
-  if (dry && dry.ok && dry.report.status === 'ok' && m.moveCount(dry.report) > 0 && f().changes.length === 0) {
+  if (generation === saveGeneration && dry && dry.ok && dry.report.status === 'ok' && m.moveCount(dry.report) > 0 && f().changes.length === 0) {
     f().pendingText = `${m.copiesLabel(m.moveCount(dry.report))} are not where the current lists put them.`;
     if (!f().touched) {
       f().selected = null;
@@ -318,9 +319,13 @@ async function check() {
   renderFiling();
 }
 
+/** Bumped when a save starts: a dry-run that began earlier must not show its preview. */
+let saveGeneration = 0;
+
 async function save(op) {
   if (!op || f().saving) return;
   clearTimeout(checkTimer);
+  saveGeneration += 1;
   f().saving = true;
   renderFiling();
   const res = await track(api.saveFiling(m.draftFor(f().saved, f().view, op), false));
@@ -347,8 +352,13 @@ async function resort() {
   f().notice = 'running';
   f().error = null;
   render();
+  const generation = saveGeneration;
   const res = await track(api.dryRun());
-  if (!res || !res.ok) {
+  if (generation !== saveGeneration || res?.stale) {
+    // The lists were saved while this ran: its preview describes the old lists. Ask again.
+    f().notice = 'ask';
+    f().error = 'The lists changed while re-sorting. Re-sort again to see the current moves.';
+  } else if (!res || !res.ok) {
     f().error = res?.error ?? 'The engine did not answer.';
     f().notice = 'ask';
   } else {
@@ -488,7 +498,7 @@ function renderNotice() {
   $('noticeNote').textContent = card.note;
   $('noticeNote').hidden = card.note === '';
   $('resortButton').hidden = !card.resort;
-  $('resortButton').disabled = s.notice === 'running';
+  $('resortButton').disabled = s.notice === 'running' || s.saving;
   $('resortButton').textContent = s.notice === 'running' ? 're-sorting…' : 're-sort documents';
   $('noticeDone').hidden = !card.done;
 
@@ -504,7 +514,7 @@ function renderNotice() {
   $('movesMore').hidden = more <= 0;
   $('movesMore').textContent = more > 0 ? `and ${more} more` : '';
   $('applyButton').textContent = s.notice === 'applying' ? 'moving…' : `move ${m.copiesLabel(plan.count)}`;
-  $('applyButton').disabled = s.notice === 'applying';
+  $('applyButton').disabled = s.notice === 'applying' || s.saving;
   $('showAllButton').textContent = `show all ${plan.count}`;
   $('showAllButton').hidden = s.showAll || plan.count <= PREVIEW_ROWS;
   $('laterButton').disabled = s.notice === 'applying';

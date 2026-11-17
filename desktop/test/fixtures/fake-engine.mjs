@@ -7,6 +7,7 @@
 //   library    (default) a small synthetic library whose lists can be edited
 //   no-owners  the same library, before any owner was added
 //   empty      no library database yet
+// FAKE_DRY_RUN_DELAY_MS: make `organize --dry-run` slow (it plans the lists read at its start).
 // FAKE_STATE_FILE: where `library`/`no-owners` keep the saved lists and filed copies between
 // calls (default: a file in the OS temp folder). Delete it to start over.
 
@@ -205,7 +206,13 @@ async function library() {
     if (!args.includes('--check') && changed) save({ ...state, folders: draft.folders, owners: draft.owners, filed: filed(state) });
     print({ version: 1, ok: true, saved: !args.includes('--check') && changed, folders: draft.folders, owners: draft.owners, errors: [] });
   }
-  if (args[0] === 'organize') print(plan(state, args.includes('--apply') ? 'apply' : 'dry_run'));
+  if (args[0] === 'organize') {
+    const apply = args.includes('--apply');
+    // FAKE_DRY_RUN_DELAY_MS: a slow dry-run of the lists as they were when it started (race tests).
+    const delay = Number(process.env.FAKE_DRY_RUN_DELAY_MS || 0);
+    if (!apply && delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+    print(plan(state, apply ? 'apply' : 'dry_run'));
+  }
 }
 
 if (scenario === 'fixtures') await fixtures();

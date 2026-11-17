@@ -23,7 +23,7 @@ export type AskResult = { ok: boolean; error?: string; report?: AskReport };
 export type DocumentsResult = { ok: boolean; error?: string; report?: DocumentsReport };
 export type FilingShowResult = { ok: boolean; error?: string; report?: FilingShowReport };
 export type FilingSaveResult = { ok: boolean; error?: string; report?: FilingSaveReport };
-export type DryRunResult = { ok: boolean; error?: string; report?: OrganizeReport };
+export type DryRunResult = { ok: boolean; error?: string; report?: OrganizeReport; stale?: boolean };
 export type ResortResult = { ok: boolean; error?: string; report?: OrganizeReport };
 export type CancelResult = { ok: boolean; cancelled: boolean; error?: string };
 

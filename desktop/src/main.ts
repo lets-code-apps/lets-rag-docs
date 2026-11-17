@@ -130,17 +130,25 @@ function registerIpc(): void {
 	ipcMain.handle(IPC.filingSave, async (event, draft: unknown, check: boolean) => {
 		if (!fromUs(event.senderFrame)) return null;
 		return guard(async () => {
-			const result = await engine.filingSave(draft, Boolean(check));
-			if (result.ok && result.value.saved) jobs.recordSave();
-			return toIPC(result);
+			if (check) return toIPC(await engine.filingSave(draft, true));
+			jobs.beginSave();
+			try {
+				return toIPC(await engine.filingSave(draft, false));
+			} finally {
+				jobs.endSave();
+			}
 		});
 	});
 
 	ipcMain.handle(IPC.dryRun, async (event) => {
 		if (!fromUs(event.senderFrame)) return null;
 		return guard(async () => {
+			const startedAt = jobs.beginDryRun();
 			const result = await engine.dryRun();
-			jobs.recordDryRun(result.ok ? result.value : null);
+			// A save that began meanwhile made this preview stale: never show or arm it.
+			if (!jobs.recordDryRun(result.ok ? result.value : null, startedAt)) {
+				return { ok: false, stale: true, error: 'the lists changed while re-sorting; re-sort again' };
+			}
 			return toIPC(result);
 		});
 	});
@@ -285,7 +293,7 @@ async function runSmoke(): Promise<void> {
       await d.click('#applyButton');
       const filed = d.find('#noticePill').textContent;
       return { libraryRows, answered, folderRows, notice, moves, filed };
-    `)) as { libraryRows: number; answered: boolean; folderRows: number; notice: boolean; moves: number; filed: string; persisted?: boolean };
+    `)) as { libraryRows: number; answered: boolean; folderRows: number; notice: boolean; moves: number; filed: string; persisted?: boolean; raceSafe?: boolean };
 		// Edit -> save -> reload: the saved list comes back from the engine, not from page memory.
 		const reload = loaded(browser);
 		browser.reload();
@@ -295,11 +303,30 @@ async function runSmoke(): Promise<void> {
       const titles = [...document.querySelectorAll('#filingRows .row-title')].map((n) => n.textContent);
       return titles.includes('Vehicles') && !titles.includes('Car');
     `)) as boolean;
+		// Race: save new lists while a slow dry-run of the old ones runs. Its preview must not show,
+		// and main must refuse apply.
+		process.env.FAKE_DRY_RUN_DELAY_MS = '1500';
+		result.raceSafe = (await drive(browser, String.raw`
+      await d.pick('Finance');
+      await d.type('#nameInput', 'Money');
+      await d.click('#saveButton');
+      d.find('#resortButton').click();
+      await new Promise((r) => setTimeout(r, 300));
+      d.row('#filingRows', 'Home').click();
+      const input = d.find('#nameInput');
+      input.value = 'House';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      d.find('#nameForm').requestSubmit();
+      await d.settle();
+      const forced = await window.ragDocs.resort();
+      return d.find('#movesSection').hidden && /changed while re-sorting/.test(d.find('#filingError').textContent) && forced.ok === false;
+    `)) as boolean;
+		delete process.env.FAKE_DRY_RUN_DELAY_MS;
 		const title = browser.getTitle();
 		const own = isOwnFile(browser.webContents.getURL(), INDEX_URL);
-		const ok = own && title === PRODUCT_NAME && result.libraryRows > 0 && result.answered && result.folderRows > 0 && result.notice && result.moves > 0 && result.filed === 'filed' && result.persisted === true;
+		const ok = own && title === PRODUCT_NAME && result.libraryRows > 0 && result.answered && result.folderRows > 0 && result.notice && result.moves > 0 && result.filed === 'filed' && result.persisted === true && result.raceSafe === true;
 		if (ok) {
-			console.error(`SMOKE OK: library ${result.libraryRows} rows, answer with citations, ${result.folderRows} folder rows, rename -> notice -> ${result.moves} moves -> applied -> reloaded with the saved list`);
+			console.error(`SMOKE OK: library ${result.libraryRows} rows, answer with citations, ${result.folderRows} folder rows, rename -> notice -> ${result.moves} moves -> applied -> reloaded with the saved list; stale dry-run after a save refused`);
 			code = 0;
 		} else {
 			console.error(`SMOKE FAIL: own=${own} title=${title} checks=${JSON.stringify(result)}`);
