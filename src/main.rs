@@ -5,10 +5,12 @@ mod ask;
 mod chunk;
 mod classify;
 mod config;
+mod config_edit;
 mod db;
 mod documents;
 mod embed;
 mod eval;
+mod filing;
 mod index;
 mod mcp;
 mod organize;
@@ -54,6 +56,22 @@ struct OrganizeMode {
 }
 
 #[derive(Debug, Subcommand)]
+enum Filing {
+    /// Print the effective `[classify] folders`, `owners` and `shared_owner` as JSON
+    Show {
+        /// Machine-readable output; required, there is no text mode for this command
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read a draft from stdin, validate it, then write the two lists unless --check is set
+    Save {
+        /// Validate without writing
+        #[arg(long)]
+        check: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum Command {
     /// (Re)build the index from the OCR text files
     Ingest,
@@ -91,6 +109,11 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Show or change `[classify] folders` and `owners` through the engine
+    Filing {
+        #[command(subcommand)]
+        command: Filing,
+    },
     /// Serve `search_docs` to an MCP client over stdio
     Mcp,
     /// Answer a question from the documents with a local LLM, with citations
@@ -124,6 +147,10 @@ async fn main() -> anyhow::Result<()> {
             organize::run(&config, mode.dry_run, mode.apply, json).await
         }
         Command::Documents { json } => documents::run(&config, json),
+        Command::Filing { command } => match command {
+            Filing::Show { json } => filing::show(&config, json),
+            Filing::Save { check } => filing::save(&config, &path, check),
+        },
         Command::Mcp => mcp::run(&config).await,
         Command::Ask { question, json } => ask::run(&config, &question, json).await,
     }
