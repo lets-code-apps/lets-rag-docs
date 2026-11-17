@@ -4,14 +4,15 @@
   "private": true,
   "type": "module",
   "productName": "Let's RAG Docs",
-  "description": "Placeholder desktop shell for lets-rag-docs. Opens one neutral window and does nothing else: no backend, no IPC, no network. The product direction is still open.",
+  "description": "Tray-resident desktop shell for lets-rag-docs ask and filing screens, driven by one-shot Rust engine calls.",
   "main": "dist/main.js",
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && cp src/preload.cjs dist/preload.cjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --test test/*.test.ts",
-    "smoke": "npm run build && RAG_DOCS_SMOKE=1 electron .",
-    "start": "npm run build && electron ."
+    "smoke": "npm run build && RAG_DOCS_SMOKE=1 RAG_DOCS_ENGINE_PATH=test/fixtures/fake-engine.mjs electron .",
+    "shots": "npm run build && RAG_DOCS_SHOTS=1 RAG_DOCS_ENGINE_PATH=test/fixtures/fake-engine.mjs electron .",
+    "start": "npm run build && RAG_DOCS_START_WINDOW=1 electron ."
   },
   "engines": {
     "node": ">=24"

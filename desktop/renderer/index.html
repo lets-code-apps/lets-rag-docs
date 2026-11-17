@@ -2,14 +2,38 @@
 <html lang="en">
 	<head>
 		<meta charset="utf-8" />
-		<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'" />
+		<!-- Lock the page down: nothing loads, nothing is fetched, only local script and style. -->
+		<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'" />
 		<title>Let's RAG Docs</title>
-		<link rel="stylesheet" href="renderer.css" />
+		<link rel="stylesheet" href="tokens.css" />
+		<link rel="stylesheet" href="app.css" />
 	</head>
 	<body>
 		<main id="app">
 			<h1>Let's RAG Docs</h1>
-			<p class="hint">This is a placeholder window. The desktop app has no features yet.</p>
+			<nav id="nav" aria-label="Views">
+				<button id="askView" type="button">Ask</button>
+				<button id="filingView" type="button">Filing</button>
+			</nav>
+			<section id="askScreen">
+				<div id="answer"></div>
+				<div id="citations"></div>
+				<div id="libraryRows"></div>
+				<div id="samplePills" class="samplePills">
+					<span data-sample="true" data-key="citationSnippet" class="pill">Sample data: citation snippet</span>
+					<span data-sample="true" data-key="documentSize" class="pill">Sample data: document size</span>
+					<span data-sample="true" data-key="indexHealth" class="pill">Sample data: index health</span>
+				</div>
+			</section>
+			<section id="filingScreen" hidden>
+				<div id="filingRows"></div>
+				<div id="filingNotice"></div>
+				<div id="filingPreview"></div>
+				<div id="saveErrors"></div>
+				<button id="saveDraftButton" type="button">Save draft</button>
+<button id="resortButton" type="button">Re-sort</button>
+			</section>
 		</main>
+		<script src="app.js"></script>
 	</body>
 </html>

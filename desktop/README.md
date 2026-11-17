@@ -1,59 +1,70 @@
-# Let's RAG Docs — desktop (placeholder)
+# Let's RAG Docs — desktop
 
-A minimal Electron shell. It opens **one neutral window** that says "this is a placeholder" and
-does nothing else: no backend, no IPC, no preload, no network. The product direction is deliberately
-still open (see CLAUDE.md step 9 — browse, ask, upload come later). This is the *foundation*, not the
-app.
+A macOS menu-bar Electron companion for the `lets-rag-docs` Rust engine. It opens **one hidden window
+by default**, shows ask/filing screens, and calls the engine one-shot over its command line. It never
+reads the repository's local model, database, config file or document folders itself, and it never
+points the app at real data: `npm run smoke` and `npm run shots` hard-set `test/fixtures/fake-engine.mjs`.
 
 ## Requirements
 
-- **Node 24** and npm. Electron 45.2.3, TypeScript 5.9.3, `@types/node` 24.19.2 (exact pins; see
-  `package.json`).
-- The desktop needs **no Rust**; the Rust crate build needs **no Node**. They are independent. `desktop/`
-  has no `Cargo.toml` and `Cargo.toml` `exclude`s `desktop/`, so `cargo` never sees it (except to keep it
-  out of the published crate).
+- Node 24 and npm. Electron 45.2.3, TypeScript 5.9.3, `@types/node` 24.19.2.
+- The desktop needs no Rust to run its unit tests. To use the real engine, build it with `cargo build`
+  from the repository root, or set `RAG_DOCS_ENGINE_PATH` to a built binary.
 
 ## Commands
 
-Run every command from this `desktop/` directory.
+Run from this `desktop/` directory.
 
 | Step | Command | Meaning |
 |---|---|---|
 | Setup | `npm ci` | install from `package-lock.json`; downloads the Electron binary once |
 | Typecheck | `npm run typecheck` | `tsc -p tsconfig.json --noEmit` (types only, no output) |
-| Test | `npm test` | `node --test test/*.test.ts` — runs the pure logic with no GUI |
-| Build | `npm run build` | `tsc -p tsconfig.build.json` into `dist/` |
-| Dev launch | `npm start` | build, then `electron .` (opens a visible window; needs a display) |
-| Smoke | `npm run smoke` | build, then `RAG_DOCS_SMOKE=1 electron .` (hidden window; no display needed) |
+| Test | `npm test` | `node --test test/*.test.ts` — pure logic, no GUI, no real engine |
+| Build | `npm run build` | `tsc -p tsconfig.build.json` into `dist/` and copy `preload.cjs` |
+| Dev launch | `npm start` | build, then open a visible window (`RAG_DOCS_START_WINDOW=1 electron .`) |
+| Smoke | `npm run smoke` | build, then hidden Electron with the fake engine; exits `SMOKE OK` / `SMOKE FAIL` |
+| Screenshots | `npm run shots` | build, then Electron `capturePage` writes synthetic light/dark PNGs under `screenshots/` |
 
-## What the checks prove (and don't)
+## Engine contract
 
-- `npm test` runs two files under `node:test`:
-  - `test/window-policy.test.ts` — the window is 800×600, the renderer is sandboxed
-    (`contextIsolation` on, `sandbox` on, `nodeIntegration` off, no `preload`); only the app's own
-    `file://` index counts as "ours"; navigation is refused and new windows are denied.
-  - `test/boundaries.test.ts` — the shell makes **no network call**, spawns **no process**, pulls in
-    no HTTP-client/database/TOML library, `Cargo.toml` excludes `desktop/`, nothing references the
-    private `docs/`/`data/`/`evals/` paths, and `index.html` is titled, CSP-locked (`default-src 'none'`),
-    and free of any `<script>` or remote URL.
-- `npm run smoke` boots real Electron with a **hidden** window, loads the local file, and checks
-  Electron reports the title `Let's RAG Docs`, then exits 0 (`SMOKE OK`) — or 1 (`SMOKE FAIL`). It proves
-  the shell launches and stays on its own file. It does **not** prove pixels or interaction: nothing is
-  visible, and there is nothing to click yet.
-- `npm start` shows the window for a human to see; it needs a display, so it is a manual check (Piotr
-  runs it). It is not part of the automated checks.
+The desktop builds argv itself; the renderer only sends data. Expected engine states are exit 0 JSON
+data; real failures exit non-zero with empty stdout and a reason on stderr.
 
-## Boundary rules (enforced by the tests)
+| Call | Desktop API | Shape |
+|---|---|---|
+| `documents --json` | `rag.documents()` | `{version, status, documents:[{path,title,type,date,folder,owner,filed_as}]}` |
+| `ask --json -- <question>` | `rag.ask()` | `{version, answer:string|null, sources:[{source,file,chunk,score}]}` |
+| `filing show --json` | `rag.filing()` | `{version, folders, owners, shared_owner}` |
+| `filing save [--check]` (stdin JSON draft) | `rag.saveFiling()` | `{version, ok, saved, folders, owners, errors}` |
+| `organize --dry-run --json` | `rag.dryRun()` | `{version, mode, status, items, counts}` |
+| `organize --apply --json` | `rag.resort()` | same shape as dry-run; apply is refused unless a fresh successful dry-run is cached |
 
-- No network: no `node:http`/`https`/`net`/`dgram`, no `fetch`, no Electron `net`/`session` fetch. The
-  only network use is `npm ci` fetching the Electron binary once at setup.
-- No `child_process`: the shell never spawns the `lets-rag-docs` binary (yet).
-- No reading the private `docs/`, `data/`, `evals/` directories.
-- The renderer is sandboxed and loads only local `file://` content under a CSP of `default-src 'none'`.
+Binary lookup: `RAG_DOCS_ENGINE_PATH`, then `<resources>/engine/lets-rag-docs`, then
+`<repo>/target/debug/lets-rag-docs`. `--config` is added only when `RAG_DOCS_CONFIG` is set.
 
-## The later seam (not built here)
+## Sample data
 
-When the desktop grows features, the backend will be the **`lets-rag-docs` binary over MCP stdio** —
-the same server agents use (CLAUDE.md step 9). That wiring (a preload bridge, IPC, spawning the binary)
-is deliberately absent today, and its absence is what the boundary tests guard. Never run the desktop
-against real documents; only Piotr does that on his own private copy.
+| Key | What the engine supplies today | What the UI marks as sample |
+|---|---|---|
+| citationSnippet | The engine supplies source, file and chunk numbers, but not page/snippet text. | citation snippet text |
+| documentSize | The engine does not supply per-document size. | document size |
+| indexHealth | The engine does not expose index freshness/health. | index health |
+
+Every sample element is rendered with a visible `Sample data` pill and `data-sample="true"`.
+
+## Icon generation
+
+Run `node scripts/make-assets.mjs` from `desktop/` to write `assets/menubarTemplate.png`,
+`assets/menubarTemplate@2x.png` and `assets/icon.png`. The assets are synthetic PNGs generated locally;
+macOS tints the menu-bar glyph through `setTemplateImage(true)`, and the app icon is set only when running
+unpackaged.
+
+## Boundary rules
+
+- No network calls from the app: no Node HTTP/TLS/socket/dgram, no `fetch`, no Electron network/session fetch.
+- Only `engine.ts` imports `child_process`; it spawns the engine one-shot.
+- No database/TOML/HTTP npm dependencies and no Playwright dependency.
+- No references to the private document paths inside the desktop source/renderer.
+- The renderer is sandboxed, context-isolated, preload-only, CSP `default-src 'none'`, and never uses
+  `innerHTML`, `outerHTML`, `insertAdjacentHTML` or `document.write`.
+- Smoke/screenshots always use `test/fixtures/fake-engine.mjs` and synthetic fixtures.
