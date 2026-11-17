@@ -19,11 +19,28 @@ TYPES = {".pdf", ".jpg", ".jpeg", ".png", ".heic", ".tif", ".tiff"}
 # ponytail: a page with fewer chars than this counts as a scan; a junk text layer would slip through
 MIN_CHARS = 50
 PDF_DPI = 300
+# Annotations that put text on the page: Preview's text boxes (FreeText) and filled form fields
+# (Widget). The embedded text layer leaves them out; a render shows them. Links etc. don't count.
+TEXT_ANNOTS = {pdfium.raw.FPDF_ANNOT_FREETEXT, pdfium.raw.FPDF_ANNOT_WIDGET}
+
+
+def has_text_annots(page):
+    for i in range(pdfium.raw.FPDFPage_GetAnnotCount(page.raw)):
+        annot = pdfium.raw.FPDFPage_GetAnnot(page.raw, i)
+        subtype = pdfium.raw.FPDFAnnot_GetSubtype(annot)
+        pdfium.raw.FPDFPage_CloseAnnot(annot)
+        if subtype in TEXT_ANNOTS:
+            return True
+    return False
 
 
 def pdf_text(path):
-    """Embedded text of a digital PDF, or None if any page looks scanned."""
-    pages = [page.get_textpage().get_text_range() for page in pdfium.PdfDocument(path)]
+    """Embedded text of a digital PDF, or None if any page looks scanned or has text annotations."""
+    pages = []
+    for page in pdfium.PdfDocument(path):
+        if has_text_annots(page):
+            return None  # Vision reads the rendered page, annotations included
+        pages.append(page.get_textpage().get_text_range())
     if all(len(p.strip()) >= MIN_CHARS for p in pages):
         return "\n\n".join(pages)
 
@@ -34,7 +51,9 @@ def vision(path):
         images = [path]
         if path.suffix.lower() == ".pdf":
             images = []
-            for i, page in enumerate(pdfium.PdfDocument(path)):
+            pdf = pdfium.PdfDocument(path)
+            pdf.init_forms()  # before loading pages, or filled form fields don't render
+            for i, page in enumerate(pdf):
                 images.append(Path(tmp) / f"{i}.png")
                 page.render(scale=PDF_DPI / 72).to_pil().save(images[-1])
         out = subprocess.run([VISION_BIN, *images], check=True, capture_output=True, text=True).stdout
@@ -71,6 +90,10 @@ def main(folder, out_root=OUT, only=None):
             text = vision(src)
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(text)
+        # A PDF that switched method (e.g. annotations added) must not leave its old text behind:
+        # ingest would index both under the same source.
+        other = "vision" if how == "text" else "text"
+        (out_root / rel.parent / f"{src.name}.{other}.txt").unlink(missing_ok=True)
         print(f"{how:<7} {src.name}  ({time.time() - t:.1f}s, {len(text)} chars)")
 
 

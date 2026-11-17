@@ -38,7 +38,9 @@ the agent that calls this tool.
 ## Stack
 
 - **OCR** (`ocr.py`, `vision_ocr.swift`): embedded PDF text when present, otherwise Apple Vision
-  (macOS, offline). Writes one text file per document to `data/ocr/`.
+  (macOS, offline). A PDF with text boxes or filled form fields on top (e.g. added in Preview)
+  also goes through Vision, which reads what the page shows. Writes one text file per document to
+  `data/ocr/`. Tests: `.venv/bin/python -m unittest test_ocr`.
 - **`lets-rag-docs`**: one Rust binary for chunking, ingest, search, evals, the MCP server (stdio),
   `ask` and `add <file>` (one document end to end: OCR, classify, index).
 - **Embeddings** (`embed_server.py`): [bge-m3](https://huggingface.co/BAAI/bge-m3), dense + sparse,

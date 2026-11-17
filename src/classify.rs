@@ -286,7 +286,7 @@ pub fn safe_folder(f: &str) -> bool {
     !f.is_empty()
         && f.chars().count() <= FOLDER_CAP
         && f.chars()
-            .all(|c| c.is_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.'))
+            .all(|c| c.is_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.' | '\''))
         && !f.starts_with('.')
         && !f.ends_with('.')
         && !f.contains("..")
@@ -415,6 +415,7 @@ mod tests {
             "tax_2024",
             "v1.2",
             "Zdrowie-Jan",
+            "Let's Code Jan Kowalski",
         ] {
             assert!(safe_folder(ok), "{ok}");
         }

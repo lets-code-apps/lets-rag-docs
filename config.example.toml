@@ -58,7 +58,7 @@ folders = [
 # Whose documents these are: the second folder level (`library/<folder>/<owner>/<year>/`). Family
 # members and the family's own companies, spelled the way the folders should read. Each must be a
 # valid folder name (no "/", no leading or trailing "."). Real names belong in your own config only.
-owners = ["Jan Kowalski", "Anna Kowalska", "Kowalski Studio"]
+# owners = ["Jan Kowalski", "Anna Kowalska", "Kowalski Studio"]
 # The owner folder for documents that belong to nobody on the list, or to several people.
 shared_owner = "Shared"
 # The language for titles and matters in file names, whatever the document's language.
