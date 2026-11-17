@@ -5,6 +5,8 @@
 /evals/rag.jsonl
 /evals/classify.jsonl
 /design/
+# organize --apply files copies of the originals here: same privacy as docs/.
+/library/
 
 .venv/
 .build/

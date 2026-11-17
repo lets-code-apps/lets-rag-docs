@@ -20,6 +20,7 @@ pub struct Config {
     pub paths: PathsConfig,
     pub llm: LlmConfig,
     pub classify: ClassifyConfig,
+    pub ocr: OcrConfig,
 }
 
 /// `[qdrant]`: the vector store, over gRPC.
@@ -64,6 +65,9 @@ pub struct PathsConfig {
     pub docs_dir: PathBuf,
     /// SQLite database with one row per classified document.
     pub db: PathBuf,
+    /// Where `organize --apply` copies originals into, under `<folder>/<title>`. Kept separate
+    /// from `docs_dir`/`ocr_dir` so a copy is never OCR'd or classified as a new original.
+    pub library_dir: PathBuf,
 }
 
 impl Default for PathsConfig {
@@ -73,6 +77,7 @@ impl Default for PathsConfig {
             evals: PathBuf::from("evals/rag.jsonl"),
             docs_dir: PathBuf::from("docs"),
             db: PathBuf::from("data/lets-rag-docs.sqlite"),
+            library_dir: PathBuf::from("library"),
         }
     }
 }
@@ -101,11 +106,21 @@ impl Default for LlmConfig {
     }
 }
 
-/// `[classify]`: document types the model may choose. Anything else becomes `unsorted`.
+/// `[classify]`: the document types, library folders and owners the model may choose. Anything
+/// else becomes `unsorted` (type), no folder (filed under `unsorted/`) or no owner (filed under
+/// `shared_owner`).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ClassifyConfig {
     pub types: Vec<String>,
+    pub folders: Vec<String>,
+    /// Whose documents these are: family members and the family's own companies. Real names
+    /// belong only in the local config.
+    pub owners: Vec<String>,
+    /// The owner folder for documents that belong to nobody on the list, or to several people.
+    pub shared_owner: String,
+    /// The language titles and matters are written in (e.g. "Polish"). Unset: each document's own.
+    pub language: Option<String>,
 }
 
 impl Default for ClassifyConfig {
@@ -125,8 +140,45 @@ impl Default for ClassifyConfig {
             "letter",
             "other",
         ];
+        let folders = [
+            "Identity",
+            "Health",
+            "Finance",
+            "Taxes",
+            "Insurance",
+            "Home",
+            "Car",
+            "Work",
+            "Education",
+            "Purchases",
+            "Letters",
+            "Other",
+        ];
         ClassifyConfig {
             types: types.map(String::from).to_vec(),
+            folders: folders.map(String::from).to_vec(),
+            owners: Vec::new(),
+            shared_owner: "Shared".to_string(),
+            language: None,
+        }
+    }
+}
+
+/// `[ocr]`: how `add <file>` shells out to `ocr.py` (OCR stays Python; see CLAUDE.md).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct OcrConfig {
+    /// The interpreter to run the script with (the repo's venv by default).
+    pub python: PathBuf,
+    /// The OCR script itself.
+    pub script: PathBuf,
+}
+
+impl Default for OcrConfig {
+    fn default() -> Self {
+        OcrConfig {
+            python: PathBuf::from(".venv/bin/python"),
+            script: PathBuf::from("ocr.py"),
         }
     }
 }
@@ -145,6 +197,9 @@ impl Config {
         config.paths.evals = expand_home(&config.paths.evals);
         config.paths.docs_dir = expand_home(&config.paths.docs_dir);
         config.paths.db = expand_home(&config.paths.db);
+        config.paths.library_dir = expand_home(&config.paths.library_dir);
+        config.ocr.python = expand_home(&config.ocr.python);
+        config.ocr.script = expand_home(&config.ocr.script);
         Ok(config)
     }
 }
