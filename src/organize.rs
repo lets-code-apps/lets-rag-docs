@@ -95,33 +95,37 @@ pub async fn run(config: &Config, dry_run: bool, apply: bool) -> anyhow::Result<
 
     if mode == Mode::DryRun {
         // A dry-run may read, never write: `db::open` creates the parent folder, the file and its
-        // table and tightens permissions, so dry-run opens the database read-only instead - and
-        // does not open it at all when the file is missing.
-        if !std::fs::exists(&config.paths.db).unwrap_or(false) {
-            println!(
-                "run `classify` first: no database at {}",
-                config.paths.db.display()
-            );
-            return Ok(());
+        // table and tightens permissions, so dry-run goes through `db::open_for_read` - and that
+        // helper does not open the file at all when it is missing. The three expected states print
+        // byte-identical hints to before the refactor.
+        match db::open_for_read(&config.paths.db)? {
+            db::ReadOutcome::Ready(conn) => {
+                let plan = build_plan(config, &conn)?;
+                for line in plan.lines {
+                    println!("{}", line);
+                }
+                println!("{}", plan_line(&plan.counts));
+                return Ok(());
+            }
+            db::ReadOutcome::Outdated => {
+                println!("run `classify --force` first: the database predates owners and matters");
+                return Ok(());
+            }
+            db::ReadOutcome::NoDatabase { file_exists } => {
+                if file_exists {
+                    println!(
+                        "run `classify` first: no documents table in {}",
+                        config.paths.db.display()
+                    );
+                } else {
+                    println!(
+                        "run `classify` first: no database at {}",
+                        config.paths.db.display()
+                    );
+                }
+                return Ok(());
+            }
         }
-        let conn = db::open_read_only(&config.paths.db)?;
-        if !db::has_documents(&conn)? {
-            println!(
-                "run `classify` first: no documents table in {}",
-                config.paths.db.display()
-            );
-            return Ok(());
-        }
-        if !db::is_current(&conn)? {
-            println!("run `classify --force` first: the database predates owners and matters");
-            return Ok(());
-        }
-        let plan = build_plan(config, &conn)?;
-        for line in plan.lines {
-            println!("{}", line);
-        }
-        println!("{}", plan_line(&plan.counts));
-        return Ok(());
     }
 
     // Only `--apply` opens the embed service and Qdrant.
@@ -822,8 +826,9 @@ fn safe_ext(original: &Path) -> Option<String> {
 }
 
 /// Belt and braces before every write: every component of `rel` is a plain name, and the joined
-/// path is still under `library`.
-fn inside_library(library: &Path, rel: &Path) -> bool {
+/// path is still under `library`. Shared with `documents --json`, which shows `filed_as` only for
+/// paths this check still accepts.
+pub(crate) fn inside_library(library: &Path, rel: &Path) -> bool {
     let all_normal: bool = rel.components().all(|c| matches!(c, Component::Normal(_)));
     all_normal && library.join(rel).starts_with(library)
 }

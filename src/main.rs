@@ -6,6 +6,7 @@ mod chunk;
 mod classify;
 mod config;
 mod db;
+mod documents;
 mod embed;
 mod eval;
 mod index;
@@ -74,6 +75,12 @@ enum Command {
         #[arg(long)]
         apply: bool,
     },
+    /// List every classified document as JSON (read-only): `documents --json`
+    Documents {
+        /// Machine-readable output; required, there is no text mode for this command
+        #[arg(long)]
+        json: bool,
+    },
     /// Serve `search_docs` to an MCP client over stdio
     Mcp,
     /// Answer a question from the documents with a local LLM, with citations
@@ -99,6 +106,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Classify { force } => classify::run(&config, force).await,
         Command::Add { file } => add::run(&config, &file).await,
         Command::Organize { dry_run, apply } => organize::run(&config, dry_run, apply).await,
+        Command::Documents { json } => documents::run(&config, json),
         Command::Mcp => mcp::run(&config).await,
         Command::Ask { question } => ask::run(&config, &question).await,
     }
