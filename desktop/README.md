@@ -23,7 +23,7 @@ Run from this `desktop/` directory.
 | Build | `npm run build` | `tsc -p tsconfig.build.json` into `dist/` and copy `preload.cjs` |
 | Dev launch | `npm start` | build, then open a visible window (`RAG_DOCS_START_WINDOW=1 electron .`) |
 | Smoke | `npm run smoke` | build, then hidden Electron with the fake engine; exits `SMOKE OK` / `SMOKE FAIL` |
-| Screenshots | `npm run shots` | build, then Electron `capturePage` writes synthetic light/dark PNGs under `screenshots/` |
+| Screenshots | `npm run shots` | build, then Electron `capturePage` writes the ask state and all 10 design filing states in light and dark under `screenshots/` |
 
 ## Engine contract
 

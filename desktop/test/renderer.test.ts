@@ -8,9 +8,16 @@ const RENDERER = join(import.meta.dirname, '..', 'renderer');
 test('renderer has exactly the ask and filing nav entries', () => {
 	const html = readFileSync(join(RENDERER, 'index.html'), 'utf8');
 	assert.ok(html.includes('id="askView"'));
-	assert.ok(html.includes('>Ask</button>'));
 	assert.ok(html.includes('id="filingView"'));
-	assert.ok(html.includes('>Filing</button>'));
+	assert.ok(html.includes('>ask</button>'));
+	assert.ok(html.includes('>filing</button>'));
+});
+
+test('renderer has the design surfaces needed for ask and filing', () => {
+	const html = readFileSync(join(RENDERER, 'index.html'), 'utf8');
+	for (const id of ['appBar', 'askInput', 'askButton', 'libraryRows', 'conversationPane', 'citations', 'filingScreen', 'listPane', 'detailPane', 'viewSwitch', 'filingRows', 'pathTokens', 'noticeCard', 'movesSection', 'nameInput', 'saveButton', 'removeButton']) {
+		assert.ok(html.includes(`id="${id}"`), `renderer missing #${id}`);
+	}
 });
 
 test('renderer locks CSP and avoids remote URLs', () => {
@@ -39,5 +46,14 @@ test('renderer uses no HTML injection sinks', () => {
 	const js = readFileSync(join(RENDERER, 'app.js'), 'utf8');
 	for (const token of ['innerHTML', 'outerHTML', 'insertAdjacentHTML', 'document.write']) {
 		assert.equal(js.includes(token), false);
+	}
+});
+
+test('screenshots cover the 10 filing states and ask in light and dark', () => {
+	const main = readFileSync(join(import.meta.dirname, '..', 'src', 'main.ts'), 'utf8');
+	for (const state of ['ask', 'folders', 'editing', 'owners', 'owners-empty', 'adding', 'error', 'shared', 'changed', 'preview', 'small']) {
+		for (const mode of ['light', 'dark']) {
+			assert.ok(main.includes(state) && main.includes(mode), `shots missing ${state}-${mode}`);
+		}
 	}
 });

@@ -35,6 +35,16 @@ let tray: Tray | undefined;
 
 const fromUs = (senderFrame?: { url?: string } | null): boolean => senderFrame?.url === INDEX_URL;
 
+function isRendererNavigation(url: string): boolean {
+	try {
+		const target = new URL(url);
+		const own = new URL(INDEX_URL);
+		return target.protocol === own.protocol && target.hostname === own.hostname && target.pathname === own.pathname;
+	} catch {
+		return false;
+	}
+}
+
 function toIPC<T>(result: EngineResult<T>): { ok: boolean; report?: T; error?: string } {
 	return result.ok ? { ok: true, report: result.value } : { ok: false, error: result.error };
 }
@@ -51,7 +61,9 @@ function makeWindow(): BrowserWindow {
 			preload: PRELOAD,
 		},
 	});
-	browser.webContents.on('will-navigate', (event: { preventDefault(): void }) => denyNavigation(event));
+	browser.webContents.on('will-navigate', (event: { preventDefault(): void }, url: string) => {
+		if (!isRendererNavigation(url)) denyNavigation(event);
+	});
 	browser.webContents.setWindowOpenHandler(() => windowOpenHandler());
 	browser.on('close', (event) => ctl.handleClose(event));
 	browser.loadFile(RENDERER);
@@ -186,6 +198,8 @@ function smokeScript(): string {
 	return String.raw`
 (async () => {
   const api = window.ragDocs;
+  window.applyDemoState('ask', 'ask');
+  window.applyDemoState('filing', 'folders');
   const docs = await api.documents();
   const filing = await api.filing();
   const dry = await api.dryRun();
@@ -231,46 +245,37 @@ async function runSmoke(): Promise<void> {
 async function runShots(): Promise<void> {
 	const browser = makeWindow();
 	const deadline = setTimeout(() => {
-		console.error('SHOTS FAIL: timed out after 60s');
+		console.error('SHOTS FAIL: timed out after 120s');
 		app.exit(1);
-	}, 60000);
+	}, 120000);
 	await new Promise<void>((resolve) => browser.webContents.once('did-finish-load', resolve));
 	browser.show();
-	const names = ['ask-light', 'ask-dark', 'filing-default-light', 'filing-default-dark', 'filing-error-light', 'filing-error-dark', 'filing-notice-light', 'filing-notice-dark'];
-	try {
-	for (const name of names) {
-		if (name.includes('dark')) nativeTheme.themeSource = 'dark';
-		else nativeTheme.themeSource = 'light';
-		if (name.startsWith('ask')) {
-			await browser.webContents.executeJavaScript(String.raw`
-(async () => {
-  document.getElementById('askView').click();
-  await new Promise((resolve) => setTimeout(resolve, 350));
-})()
-`, true);
-		} else if (name.startsWith('filing-error')) {
-			await browser.webContents.executeJavaScript(String.raw`
-(async () => {
-  document.getElementById('filingView').click();
-  document.getElementById('saveDraftButton').click();
-  await new Promise((resolve) => setTimeout(resolve, 350));
-})()
-`, true);
-		} else if (name.startsWith('filing')) {
-			await browser.webContents.executeJavaScript(String.raw`
-(async () => {
-  document.getElementById('filingView').click();
-  await new Promise((resolve) => setTimeout(resolve, 350));
-})()
-`, true);
+	const filingStates = ['folders', 'editing', 'owners', 'owners-empty', 'adding', 'error', 'shared', 'changed', 'preview', 'small'];
+	const shots: { name: string; view: 'ask' | 'filing'; state: string }[] = [];
+	for (const mode of ['light', 'dark']) {
+		shots.push({ name: `ask-${mode}`, view: 'ask', state: 'ask' });
+		for (const state of filingStates) {
+			shots.push({ name: `filing-${state}-${mode}`, view: 'filing', state });
 		}
-		if (name === 'filing-notice-light' || name === 'filing-notice-dark') browser.setSize(360, 480);
-		await new Promise((resolve) => setTimeout(resolve, 120));
-		const image = await browser.webContents.capturePage();
-		const imageBuffer = (image as unknown as { toPNG(): Buffer }).toPNG();
-		mkdirSync(join(HERE, '..', 'screenshots'), { recursive: true });
-		writeFileSync(join(HERE, '..', 'screenshots', `${name}.png`), imageBuffer);
 	}
+	try {
+		mkdirSync(join(HERE, '..', 'screenshots'), { recursive: true });
+		for (const shot of shots) {
+			if (shot.state === 'small') browser.setSize(360, 540);
+			else browser.setSize(1200, 820);
+			if (shot.name.includes('dark')) nativeTheme.themeSource = 'dark';
+			else nativeTheme.themeSource = 'light';
+			const loaded = new Promise<void>((resolve) => {
+				browser.webContents.once('did-finish-load', () => resolve(undefined));
+			});
+			await browser.webContents.executeJavaScript(`window.location.hash = '#demo-${shot.view}-${shot.state}';`, true);
+			browser.reload();
+			await loaded;
+			await new Promise((resolve) => setTimeout(resolve, 250));
+			const image = await browser.webContents.capturePage();
+			const imageBuffer = (image as unknown as { toPNG(): Buffer }).toPNG();
+			writeFileSync(join(HERE, '..', 'screenshots', `${shot.name}.png`), imageBuffer);
+		}
 	} catch (error: unknown) {
 		console.error(`SHOTS FAIL: ${String(error)}`);
 		clearTimeout(deadline);

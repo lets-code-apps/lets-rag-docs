@@ -1,39 +1,134 @@
 <!doctype html>
 <html lang="en">
-	<head>
-		<meta charset="utf-8" />
-		<!-- Lock the page down: nothing loads, nothing is fetched, only local script and style. -->
-		<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'" />
-		<title>Let's RAG Docs</title>
-		<link rel="stylesheet" href="tokens.css" />
-		<link rel="stylesheet" href="app.css" />
-	</head>
-	<body>
-		<main id="app">
-			<h1>Let's RAG Docs</h1>
-			<nav id="nav" aria-label="Views">
-				<button id="askView" type="button">Ask</button>
-				<button id="filingView" type="button">Filing</button>
-			</nav>
-			<section id="askScreen">
-				<div id="answer"></div>
-				<div id="citations"></div>
-				<div id="libraryRows"></div>
-				<div id="samplePills" class="samplePills">
-					<span data-sample="true" data-key="citationSnippet" class="pill">Sample data: citation snippet</span>
-					<span data-sample="true" data-key="documentSize" class="pill">Sample data: document size</span>
-					<span data-sample="true" data-key="indexHealth" class="pill">Sample data: index health</span>
-				</div>
-			</section>
-			<section id="filingScreen" hidden>
-				<div id="filingRows"></div>
-				<div id="filingNotice"></div>
-				<div id="filingPreview"></div>
-				<div id="saveErrors"></div>
-				<button id="saveDraftButton" type="button">Save draft</button>
-<button id="resortButton" type="button">Re-sort</button>
-			</section>
-		</main>
-		<script src="app.js"></script>
-	</body>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Let's RAG Docs</title>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'" />
+  <link rel="stylesheet" href="tokens.css" />
+  <link rel="stylesheet" href="app.css" />
+</head>
+<body class="lc-root">
+  <div id="app">
+    <header id="appBar">
+      <div id="emblem" aria-hidden="true">
+        <svg class="emblemSvg" viewBox="0 0 36 36">
+          <path d="M9 7h13l6 6v18H9z" />
+          <path d="M13 13h7M13 17h7M13 21h4" />
+          <circle cx="24" cy="24" r="5" />
+          <path d="M28 28l3 3" />
+        </svg>
+      </div>
+      <label class="searchField">
+        <span class="fieldLabel" id="askFieldLabel">ask about your documents</span>
+        <span class="field">
+          <svg class="glyph" viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="11" cy="11" r="7" />
+            <path d="M20 20l-4-4" />
+          </svg>
+          <input id="askInput" type="search" placeholder="e.g. when is the next payment due?" autocomplete="off" />
+        </span>
+      </label>
+      <button id="askButton" type="button" class="primary lg">ask</button>
+    </header>
+
+    <div id="screens">
+      <nav id="sections" aria-label="views">
+        <button id="askView" type="button" class="navEntry">ask</button>
+        <button id="filingView" type="button" class="navEntry">filing</button>
+      </nav>
+
+      <section id="askScreen">
+        <aside id="libraryPane">
+          <div class="paneHead">
+            <h2>library</h2>
+            <span id="libraryCount"></span>
+          </div>
+          <div id="libraryRows"></div>
+        </aside>
+        <main id="conversationPane">
+          <div id="questionBubble"></div>
+          <div id="answerMeta">answer from documents</div>
+          <p id="answer"></p>
+          <div id="citations"></div>
+          <div id="conversationActions">
+            <button id="copyAnswerButton" type="button" class="ghost">copy answer</button>
+            <button id="openSourceButton" type="button" class="secondary">open source</button>
+          </div>
+          <div class="samplePills" aria-label="Sample data">
+            <span data-sample="true" data-key="citationSnippet">Sample data: citation snippet</span>
+            <span data-sample="true" data-key="documentSize">Sample data: document size</span>
+            <span data-sample="true" data-key="indexHealth">Sample data: index health</span>
+          </div>
+        </main>
+      </section>
+
+      <section id="filingScreen" hidden>
+        <aside id="listPane">
+          <div class="paneHead">
+            <h1>filing</h1>
+            <button id="addEntryButton" type="button" class="icon" aria-label="add entry" aria-hidden="false">
+              <span aria-hidden="true">+</span>
+            </button>
+          </div>
+          <div id="viewSwitch" class="seg" role="radiogroup" aria-label="list">
+            <button id="foldersSwitch" type="button" class="segOn">folders</button>
+            <button id="ownersSwitch" type="button" class="segOff">owners</button>
+          </div>
+          <span id="listMeta"></span>
+          <div id="filingRows"></div>
+        </aside>
+
+        <article id="detailPane">
+          <section id="pathSection">
+            <h2>where a copy goes</h2>
+            <div id="pathTokens"></div>
+            <span id="pathNote"></span>
+          </section>
+
+          <div id="noticeCard" class="noticeCard" hidden>
+            <span id="noticePill" class="statusPill"><span class="dot"></span><span id="noticeLabel"></span></span>
+            <p id="noticeText"></p>
+            <span id="noticeNote"></span>
+            <button id="reSortNoticeButton" type="button" class="primary" hidden>re-sort documents</button>
+          </div>
+
+          <section id="movesSection" hidden>
+            <h2>what will move</h2>
+            <div id="moveRows"></div>
+            <span id="moveNote"></span>
+            <div class="moveActions">
+              <button id="applyMoveButton" type="button" class="primary" hidden>move copies</button>
+              <button id="showAllButton" type="button" class="secondary" hidden>show all</button>
+              <button id="laterButton" type="button" class="ghost" hidden>later</button>
+            </div>
+          </section>
+
+          <form id="nameForm">
+            <div class="formHead">
+              <h2 id="formTitle"></h2>
+              <span id="formMeta"></span>
+            </div>
+            <label class="fieldWrap">
+              <span id="formLabel" class="fieldLabel">name</span>
+              <span class="field">
+                <svg class="glyph" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M7 17 17 7M9 7h8v8" />
+                </svg>
+                <input id="nameInput" autocomplete="off" />
+              </span>
+              <span id="formHelper" class="helper"></span>
+            </label>
+            <div id="formActions">
+              <button id="saveButton" type="button" class="primary">save name</button>
+              <button id="removeButton" type="button" class="secondary">remove</button>
+            </div>
+            <p id="formNote"></p>
+          </form>
+        </article>
+      </section>
+    </div>
+  </div>
+  <script src="app.js"></script>
+</body>
 </html>
