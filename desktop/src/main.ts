@@ -625,18 +625,26 @@ async function runSmoke(): Promise<void> {
 		// clear of the emblem and that nothing scrolls sideways, on ask/filing/settings at 1200px
 		// and at the 360px minimum.
 		const TITLE_ON = String.raw`
-  const check = () => {
+  const section = (name) => {
     const t = d.find('#appTitle').getBoundingClientRect();
     const e = d.find('.emblem').getBoundingClientRect();
     const w = window.innerWidth;
-    return d.find('#appTitle').textContent === 'rag docs'
+    const sw = document.documentElement.scrollWidth;
+    const pass = d.find('#appTitle').textContent === 'rag docs'
       && Math.abs((t.left + t.right) / 2 - w / 2) <= 1
       && t.right <= e.left + 1
-      && document.documentElement.scrollWidth <= w + 4; // shortcut: 4px slack for non-Retina runner font metrics; a real horizontal scroll is tens of px — tighten to +1 once the local==CI render gap is closed
+      && sw <= w + 4; // shortcut: 4px slack for non-Retina runner font metrics; a real horizontal scroll is tens of px — tighten to +1 once the local==CI render gap is closed
+    if (!pass) {
+      window.__titleDiag = (window.__titleDiag || []).concat(name + ':' + JSON.stringify({
+        w, sw, centre: Math.abs((t.left + t.right) / 2 - w / 2).toFixed(1),
+        clr: (e.left - t.right).toFixed(1), txt: d.find('#appTitle').textContent,
+      }));
+    }
+    return pass;
   };
-  await d.click('[data-section="ask"]'); const a = check();
-  await d.click('[data-section="filing"]'); const f = check();
-  await d.click('[data-section="settings"]'); const s = check();
+  await d.click('[data-section="ask"]'); const a = section('ask');
+  await d.click('[data-section="filing"]'); const f = section('filing');
+  await d.click('[data-section="settings"]'); const s = section('settings');
   return a && f && s;
 `;
 		result.titleWide = (await drive(browser, TITLE_ON)) as boolean;
@@ -645,18 +653,10 @@ async function runSmoke(): Promise<void> {
 		browser.reload();
 		await reloadNarrow;
 		result.titleNarrow = (await drive(browser, TITLE_ON)) as boolean;
-		// If the narrow title check fails on CI, print the exact terms (window width, document scroll width,
-		// centring error, emblem clearance) so the fix can be sized to the real rendering difference, not a guess.
+		// If a title check fails, print the failing section and its exact terms (window width, document scroll
+		// width, centring error, emblem clearance) so the fix is sized to the real rendering difference, not a guess.
 		result.diag = (await driveNow(browser, String.raw`
-      const t = d.find('#appTitle').getBoundingClientRect();
-      const e = d.find('.emblem').getBoundingClientRect();
-      return JSON.stringify({
-        w: window.innerWidth,
-        sw: document.documentElement.scrollWidth,
-        centre: Math.abs((t.left + t.right) / 2 - window.innerWidth / 2).toFixed(1),
-        clr: (e.left - t.right).toFixed(1),
-        txt: d.find('#appTitle').textContent,
-      });
+      return JSON.stringify(window.__titleDiag ?? 'clean');
     `)) as string;
 
 		browser.setSize(1200, 820);
