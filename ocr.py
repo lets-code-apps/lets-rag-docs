@@ -42,7 +42,9 @@ def pdf_text(path):
             return None  # Vision reads the rendered page, annotations included
         pages.append(page.get_textpage().get_text_range())
     if all(len(p.strip()) >= MIN_CHARS for p in pages):
-        return "\n\n".join(pages)
+        # A \f marker starts every page, so `lets-rag-docs` can say which page a chunk sits on.
+        # Chunking drops the marker as a line break, so chunk output stays byte-identical.
+        return "".join("\f" + p for p in pages)
 
 
 def vision(path):
@@ -57,7 +59,9 @@ def vision(path):
                 images.append(Path(tmp) / f"{i}.png")
                 page.render(scale=PDF_DPI / 72).to_pil().save(images[-1])
         out = subprocess.run([VISION_BIN, *images], check=True, capture_output=True, text=True).stdout
-    return out.strip().replace("\f", "\n\n")
+    # Swift separates Vision pages with \f; keep that as our page marker (one image = one page).
+    pages = out.strip().split("\f")
+    return "".join("\f" + p for p in pages)
 
 
 def main(folder, out_root=OUT, only=None):

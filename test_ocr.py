@@ -12,17 +12,18 @@ import ocr
 TEXT = "Synthetic invoice for Jan Kowalski, 12 EUR, paid on 2025-03-14. " * 2
 
 
-def make_pdf(path, annot=None):
-    """A one-page digital PDF with TEXT in its text layer, plus an optional annotation subtype."""
+def make_pdf(path, annot=None, pages=1):
+    """A digital PDF with TEXT in each page's text layer, plus an optional annotation subtype."""
     pdf = pdfium.PdfDocument.new()
-    page = pdf.new_page(595, 842)
     font = raw.FPDFText_LoadStandardFont(pdf.raw, b"Helvetica")
-    obj = raw.FPDFPageObj_NewTextObj(pdf.raw, b"Helvetica", 10)
-    wide = (TEXT + "\0").encode("utf-16-le")
-    raw.FPDFText_SetText(obj, ctypes.cast(ctypes.c_char_p(wide), ctypes.POINTER(raw.FPDF_WCHAR)))
-    raw.FPDFPageObj_Transform(obj, 1, 0, 0, 1, 20, 800)
-    raw.FPDFPage_InsertObject(page.raw, obj)
-    raw.FPDFPage_GenerateContent(page.raw)
+    for _ in range(pages):
+        page = pdf.new_page(595, 842)
+        obj = raw.FPDFPageObj_NewTextObj(pdf.raw, b"Helvetica", 10)
+        wide = (TEXT + "\0").encode("utf-16-le")
+        raw.FPDFText_SetText(obj, ctypes.cast(ctypes.c_char_p(wide), ctypes.POINTER(raw.FPDF_WCHAR)))
+        raw.FPDFPageObj_Transform(obj, 1, 0, 0, 1, 20, 800)
+        raw.FPDFPage_InsertObject(page.raw, obj)
+        raw.FPDFPage_GenerateContent(page.raw)
     raw.FPDFFont_Close(font)
     if annot is not None:
         a = raw.FPDFPage_CreateAnnot(page.raw, annot)
@@ -50,6 +51,13 @@ class PdfTextTest(unittest.TestCase):
     def test_a_link_alone_keeps_the_text_layer(self):
         make_pdf(self.path, raw.FPDF_ANNOT_LINK)
         self.assertIsNotNone(ocr.pdf_text(self.path))
+
+    def test_two_pages_carry_page_markers(self):
+        # Text starts with \f and has exactly one marker per page, so `chunk` can number pages.
+        make_pdf(self.path, pages=2)
+        text = ocr.pdf_text(self.path)
+        self.assertTrue(text.startswith("\f"))
+        self.assertEqual(text.count("\f"), 2)
 
 
 if __name__ == "__main__":
