@@ -326,7 +326,7 @@ async function library() {
       || renamed > 0
       || draft.shared_owner !== undefined && draft.shared_owner !== state.shared;
     if (!args.includes('--check') && changed) save(next);
-    print({ version: 1, ok: true, saved: !args.includes('--check') && changed, renamed, folders: draft.folders, owners: draft.owners, errors: [] });
+    print({ version: 1, ok: true, saved: !args.includes('--check') && changed, renamed, folders: draft.folders, owners: draft.owners, shared_owner: shared, errors: [] });
   }
   if (args[0] === 'organize') {
     const apply = args.includes('--apply');

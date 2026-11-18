@@ -544,12 +544,14 @@ async function runSmoke(): Promise<void> {
       const movesToHousehold = [...document.querySelectorAll('#moveRows .row-subject')].some((n) => n.textContent.includes('Household'));
       // The row itself shows the new name right away (the save report carries it), and the
       // rename works both ways in one session: Household -> Shared.
-      const sharedShownHousehold = !!d.find('#filingRows [data-name="Household"]');
+      const sharedRowNamed = (title) => [...document.querySelectorAll('#filingRows .row')]
+        .some((r) => (r.querySelector('.row-title') ?? {}).textContent === title);
+      const sharedShownHousehold = sharedRowNamed('Household');
       await d.pick('Household');
       await d.type('#nameInput', 'Shared');
       await d.click('#saveButton');
-      const sharedRenamedBack = !!d.find('#filingRows [data-name="Shared"]')
-        && !d.find('#filingRows [data-name="Household"]');
+      const sharedRenamedBack = sharedRowNamed('Shared') && !sharedRowNamed('Household');
+      await d.click('#resortButton');
       await d.click('#applyButton');
       const applied = d.find('#noticePill').textContent;
       return { libraryRows, answered, folderRows, notice, moves, filed, dangerPill, sizeShown, searchRows, searchMeta, cleared, addDone, addAdded, addDuplicate, addFailed, grew, pageCited, openButtons, vehiclesCounts, movesToVehicles, noUnsorted, movesToHousehold, sharedShownHousehold, sharedRenamedBack, applied };
