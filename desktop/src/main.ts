@@ -469,6 +469,8 @@ type SmokeChecks = {
 	movesToVehicles: boolean;
 	noUnsorted: boolean;
 	movesToHousehold: boolean;
+	sharedShownHousehold: boolean;
+	sharedRenamedBack: boolean;
 	applied: string;
 	persisted?: boolean;
 	raceSafe?: boolean;
@@ -540,9 +542,17 @@ async function runSmoke(): Promise<void> {
       await d.click('#saveButton');
       await d.click('#resortButton');
       const movesToHousehold = [...document.querySelectorAll('#moveRows .row-subject')].some((n) => n.textContent.includes('Household'));
+      // The row itself shows the new name right away (the save report carries it), and the
+      // rename works both ways in one session: Household -> Shared.
+      const sharedShownHousehold = !!d.find('#filingRows [data-name="Household"]');
+      await d.pick('Household');
+      await d.type('#nameInput', 'Shared');
+      await d.click('#saveButton');
+      const sharedRenamedBack = !!d.find('#filingRows [data-name="Shared"]')
+        && !d.find('#filingRows [data-name="Household"]');
       await d.click('#applyButton');
       const applied = d.find('#noticePill').textContent;
-      return { libraryRows, answered, folderRows, notice, moves, filed, dangerPill, sizeShown, searchRows, searchMeta, cleared, addDone, addAdded, addDuplicate, addFailed, grew, pageCited, openButtons, vehiclesCounts, movesToVehicles, noUnsorted, movesToHousehold, applied };
+      return { libraryRows, answered, folderRows, notice, moves, filed, dangerPill, sizeShown, searchRows, searchMeta, cleared, addDone, addAdded, addDuplicate, addFailed, grew, pageCited, openButtons, vehiclesCounts, movesToVehicles, noUnsorted, movesToHousehold, sharedShownHousehold, sharedRenamedBack, applied };
     `		)) as SmokeChecks;
 		// The open button ran in main: it resolved through the engine's locate and recorded the
 		// fake filed copy — the renderer never named a path.
@@ -632,7 +642,7 @@ async function runSmoke(): Promise<void> {
 		const title = browser.getTitle();
 		const own = isOwnFile(browser.webContents.getURL(), INDEX_URL);
 		const ok = own && title === PRODUCT_NAME && result.libraryRows > 0 && result.answered && result.folderRows > 0 && result.notice && result.moves > 0 && result.filed === 'filed' && result.persisted === true && result.raceSafe === true && result.titleWide === true && result.titleNarrow === true && result.appearanceLive === true && result.openAtLoginOk === true
-			&& result.dangerPill && result.sizeShown && result.searchRows === 2 && result.searchMeta && result.cleared === result.libraryRows && result.addDone && result.addAdded && result.addDuplicate && result.addFailed && result.grew && result.pageCited && result.openButtons === 2 && result.openedPath && result.vehiclesCounts && result.movesToVehicles && result.noUnsorted && result.movesToHousehold && result.applied === 'filed';
+			&& result.dangerPill && result.sizeShown && result.searchRows === 2 && result.searchMeta && result.cleared === result.libraryRows && result.addDone && result.addAdded && result.addDuplicate && result.addFailed && result.grew && result.pageCited && result.openButtons === 2 && result.openedPath && result.vehiclesCounts && result.movesToVehicles && result.noUnsorted && result.movesToHousehold && result.sharedShownHousehold && result.sharedRenamedBack && result.applied === 'filed';
 		if (ok) {
 			console.error(`SMOKE OK: library ${result.libraryRows} rows (big-scan pill + MB sizes), search "loan" -> 2 rows -> cleared, add 3 files -> added/duplicate/failed + library grew, answer cites p. 4 and an open button handed the located path to main, rename Car->Vehicles counts 2 documents and previews moves to Vehicles (none to unsorted), shared owner "Household" re-files; stale dry-run after a save refused; app name centred on ask/filing/settings at 1200px and 360px; appearance live (dark/light/system); open-at-login reflects the real login item`);
 			code = 0;

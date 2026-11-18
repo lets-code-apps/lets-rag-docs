@@ -65,6 +65,9 @@ struct SaveReport {
     renamed: usize,
     folders: Vec<String>,
     owners: Vec<String>,
+    /// The shared owner after this save (the draft's when it renamed it, otherwise the
+    /// value already in effect), so the desktop never shows a stale name after saving.
+    shared_owner: String,
     errors: Vec<Error>,
 }
 
@@ -150,6 +153,7 @@ fn save_report(
             renamed: 0,
             folders: draft.folders.clone(),
             owners: draft.owners.clone(),
+            shared_owner: shared.clone(),
             errors,
         });
     }
@@ -198,6 +202,7 @@ fn save_report(
         renamed,
         folders: draft.folders.clone(),
         owners: draft.owners.clone(),
+        shared_owner: shared.clone(),
         errors: Vec::new(),
     })
 }
@@ -541,6 +546,9 @@ mod tests {
             report.renamed, 1,
             "the stored row follows the renamed owner"
         );
+        // The report carries the shared owner in effect after the save, so the desktop
+        // repaints the row instead of showing the old name.
+        assert_eq!(report.shared_owner, "Everyone");
         let after: String = fs::read_to_string(file.as_os_str()).unwrap();
         assert!(after.contains("shared_owner = \"Everyone\""));
         assert!(!after.contains("Old Owner"));
@@ -553,6 +561,14 @@ mod tests {
         // Repeating the same save: nothing to write, the UPDATE matches nothing, still ok.
         let second = save_report(&config, &file, &draft, false).unwrap();
         assert!(second.ok);
+        // A later draft that never mentions shared_owner still reports the current truth.
+        let plain = Draft {
+            folders: vec!["Home".to_string()],
+            owners: vec!["Alex Example".to_string()],
+            shared_owner: None,
+            renames: None,
+        };
+        assert_eq!(save_report(&config, &file, &plain, false).unwrap().shared_owner, "Everyone");
         assert!(!second.saved);
         assert_eq!(second.renamed, 0);
         assert_eq!(fs::read_to_string(file.as_os_str()).unwrap(), after);

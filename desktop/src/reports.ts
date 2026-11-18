@@ -82,6 +82,7 @@ export type FilingSaveReport = {
 	renamed: number;
 	folders: string[];
 	owners: string[];
+	shared_owner: string | null;
 	errors: NameIssueRow[];
 };
 
@@ -298,7 +299,15 @@ export function parseFilingSave(stdout: string, stderrTail: string[]): Parse<Fil
 	const parsed = parseJson(stdout, stderrTail);
 	if (!parsed.ok) return { ok: false, error: parsed.error };
 	if (!requireVersion(parsed.value) || typeof parsed.value !== 'object') return err('save report version is not 1');
-	const obj = parsed.value as { ok: unknown; saved: unknown; renamed?: unknown; folders: unknown; owners: unknown; errors: unknown };
+	const obj = parsed.value as {
+		ok: unknown;
+		saved: unknown;
+		renamed?: unknown;
+		folders: unknown;
+		owners: unknown;
+		shared_owner?: unknown;
+		errors: unknown;
+	};
 	if (typeof obj.ok !== 'boolean' || typeof obj.saved !== 'boolean' || !Array.isArray(obj.errors)) return err('save report is missing ok/saved/errors');
 	const folders = stringArrayOrNull(obj.folders);
 	const owners = stringArrayOrNull(obj.owners);
@@ -319,7 +328,11 @@ export function parseFilingSave(stdout: string, stderrTail: string[]): Parse<Fil
 	}
 	// `renamed` is how many rows the rename updates touched; an engine without renames reports 0.
 	const renamed = typeof obj.renamed === 'number' ? obj.renamed : 0;
-	return { ok: true, value: { version: 1, ok: obj.ok, saved: obj.saved, renamed, folders, owners, errors } };
+	// The shared owner in effect after this save, so the form repaints instead of showing
+	// a stale name. null means an older engine that never sends it: the caller keeps its
+	// own current value.
+	const shared = stringOrNull(obj.shared_owner);
+	return { ok: true, value: { version: 1, ok: obj.ok, saved: obj.saved, renamed, folders, owners, shared_owner: shared, errors } };
 }
 
 export function parseOrganize(stdout: string, stderrTail: string[]): Parse<OrganizeReport> {

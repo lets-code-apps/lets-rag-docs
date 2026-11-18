@@ -34,6 +34,8 @@ test('fixture reports parse', () => {
 	const save = parseFilingSave(read('filing-errors.json'), []);
 	assert.ok(save.ok);
 	assert.equal(save.value.errors[0].code, 'invalid_name');
+	// The save report carries the shared owner in effect, so a save can repaint the row.
+	assert.equal(save.value.shared_owner, 'Shared');
 
 	const dry = parseOrganize(read('organize-dry-run.json'), []);
 	assert.ok(dry.ok);
@@ -97,6 +99,18 @@ test('ask sources carry the page, null when unknown', () => {
 	const paged = parseAsk('{"version":1,"answer":"x","sources":[{"source":"a","file":"a.pdf.vision.txt","chunk":3,"page":4,"score":0.5}]}', []);
 	assert.ok(paged.ok);
 	assert.equal(paged.value.sources[0].page, 4);
+});
+
+test('a save report carries the shared owner it just saved', () => {
+	const withShared = parseFilingSave(
+		'{"version":1,"ok":true,"saved":true,"renamed":0,"folders":["Home"],"owners":["Alex Example"],"shared_owner":"Household","errors":[]}',
+		[],
+	);
+	assert.ok(withShared.ok);
+	assert.equal(withShared.value.shared_owner, 'Household');
+	const older = parseFilingSave('{"version":1,"ok":true,"saved":true,"renamed":0,"folders":["Home"],"owners":["Alex Example"],"errors":[]}', []);
+	assert.ok(older.ok);
+	assert.equal(older.value.shared_owner, null);
 });
 
 test('a save report counts the renamed rows', () => {
