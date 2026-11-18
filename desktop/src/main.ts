@@ -628,15 +628,16 @@ async function runSmoke(): Promise<void> {
   const section = (name) => {
     const t = d.find('#appTitle').getBoundingClientRect();
     const e = d.find('.emblem').getBoundingClientRect();
+    const b = d.find('#appBar').getBoundingClientRect();
     const w = window.innerWidth;
     const sw = document.documentElement.scrollWidth;
     const pass = d.find('#appTitle').textContent === 'rag docs'
-      && Math.abs((t.left + t.right) / 2 - w / 2) <= 1
+      && Math.abs((t.left + t.right) / 2 - (b.left + b.right) / 2) <= 1 // the requirement is "centred in the bar", so measure against the bar: at 360px the runner's root box can be narrower than the window on some screens
       && t.right <= e.left + 1
       && sw <= w + 4; // shortcut: 4px slack for non-Retina runner font metrics; a real horizontal scroll is tens of px — tighten to +1 once the local==CI render gap is closed
     if (!pass) {
       window.__titleDiag = (window.__titleDiag || []).concat(name + ':' + JSON.stringify({
-        w, sw, centre: Math.abs((t.left + t.right) / 2 - w / 2).toFixed(1),
+        w, sw, bar: (b.right - b.left).toFixed(1), offCentre: (t.left + t.right - b.left - b.right).toFixed(1),
         clr: (e.left - t.right).toFixed(1), txt: d.find('#appTitle').textContent,
       }));
     }
