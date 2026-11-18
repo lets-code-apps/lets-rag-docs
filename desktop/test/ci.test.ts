@@ -33,6 +33,16 @@ test('the baseline is copied before the shots overwrite it', () => {
 	assert.ok(workflow.indexOf('cp -R screenshots') < workflow.indexOf('npm run shots'));
 });
 
+test('the artifact upload uses path (not the invalid files key) and the comment step has a token + run link', () => {
+	// upload-artifact@v4 reads `path:`; `files:` is not an input and made the upload fail silently.
+	assert.ok(workflow.includes('path:'), 'upload-artifact must use path:');
+	assert.equal(/^\s*files:/m.test(workflow), false, 'upload-artifact must not use files:');
+	// gh pr comment needs a token (the job has pull-requests:write) and the report must link the run.
+	assert.ok(workflow.includes('GH_TOKEN'), 'the gh comment step must set GH_TOKEN');
+	assert.ok(workflow.includes('pull-requests: write'), 'the desktop job needs pull-requests: write');
+	assert.ok(workflow.includes('DESKTOP_CI_URL'), 'the compare step must link the run in the report');
+});
+
 test('no pull_request_target and no secrets in a public-repo workflow', () => {
 	assert.equal(workflow.includes('pull_request_target'), false);
 	assert.equal(workflow.includes('secrets.'), false);
