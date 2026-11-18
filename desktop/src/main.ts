@@ -446,6 +446,39 @@ async function loaded(browser: BrowserWindow): Promise<void> {
 	await new Promise<void>((resolve) => browser.webContents.once('did-finish-load', () => resolve()));
 }
 
+type SmokeChecks = {
+	libraryRows: number;
+	answered: boolean;
+	folderRows: number;
+	notice: boolean;
+	moves: number;
+	filed: string;
+	dangerPill: boolean;
+	sizeShown: boolean;
+	searchRows: number;
+	searchMeta: boolean;
+	cleared: number;
+	addDone: boolean;
+	addAdded: boolean;
+	addDuplicate: boolean;
+	addFailed: boolean;
+	grew: boolean;
+	pageCited: boolean;
+	openButtons: number;
+	vehiclesCounts: boolean;
+	movesToVehicles: boolean;
+	noUnsorted: boolean;
+	movesToHousehold: boolean;
+	applied: string;
+	persisted?: boolean;
+	raceSafe?: boolean;
+	titleWide?: boolean;
+	titleNarrow?: boolean;
+	appearanceLive?: boolean;
+	openAtLoginOk?: boolean;
+	openedPath?: boolean;
+};
+
 async function runSmoke(): Promise<void> {
 	const dir = freshFakeState();
 	const deadline = setTimeout(() => {
@@ -457,22 +490,63 @@ async function runSmoke(): Promise<void> {
 		const browser = makeWindow();
 		await loaded(browser);
 		const result = (await drive(browser, String.raw`
+      // Sizes and the over-50 MB pill come straight from the report; the big original is listed
+      // with its size and the reason it was never indexed.
+      const big = d.row('#libraryRows', 'big-scan.pdf');
+      const dangerPill = big.querySelector('.pill')?.textContent === 'not indexed: over 50 MB';
+      const sizeShown = (big.querySelector('.row-preview')?.textContent ?? '').includes('64 MB');
       const libraryRows = document.querySelectorAll('#libraryRows .row').length;
+      // Search narrows to the two loan documents, then an empty box restores the full list.
+      await d.type('#librarySearch', 'loan');
+      const searchRows = document.querySelectorAll('#libraryRows .row').length;
+      const searchMeta = / of \d+ documents/.test(d.find('#libraryMeta').textContent);
+      await d.type('#librarySearch', '');
+      const cleared = document.querySelectorAll('#libraryRows .row').length;
+      // Add: the picker seam hands over three synthetic files; one row per file, one outcome each.
+      await d.click('#addDocsButton');
+      const addDone = d.find('#addMeta').textContent === 'done';
+      const addOutcomes = [...document.querySelectorAll('#addRows .row-preview')].map((n) => n.textContent);
+      const addAdded = addOutcomes.some((x) => x.startsWith('added ('));
+      const addDuplicate = addOutcomes.includes('already added');
+      const addFailed = addOutcomes.some((x) => x.startsWith('failed:'));
+      const grew = document.querySelectorAll('#libraryRows .row').length === libraryRows + 1;
+      // Ask: the answer cites with a page, and an open button hands the library path to main.
       await d.type('#askInput', 'When is the car loan paid off?');
       await d.click('#askButton');
       const answered = !d.find('#answerBlock').hidden && d.find('#citations').children.length > 0;
+      const pageCited = [...d.find('#citations').children].some((c) => /, p\. 4/.test(c.textContent));
+      const openButtons = d.find('#openDocs').children.length;
+      d.find('#openDocs').firstChild.click();
+      await d.settle();
+      // Filing: rename Car to Vehicles. After the save the row already counts its documents,
+      // and the preview moves the copies to Vehicles (nothing to unsorted).
       await d.click('[data-section="filing"]');
       const folderRows = document.querySelectorAll('#filingRows .row').length;
       await d.pick('Car');
       await d.type('#nameInput', 'Vehicles');
       await d.click('#saveButton');
       const notice = !d.find('#noticeCard').hidden;
+      const vehiclesCounts = d.row('#filingRows', 'Vehicles').querySelector('.row-time')?.textContent === '2 documents';
       await d.click('#resortButton');
       const moves = document.querySelectorAll('#moveRows .row').length;
+      const movesToVehicles = [...document.querySelectorAll('#moveRows .row-subject')].some((n) => n.textContent.includes('Vehicles'));
+      const noUnsorted = ![...document.querySelectorAll('#moveRows .row-subject')].some((n) => n.textContent.includes('unsorted'));
       await d.click('#applyButton');
       const filed = d.find('#noticePill').textContent;
-      return { libraryRows, answered, folderRows, notice, moves, filed };
-    `		)) as { libraryRows: number; answered: boolean; folderRows: number; notice: boolean; moves: number; filed: string; persisted?: boolean; raceSafe?: boolean; titleWide?: boolean; titleNarrow?: boolean; appearanceLive?: boolean; openAtLoginOk?: boolean };
+      // Shared owner: editable now; "Household" moves unlisted documents in the next preview.
+      await d.click('[data-view="owners"]');
+      await d.pick('Shared');
+      await d.type('#nameInput', 'Household');
+      await d.click('#saveButton');
+      await d.click('#resortButton');
+      const movesToHousehold = [...document.querySelectorAll('#moveRows .row-subject')].some((n) => n.textContent.includes('Household'));
+      await d.click('#applyButton');
+      const applied = d.find('#noticePill').textContent;
+      return { libraryRows, answered, folderRows, notice, moves, filed, dangerPill, sizeShown, searchRows, searchMeta, cleared, addDone, addAdded, addDuplicate, addFailed, grew, pageCited, openButtons, vehiclesCounts, movesToVehicles, noUnsorted, movesToHousehold, applied };
+    `		)) as SmokeChecks;
+		// The open button ran in main: it resolved through the engine's locate and recorded the
+		// fake filed copy — the renderer never named a path.
+		result.openedPath = openLog[openLog.length - 1] === '/tmp/rag-docs-fake/library/Finance/Alex Example/2025/2025-03-14 Car loan - Repayment schedule.pdf';
 		// Edit -> save -> reload: the saved list comes back from the engine, not from page memory.
 		const reload = loaded(browser);
 		browser.reload();
@@ -526,6 +600,7 @@ async function runSmoke(): Promise<void> {
 		browser.reload();
 		await reloadNarrow;
 		result.titleNarrow = (await drive(browser, TITLE_ON)) as boolean;
+
 		browser.setSize(1200, 820);
 		const reloadLive = loaded(browser);
 		browser.reload();
@@ -556,9 +631,10 @@ async function runSmoke(): Promise<void> {
 
 		const title = browser.getTitle();
 		const own = isOwnFile(browser.webContents.getURL(), INDEX_URL);
-		const ok = own && title === PRODUCT_NAME && result.libraryRows > 0 && result.answered && result.folderRows > 0 && result.notice && result.moves > 0 && result.filed === 'filed' && result.persisted === true && result.raceSafe === true && result.titleWide === true && result.titleNarrow === true && result.appearanceLive === true && result.openAtLoginOk === true;
+		const ok = own && title === PRODUCT_NAME && result.libraryRows > 0 && result.answered && result.folderRows > 0 && result.notice && result.moves > 0 && result.filed === 'filed' && result.persisted === true && result.raceSafe === true && result.titleWide === true && result.titleNarrow === true && result.appearanceLive === true && result.openAtLoginOk === true
+			&& result.dangerPill && result.sizeShown && result.searchRows === 2 && result.searchMeta && result.cleared === result.libraryRows && result.addDone && result.addAdded && result.addDuplicate && result.addFailed && result.grew && result.pageCited && result.openButtons === 2 && result.openedPath && result.vehiclesCounts && result.movesToVehicles && result.noUnsorted && result.movesToHousehold && result.applied === 'filed';
 		if (ok) {
-			console.error(`SMOKE OK: library ${result.libraryRows} rows, answer with citations, ${result.folderRows} folder rows, rename -> notice -> ${result.moves} moves -> applied -> reloaded with the saved list; stale dry-run after a save refused; app name centred on ask/filing/settings at 1200px and 360px; appearance live (dark/light/system); open-at-login reflects the real login item`);
+			console.error(`SMOKE OK: library ${result.libraryRows} rows (big-scan pill + MB sizes), search "loan" -> 2 rows -> cleared, add 3 files -> added/duplicate/failed + library grew, answer cites p. 4 and an open button handed the located path to main, rename Car->Vehicles counts 2 documents and previews moves to Vehicles (none to unsorted), shared owner "Household" re-files; stale dry-run after a save refused; app name centred on ask/filing/settings at 1200px and 360px; appearance live (dark/light/system); open-at-login reflects the real login item`);
 			code = 0;
 		} else {
 			console.error(`SMOKE FAIL: own=${own} title=${title} checks=${JSON.stringify(result)}`);
@@ -572,7 +648,7 @@ async function runSmoke(): Promise<void> {
 	app.exit(code);
 }
 
-type Shot = { name: string; scenario: 'library' | 'no-owners'; width: number; height: number; steps: string; scrollTo?: string };
+type Shot = { name: string; scenario: 'library' | 'no-owners'; width: number; height: number; steps: string; scrollTo?: string; delayMs?: number };
 
 const OPEN_FILING = `await d.click('[data-section="filing"]');`;
 const OPEN_OWNERS = `${OPEN_FILING} await d.click('[data-view="owners"]');`;
@@ -582,16 +658,22 @@ const RENAME_AND_ADD = `${OPEN_FILING} await d.pick('Car'); await d.type('#nameI
   await d.click('[data-view="owners"]'); await d.click('#addButton'); await d.type('#nameInput', 'Example Studio'); await d.click('#saveButton');
   await d.click('[data-view="folders"]');`;
 
-/** Ask, then RagFiling's ten states, each reached by using the app the way a person would. */
+/** Ask with sizes and the pill, the add queue mid-run and done, then RagFiling's states, each
+ * reached by using the app the way a person would. */
+const SEARCH_LOAN = `await d.type('#librarySearch', 'loan');`;
+const ADD_DONE = `await d.click('#addDocsButton');`;
 const SHOTS: Shot[] = [
 	{ name: 'ask', scenario: 'library', width: 1200, height: 820, steps: ASK_STEPS },
+	{ name: 'ask-search', scenario: 'library', width: 1200, height: 820, steps: SEARCH_LOAN },
+	{ name: 'add-running', scenario: 'library', width: 1200, height: 820, steps: `d.find('#addDocsButton').click(); await new Promise((r) => setTimeout(r, 400));`, delayMs: 1500 },
+	{ name: 'add-done', scenario: 'library', width: 1200, height: 820, steps: ADD_DONE },
 	{ name: 'filing-folders', scenario: 'library', width: 1200, height: 820, steps: `${OPEN_FILING} await d.pick('Finance');` },
 	{ name: 'filing-editing', scenario: 'library', width: 1200, height: 820, steps: `${OPEN_FILING} await d.pick('Car'); await d.type('#nameInput', 'Vehicles');` },
 	{ name: 'filing-owners', scenario: 'library', width: 1200, height: 820, steps: `${OPEN_OWNERS} await d.pick('Alex Example');` },
 	{ name: 'filing-owners-empty', scenario: 'no-owners', width: 1200, height: 820, steps: OPEN_OWNERS },
 	{ name: 'filing-adding', scenario: 'library', width: 1200, height: 820, steps: `${OPEN_OWNERS} await d.click('#addButton'); await d.type('#nameInput', 'Example Studio');` },
 	{ name: 'filing-error', scenario: 'library', width: 1200, height: 820, steps: `${OPEN_OWNERS} await d.click('#addButton'); await d.type('#nameInput', 'Example/Studio');` },
-	{ name: 'filing-shared', scenario: 'library', width: 1200, height: 820, steps: `${OPEN_OWNERS} await d.pick('Shared');` },
+	{ name: 'filing-shared', scenario: 'library', width: 1200, height: 820, steps: `${OPEN_OWNERS} await d.pick('Shared'); await d.type('#nameInput', 'Household');` },
 	{ name: 'filing-changed', scenario: 'library', width: 1200, height: 820, steps: RENAME_AND_ADD },
 	{ name: 'filing-preview', scenario: 'library', width: 1200, height: 820, steps: `${RENAME_AND_ADD} await d.click('#resortButton');` },
 	{ name: 'filing-small', scenario: 'library', width: 360, height: 780, steps: `${OPEN_FILING} await d.pick('Finance');` },
@@ -617,6 +699,7 @@ async function runShots(): Promise<void> {
 			for (const shot of SHOTS) {
 				const dir = freshFakeState();
 				process.env.FAKE_SCENARIO = shot.scenario;
+				if (shot.delayMs) process.env.FAKE_ADD_DELAY_MS = String(shot.delayMs); else delete process.env.FAKE_ADD_DELAY_MS;
 				browser.setSize(shot.width, shot.height);
 				const reload = loaded(browser);
 				browser.reload();

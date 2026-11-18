@@ -108,7 +108,7 @@ test('the app name is centred in the bar and reserves room for the emblem', () =
 
 test('screenshots cover the ask, filing and settings states in light and dark', () => {
 	const main = readFileSync(join(import.meta.dirname, '..', 'src', 'main.ts'), 'utf8');
-	for (const state of ['ask', 'folders', 'editing', 'owners', 'owners-empty', 'adding', 'error', 'shared', 'changed', 'preview', 'small', 'settings', 'settings-small']) {
+	for (const state of ['ask', 'ask-search', 'add-running', 'add-done', 'folders', 'editing', 'owners', 'owners-empty', 'adding', 'error', 'shared', 'changed', 'preview', 'small', 'settings', 'settings-small']) {
 		for (const mode of ['light', 'dark']) {
 			assert.ok(main.includes(state) && main.includes(mode), `shots missing ${state}-${mode}`);
 		}
