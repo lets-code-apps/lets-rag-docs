@@ -38,7 +38,12 @@ pub enum IndexError {
 }
 
 pub fn connect(url: &str) -> Result<Qdrant, IndexError> {
-    Ok(Qdrant::from_url(url).build()?)
+    // Skip the client-server version handshake. By default the client fetches the server version
+    // during `build()`, and when Qdrant is not yet up it prints a "Failed to obtain server version"
+    // notice to STDOUT. `mcp` keeps STDOUT for the JSON-RPC protocol only, so that notice corrupts the
+    // first protocol message; and a CLI run should not print a network warning just to build a handle.
+    // The real Qdrant calls below still fail with a normal `IndexError::Qdrant` when the store is down.
+    Ok(Qdrant::from_url(url).skip_compatibility_check().build()?)
 }
 
 /// Drops the collection if it exists and creates it empty.
