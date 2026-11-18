@@ -420,13 +420,15 @@ async function runSmoke(): Promise<void> {
 
 		// Open at login reflects the real (here in-memory) login item: off at start, set by the switch,
 		// and a change made outside the app is picked up on the next focus without re-writing our file.
+		// The switch is named by its label, and clicking the label text toggles it.
 		const loginOffDefault = memoryLoginItem?.openAtLogin === false;
-		await drive(browser, `await d.click('#loginSwitch');`);
+		const loginNamed = (await drive(browser, `return [...d.find('#loginSwitch').labels].map((l) => l.textContent.trim()).join(' ') === 'open at login';`)) === true;
+		await drive(browser, `await d.click('.switchrow .lbl');`);
 		const loginSet = memoryLoginItem?.openAtLogin === true;
 		if (memoryLoginItem) memoryLoginItem.openAtLogin = false;
 		await drive(browser, `window.dispatchEvent(new Event('focus')); await d.settle();`);
 		const loginRepainted = (await drive(browser, `return d.find('#loginSwitch').checked === false;`)) as boolean;
-		result.openAtLoginOk = loginOffDefault && loginSet && loginRepainted;
+		result.openAtLoginOk = loginOffDefault && loginNamed && loginSet && loginRepainted;
 
 		const title = browser.getTitle();
 		const own = isOwnFile(browser.webContents.getURL(), INDEX_URL);
@@ -470,7 +472,7 @@ const SHOTS: Shot[] = [
 	{ name: 'filing-preview', scenario: 'library', width: 1200, height: 820, steps: `${RENAME_AND_ADD} await d.click('#resortButton');` },
 	{ name: 'filing-small', scenario: 'library', width: 360, height: 780, steps: `${OPEN_FILING} await d.pick('Finance');` },
 	{ name: 'filing-small-form', scenario: 'library', width: 360, height: 780, steps: `${OPEN_FILING} await d.pick('Finance');`, scrollTo: '#detailPane' },
-	{ name: 'ask-small', scenario: 'library', width: 360, height: 780, steps: ASK_STEPS },
+	{ name: 'ask-small', scenario: 'library', width: 360, height: 780, steps: ASK_STEPS, scrollTo: '#appBar' },
 	{ name: 'settings', scenario: 'library', width: 1200, height: 820, steps: OPEN_SETTINGS },
 	{ name: 'settings-small', scenario: 'library', width: 360, height: 780, steps: OPEN_SETTINGS },
 ];
@@ -497,6 +499,11 @@ async function runShots(): Promise<void> {
 				await reload;
 				await drive(browser, shot.steps);
 				if (shot.scrollTo) await drive(browser, `d.find('${shot.scrollTo}').scrollIntoView(); await d.settle();`);
+				// Every shot that starts at the top of the page has to show the window title.
+				if (!shot.scrollTo || shot.scrollTo === '#appBar') {
+					const visible = await drive(browser, `const t = d.find('#appTitle').getBoundingClientRect(); return t.top >= 0 && t.bottom <= innerHeight;`);
+					if (visible !== true) throw new Error(`${shot.name}-${mode}: the window title is not in view`);
+				}
 				const image = await browser.webContents.capturePage();
 				writeFileSync(join(out, `${shot.name}-${mode}.png`), image.toPNG());
 				rmSync(dir, { recursive: true, force: true });

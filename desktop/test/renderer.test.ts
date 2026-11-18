@@ -99,3 +99,20 @@ test('screenshots cover the ask, filing and settings states in light and dark', 
 		}
 	}
 });
+
+test('the open-at-login switch is named by a 44px label row that also toggles it', () => {
+	const html = readFileSync(join(RENDERER, 'index.html'), 'utf8');
+	const css = readFileSync(join(RENDERER, 'app.css'), 'utf8');
+	const row = html.match(/<label class="switchrow" for="loginSwitch">([\s\S]*?)<\/label>/);
+	assert.ok(row, 'switch is not inside its label');
+	assert.match(row[1], /<span class="lbl">open at login<\/span>/);
+	assert.match(row[1], /<input id="loginSwitch"[^>]*role="switch"[^>]*aria-describedby="loginHelper"/);
+	assert.match(css, /\.switchrow \{[^}]*min-height: 44px;/);
+});
+
+test('the settings article sits right after the sidebar, not centred', () => {
+	const css = readFileSync(join(RENDERER, 'app.css'), 'utf8');
+	const body = css.match(/\.settings-body \{([^}]*)\}/);
+	assert.ok(body);
+	assert.doesNotMatch(body[1], /margin: 0 auto/);
+});
