@@ -109,6 +109,17 @@ pub fn original_path(docs_dir: &Path, ocr_rel: &str) -> PathBuf {
     docs_dir.join(original_rel(ocr_rel))
 }
 
+/// Whether the original is over the `[ocr] max_file_mb` limit (decimal MB, as Finder counts
+/// them). `symlink_metadata` does not follow links, and a missing or unreadable file is NOT
+/// "over" — callers that need its bytes hit the real I/O error later, where it belongs.
+pub(crate) fn over_limit(original: &Path, max_bytes: u64) -> bool {
+    use std::os::unix::fs::MetadataExt; // size() is the Unix metadata trait
+    match std::fs::symlink_metadata(original) {
+        Ok(meta) => meta.is_file() && meta.size() > max_bytes,
+        Err(_) => false,
+    }
+}
+
 /// SHA-256 of the file's bytes as lowercase hex, read in pieces (not all into memory).
 pub fn hash_file(path: &Path) -> std::io::Result<String> {
     use std::io::Read;
@@ -307,6 +318,8 @@ pub fn safe_folder(f: &str) -> bool {
 pub enum NameList {
     Folders,
     Owners,
+    /// The one shared owner name (`filing save` may rename it; `owners` must not contain it).
+    Shared,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -325,7 +338,9 @@ pub struct NameIssue {
 }
 
 /// Every problem with the proposed lists, in list order. An empty `Vec` means the draft is
-/// safe to write.
+/// safe to write. `shared_owner` is the DRAFT's shared name (the configured one when the draft
+/// does not rename it): owners are compared against what is about to be written, and the shared
+/// name itself must also pass `safe_folder`.
 pub fn check_names(folders: &[String], owners: &[String], shared_owner: String) -> Vec<NameIssue> {
     let mut issues: Vec<NameIssue> = Vec::new();
     if folders.is_empty() {
@@ -334,6 +349,14 @@ pub fn check_names(folders: &[String], owners: &[String], shared_owner: String) 
             index: None,
             name: None,
             code: NameCode::EmptyList,
+        });
+    }
+    if !safe_folder(shared_owner.as_str()) {
+        issues.push(NameIssue {
+            list: NameList::Shared,
+            index: None,
+            name: Some(shared_owner.to_string()),
+            code: NameCode::InvalidName,
         });
     }
     let shared: String = shared_owner.to_lowercase();

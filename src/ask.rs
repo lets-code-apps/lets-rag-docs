@@ -110,7 +110,12 @@ fn print_text(answered: &Answered) {
     let answer: String = answered.answer.clone().unwrap_or_default();
     println!("{answer}\n\nSources:");
     for p in &answered.passages {
-        println!("- {}, chunk {}", p.source, p.chunk);
+        let page: String = if let Some(n) = p.page {
+            format!(", p. {}", n)
+        } else {
+            String::new()
+        };
+        println!("- {}, chunk {}{}", p.source, p.chunk, page);
     }
 }
 
@@ -129,6 +134,8 @@ struct Source {
     source: String,
     file: String,
     chunk: i64,
+    /// Page within the document (1-based), null when the OCR text has no markers.
+    page: Option<i64>,
     score: f32,
 }
 
@@ -144,6 +151,7 @@ fn report_of(answered: Answered) -> Report {
                 source: p.source.to_string(),
                 file: p.file.to_string(),
                 chunk: p.chunk,
+                page: p.page,
                 score: p.score,
             })
             .collect(),
@@ -424,6 +432,7 @@ mod tests {
             source: "manual".into(),
             file: "manual.pdf.text.txt".into(),
             chunk: 2,
+            page: None,
             score: 0.5,
         }]
         .into_iter()
@@ -493,6 +502,7 @@ mod tests {
             source: "manual".into(),
             file: "manual.pdf.text.txt".into(),
             chunk: 2,
+            page: None,
             score: 0.5,
         }];
         let config = llm(&format!("{}/v1", server.uri()), false);

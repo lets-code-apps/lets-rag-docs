@@ -12,6 +12,7 @@ mod embed;
 mod eval;
 mod filing;
 mod index;
+mod locate;
 mod mcp;
 mod organize;
 mod search;
@@ -25,9 +26,6 @@ use tracing_subscriber::EnvFilter;
 
 use crate::config::{Config, DEFAULT_CONFIG_PATH, expand_home};
 use crate::embed::EmbedClient;
-
-/// Passages `search` prints, as `rag.py` did.
-const TOP: u64 = 5;
 
 #[derive(Debug, Parser)]
 #[command(name = "lets-rag-docs", version, about)]
@@ -76,7 +74,16 @@ enum Command {
     /// (Re)build the index from the OCR text files
     Ingest,
     /// Show the passages that best match a query
-    Search { query: String },
+    Search {
+        /// Machine-readable output: `{version, passages:[{source,file,chunk,page,score}]}`,
+        /// passage text stays out (the app lists documents, it never shows their contents)
+        #[arg(long)]
+        json: bool,
+        /// How many passages to return (default 5, the number `search` has always shown)
+        #[arg(long, value_name = "N", default_value = "5")]
+        limit: u64,
+        query: String,
+    },
     /// Check that each eval question finds its expected document in the top 5
     Eval {
         /// Check `classify` instead: expected type and date per document (evals/classify.jsonl)
@@ -91,8 +98,21 @@ enum Command {
     },
     /// OCR one file, classify it and index it: `add <file>`
     Add {
+        /// Machine-readable output: `{version, status, source, file, type, date, chunks,
+        /// duplicate_of}`; a failed add is still the non-zero exit with stderr as before
+        #[arg(long)]
+        json: bool,
         /// The file to add
         file: PathBuf,
+    },
+    /// Resolve a `documents --json` path to ONE absolute file the app may open: read-only,
+    /// prints only `{version, status, kind, path}`, opens nothing
+    Locate {
+        /// Machine-readable output; required, there is no text mode for this command
+        #[arg(long)]
+        json: bool,
+        /// The path to resolve (the `documents --json` row's `path`)
+        path: PathBuf,
     },
     /// Copy each classified original into `library/<folder>/<owner>/<year>/` and re-index the copy
     Organize {
@@ -138,11 +158,12 @@ async fn main() -> anyhow::Result<()> {
     tracing::debug!(?config, "config loaded from {}", path.display());
     match cli.command {
         Command::Ingest => ingest(&config).await,
-        Command::Search { query } => search(&config, &query).await,
+        Command::Search { query, json, limit } => search(&config, &query, json, limit).await,
         Command::Eval { classify: false } => eval::run(&config).await,
         Command::Eval { classify: true } => eval::run_classify(&config),
         Command::Classify { force } => classify::run(&config, force).await,
-        Command::Add { file } => add::run(&config, &file).await,
+        Command::Add { file, json } => add::run(&config, &file, json).await,
+        Command::Locate { path, json } => locate::run(&config, json, &path),
         Command::Organize { json, mode } => {
             organize::run(&config, mode.dry_run, mode.apply, json).await
         }
@@ -168,13 +189,24 @@ async fn ingest(config: &Config) -> anyhow::Result<()> {
 
     // Embed everything first, so a failure midway leaves the old index untouched.
     let mut points = Vec::new();
+    // Files whose original is over `[ocr] max_file_mb` are skipped: `add` refuses such a file
+    // outright, so a bulk OCR must not have slipped one into the index behind the user's back.
+    let max_bytes: u64 = config.ocr.max_file_mb.saturating_mul(1_000_000);
     for path in &files {
         let rel = path.strip_prefix(ocr_dir)?.to_string_lossy();
+        let original = classify::original_path(&config.paths.docs_dir, &rel);
+        if classify::over_limit(&original, max_bytes) {
+            println!(
+                "not indexed: over {} MB  {}",
+                config.ocr.max_file_mb,
+                chunk::source_name(rel.as_ref()),
+            );
+            continue;
+        }
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("cannot read {}", path.display()))?;
         // Without an original or a `classify` row the document is still indexed, minus type/date.
-        let doc = match classify::hash_file(&classify::original_path(&config.paths.docs_dir, &rel))
-        {
+        let doc = match classify::hash_file(&original) {
             Ok(hash) => db::get(&conn, &hash)?,
             Err(_) => None,
         };
@@ -211,10 +243,17 @@ fn find_txt(dir: &Path, out: &mut Vec<PathBuf>) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn search(config: &Config, query: &str) -> anyhow::Result<()> {
+async fn search(config: &Config, query: &str, json: bool, limit: u64) -> anyhow::Result<()> {
     let embed = EmbedClient::new(&config.embed.url);
     let qdrant = index::connect(&config.qdrant.url)?;
-    let hits = search::search_docs(&embed, &qdrant, &config.qdrant.collection, query, TOP).await?;
+    let hits =
+        search::search_docs(&embed, &qdrant, &config.qdrant.collection, query, limit).await?;
+    if json {
+        // Citation keys only: `{version, passages:[{source,file,chunk,page,score}]}`. Passage
+        // text never crosses into the JSON, same rule as every other machine report.
+        println!("{}", serde_json::to_string(&search::report_of(&hits))?);
+        return Ok(());
+    }
     for hit in hits {
         let preview: String = hit.text.chars().take(300).collect();
         println!(

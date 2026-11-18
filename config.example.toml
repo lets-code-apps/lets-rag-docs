@@ -71,3 +71,7 @@ shared_owner = "Shared"
 # starts the server from a different folder, use absolute paths for both.
 python = ".venv/bin/python"
 script = "ocr.py"
+# The largest file worth OCR'ing, in decimal MB (default 50). `add` refuses a bigger file before
+# touching it, `ingest` and `organize` skip it, and `documents --json` reports the number so the
+# app can mark such a row. A file over the limit is still listed, never OCR'd or embedded.
+max_file_mb = 50

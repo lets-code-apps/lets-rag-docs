@@ -172,6 +172,10 @@ pub struct OcrConfig {
     pub python: PathBuf,
     /// The OCR script itself.
     pub script: PathBuf,
+    /// The largest file worth OCR'ing, in decimal MB (the way Finder counts them). `add`
+    /// refuses a bigger file before touching it; `ingest` and `organize` skip it;
+    /// `documents --json` reports the number so the app can explain a skipped row.
+    pub max_file_mb: u64,
 }
 
 impl Default for OcrConfig {
@@ -179,6 +183,7 @@ impl Default for OcrConfig {
         OcrConfig {
             python: PathBuf::from(".venv/bin/python"),
             script: PathBuf::from("ocr.py"),
+            max_file_mb: 50,
         }
     }
 }

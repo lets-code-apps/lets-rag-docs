@@ -21,8 +21,9 @@ use crate::db;
 use crate::embed::EmbedClient;
 use crate::index;
 
-/// Extensions `ocr.py` can read (its `TYPES`), without the leading dot.
-const OCR_TYPES: [&str; 7] = ["pdf", "jpg", "jpeg", "png", "heic", "tif", "tiff"];
+/// Extensions `ocr.py` can read (its `TYPES`), without the leading dot. `documents --json`
+/// reuses this when it walks `docs_dir` for originals the database has never seen.
+pub(crate) const OCR_TYPES: [&str; 7] = ["pdf", "jpg", "jpeg", "png", "heic", "tif", "tiff"];
 
 /// What `add` reports about a document: metadata and counts, never its text or title.
 #[derive(Debug, Serialize)]
@@ -38,11 +39,18 @@ pub struct Added {
     pub duplicate_of: Option<String>,
 }
 
-/// Runs `add <file>` for the CLI: build the clients, run the pipeline, print a counts line.
-pub async fn run(config: &Config, file: &Path) -> anyhow::Result<()> {
+/// Runs `add <file>` for the CLI: build the clients, run the pipeline, print the result.
+/// `--json` prints the one JSON object below instead of the text lines; both keep exit 0,
+/// and a failed add stays a non-zero exit with the reason on stderr (the JSON carries only
+/// expected outcomes).
+pub async fn run(config: &Config, file: &Path, json: bool) -> anyhow::Result<()> {
     let embed: EmbedClient = EmbedClient::new(&config.embed.url);
     let qdrant: Qdrant = index::connect(&config.qdrant.url)?;
     let added: Added = add_file(config, &embed, &qdrant, file).await?;
+    if json {
+        println!("{}", serde_json::to_string(&report_of(&added))?);
+        return Ok(());
+    }
     println!("{:<12} {}", added.doc_type, added.file);
     if let Some(other) = &added.duplicate_of {
         println!("already added as {}", other);
@@ -50,6 +58,46 @@ pub async fn run(config: &Config, file: &Path) -> anyhow::Result<()> {
         println!("added {}: {} chunks", added.file, added.chunks);
     }
     Ok(())
+}
+
+/// `add --json`: `{version, status, source, file, type, date, chunks, duplicate_of}` —
+/// the same metadata-only `Added`, plus the expected-outcome status. Pure, so the fixture
+/// lock needs no network.
+#[derive(Serialize)]
+struct AddReport {
+    version: u8,
+    status: Status,
+    source: String,
+    file: String,
+    #[serde(rename = "type")]
+    doc_type: String,
+    date: Option<String>,
+    chunks: usize,
+    duplicate_of: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+enum Status {
+    Added,
+    Duplicate,
+}
+
+fn report_of(added: &Added) -> AddReport {
+    AddReport {
+        version: 1,
+        status: if added.duplicate_of.is_some() {
+            Status::Duplicate
+        } else {
+            Status::Added
+        },
+        source: added.source.clone(),
+        file: added.file.clone(),
+        doc_type: added.doc_type.clone(),
+        date: added.date.clone(),
+        chunks: added.chunks,
+        duplicate_of: added.duplicate_of.clone(),
+    }
 }
 
 /// The full pipeline for one file: `prepare` (OCR, classify, store, embed) then the Qdrant round
@@ -93,6 +141,23 @@ async fn prepare(config: &Config, embed: &EmbedClient, file: &Path) -> anyhow::R
             resolved.display(),
             ext,
             OCR_TYPES
+        );
+    }
+
+    // The size gate: over `[ocr] max_file_mb` decimal MB (as Finder counts them). Checked
+    // BEFORE hashing and copying, so an oversized file never lands in docs_dir and never
+    // reaches OCR, the model or the index. The message names the limit's config key.
+    let max_bytes: u64 = config.ocr.max_file_mb.saturating_mul(1_000_000);
+    if classify::over_limit(&resolved, max_bytes) {
+        use std::os::unix::fs::MetadataExt; // size() is the Unix metadata trait
+        let size: u64 = std::fs::symlink_metadata(&resolved)
+            .map(|m| m.size())
+            .unwrap_or(0);
+        bail!(
+            "{} is {} MB, over the {} MB limit ([ocr] max_file_mb)",
+            resolved.file_name().unwrap().to_string_lossy(),
+            size / 1_000_000,
+            config.ocr.max_file_mb,
         );
     }
 
@@ -309,22 +374,31 @@ fn clear_ocr_output(config: &Config, rel: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Where this document's OCR output lives under `ocr_dir`, if it exists (`.text.txt` wins
+/// over `.vision.txt`). `documents --json` uses it to count pages; `find_ocr_output` bails
+/// when there is none.
+pub(crate) fn ocr_output_path(config: &Config, rel: &Path) -> Option<PathBuf> {
+    let ocr: PathBuf = config.paths.ocr_dir.clone();
+    let rel_s: String = rel.to_string_lossy().to_string();
+    let text: PathBuf = ocr.join(format!("{rel}.text.txt", rel = rel_s));
+    let vision: PathBuf = ocr.join(format!("{rel}.vision.txt", rel = rel_s));
+    if text.is_file() {
+        Some(text)
+    } else if vision.is_file() {
+        Some(vision)
+    } else {
+        None
+    }
+}
+
 /// `ocr.py` writes `<rel>.<method>.txt` under ocr_dir: the text method for a digital PDF, vision
 /// for a scan or photo. `clear_ocr_output` removed this file's old outputs before OCR ran, so
 /// whatever exists now was produced by THIS run; if both methods somehow exist, `.text.txt` wins.
 fn find_ocr_output(config: &Config, rel: &Path) -> anyhow::Result<PathBuf> {
-    let ocr: PathBuf = config.paths.ocr_dir.clone();
-    let rel_s: String = rel.to_string_lossy().to_string();
-    let text: PathBuf = ocr.join(format!("{}.text.txt", rel_s));
-    let vision: PathBuf = ocr.join(format!("{}.vision.txt", rel_s));
-    let chosen: PathBuf = if text.is_file() {
-        text
-    } else if vision.is_file() {
-        vision
-    } else {
-        bail!("no OCR output for {}", rel_s)
-    };
-    Ok(chosen)
+    match ocr_output_path(config, rel) {
+        Some(path) => Ok(path),
+        None => bail!("no OCR output for {}", rel.to_string_lossy()),
+    }
 }
 
 #[cfg(test)]
@@ -480,6 +554,7 @@ printf '%s\n' "   " > "$out/$rel.text.txt"
                 ..LlmConfig::default()
             },
             ocr: OcrConfig {
+                max_file_mb: 50,
                 python: PathBuf::from("sh"),
                 script: s.script.clone(),
             },
@@ -829,5 +904,81 @@ printf '%s\n' "   " > "$out/$rel.text.txt"
             .mount(&server)
             .await;
         server
+    }
+
+    // Fixture lock shared with the TS tests and the fake engine (see documents.rs): the
+    // serialized shape lives in `testdata/desktop/<name>.json`; LOCK_FIXTURES=1 rewrites it.
+    fn lock(name: &str, actual: &str) {
+        let path: PathBuf = PathBuf::from("testdata/desktop").join(name);
+        if std::env::var("LOCK_FIXTURES")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+        {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, actual).unwrap();
+            return;
+        }
+        let want: String = std::fs::read_to_string(&path)
+            .expect("fixture missing: run the tests once with LOCK_FIXTURES=1");
+        assert_eq!(
+            actual,
+            want.as_str(),
+            "JSON shape changed (or the fixture is stale)"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_file_over_the_limit_is_refused_before_anything_is_copied() {
+        // max_file_mb = 1 and a 1,000,001-byte (sparse) file: the gate runs after the
+        // extension check but BEFORE the hash, the copy, OCR and the model. So docs_dir
+        // stays empty, OCR never runs, no DB row exists and the LLM is never asked.
+        let s: Setup = setup();
+        let source: PathBuf = s.dir.path().join("big.pdf");
+        std::fs::write(&source, "x".repeat(1_000_001).as_bytes()).unwrap();
+        let embed_srv: MockServer = embed_mock().await;
+        let llm_srv: MockServer = llm_mock(0).await; // must bail before the model
+        let embed: EmbedClient = EmbedClient::new(&embed_srv.uri());
+        let mut cfg: Config = config(&s, &llm_srv, &embed_srv);
+        cfg.ocr.max_file_mb = 1;
+        let err: String = prepare(&cfg, &embed, &source)
+            .await
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(
+            err.contains("is 1 MB, over the 1 MB limit ([ocr] max_file_mb)"),
+            "{err}"
+        );
+        assert!(!s.docs.join("big.pdf").is_file());
+        assert_eq!(log_lines(&s).len(), 0);
+        assert_eq!(rows(&s).len(), 0);
+    }
+
+    #[test]
+    fn add_json_shape() {
+        // The shape only: built from an `Added` directly, so no network and no Qdrant.
+        let added: Added = Added {
+            source: "receipt".into(),
+            file: "receipt.pdf".into(),
+            doc_type: "receipt".into(),
+            date: Some("2025-05-01".into()),
+            chunks: 4,
+            duplicate_of: None,
+        };
+        lock(
+            "add.json",
+            serde_json::to_string(&report_of(&added)).unwrap().as_str(),
+        );
+        let dup: Added = Added {
+            source: "tax.return.2025".into(),
+            file: "tax.return.2025.pdf".into(),
+            doc_type: "invoice".into(),
+            date: None,
+            chunks: 0,
+            duplicate_of: Some("tax.return.2025.pdf".into()),
+        };
+        let dup_json: String = serde_json::to_string(&report_of(&dup)).unwrap();
+        lock("add-duplicate.json", &dup_json);
+        assert!(dup_json.contains("\"status\":\"duplicate\""), "{dup_json}");
     }
 }

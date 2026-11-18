@@ -201,6 +201,7 @@ mod tests {
             source: source.to_string(),
             file: format!("{source}.pdf.text.txt"),
             chunk: 0,
+            page: None,
             score: 0.0,
         }
     }
