@@ -22,6 +22,14 @@ test('library rows: file name, type, month, and an untitled document still liste
   assert.deepEqual([rows[2].initials, rows[2].preview, rows[2].time], ['MD', 'no title yet', '']);
 });
 
+test('page counts: 1 page, n pages, unknown omitted', () => {
+  assert.equal(m.pagesLabel(1), '1 page');
+  assert.equal(m.pagesLabel(12), '12 pages');
+  assert.equal(m.pagesLabel(null), '');
+  const [row] = m.libraryRows([{ ...docs[0], pages: 1 }], []);
+  assert.equal(row.preview, 'Car loan - Repayment schedule · Alex Example · 1 page · 100 KB');
+});
+
 test('sizes are decimal and the over-limit row carries its reason', () => {
   assert.equal(m.formatBytes(6), '6 B');
   assert.equal(m.formatBytes(100_352), '100 KB');

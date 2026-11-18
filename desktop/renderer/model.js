@@ -8,6 +8,12 @@ export function docsLabel(n) {
   return n === 1 ? '1 document' : `${n} documents`;
 }
 
+/** "1 page", "n pages"; unknown (null) or zero prints nothing. */
+export function pagesLabel(n) {
+  if (!n) return '';
+  return n === 1 ? '1 page' : `${n} pages`;
+}
+
 export function basename(path) {
   const parts = String(path).split('/');
   return parts[parts.length - 1];
@@ -75,7 +81,7 @@ export function libraryRows(documents, sources = []) {
     initials: fileType(doc.path),
     title: basename(doc.path),
     // The design's row meta: title, owner, pages and the size that made it skippable.
-    preview: [doc.title ?? 'no title yet', doc.owner, doc.pages ? `${doc.pages} pages` : '', formatBytes(doc.bytes)].filter(Boolean).join(' · '),
+    preview: [doc.title ?? 'no title yet', doc.owner, pagesLabel(doc.pages), formatBytes(doc.bytes)].filter(Boolean).join(' · '),
     time: monthOf(doc.date),
     cited: isCited(doc, sources),
     overLimit: doc.skipped === 'over_limit',
