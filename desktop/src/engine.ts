@@ -296,9 +296,7 @@ export class Engine {
 			child.once('error', () => resolve());
 		});
 
-		const outcome: EngineOutcome = { stdout, stderrTail, exitCode, timedOut: false };
-		// Parse as data flows out; a kill flips the flag and the report is replaced by the timeout
-		// message, so half a JSON document is never shown.
+		// The outcome is assembled when the child is done: the stream buffers fill as it runs.
 		const race = await Promise.race([
 			closed.then(() => 'closed' as const),
 			delay(timeoutMs).then(() => 'timeout' as const),
@@ -308,6 +306,6 @@ export class Engine {
 			await closed;
 			return { ok: false, error: `${call} timed out after ${minutes(timeoutMs)} and was stopped` };
 		}
-		return this.parse(parse(outcome));
+		return this.parse(parse({ stdout, stderrTail, exitCode, timedOut: false }));
 	}
 }

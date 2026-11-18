@@ -204,7 +204,7 @@ function plan(state, mode) {
   for (const doc of docsOf(state)) {
     if (doc[8] === 'over_limit') { counts.skipped = (counts.skipped ?? 0) + 1; continue; }
     const to = target(doc, state);
-    const from = copies[doc[0]];
+    const from = copies[doc[0]] ?? null; // files added later have no copy on disk yet
     if (to === null) {
       counts.not_classified += 1;
     } else if (from === null) {

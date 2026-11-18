@@ -176,3 +176,28 @@ test('a filing draft rejects a wrong-typed shared_owner or rename before touchin
 	assert.deepEqual(seen.args, [['filing', 'save', '--check']]);
 	assert.match(seen.stdin[0], /"renames":\[\{"list":"owners","from":"Car","to":"Vehicles"\}\]/);
 });
+
+// ---- review round 1: runChild must assemble the outcome AFTER close ----
+
+test('ask parses JSON that reaches stdout asynchronously', async () => {
+  const seen = { args: [] as string[][], stdin: [] as string[], killed: false };
+  const askJson = JSON.stringify({ version: 1, answer: 'Blue.', sources: [{ source: 'car loan', file: 'home/car-loan-invoice.pdf.vision.txt', chunk: 2, page: 4, score: 0.5 }] });
+  const engine = new Engine({ RAG_DOCS_ENGINE_PATH: 'fake' }, '/repo', slowSpawn(10, askJson, seen), 1000, 1000);
+  const result = await engine.ask('when is it paid off?');
+  assert.ok(result.ok);
+  assert.equal(result.value.answer, 'Blue.');
+  assert.equal(result.value.sources[0].page, 4);
+  assert.equal(seen.killed, false);
+});
+
+test('add parses JSON that reaches stdout asynchronously', async () => {
+  const seen = { args: [] as string[][], stdin: [] as string[], killed: false };
+  const addJson = JSON.stringify({ version: 1, status: 'added', source: 'lamp', file: 'lamp.pdf', type: 'invoice', date: null, chunks: 3, duplicate_of: null });
+  // args: env, repo, spawn, read, ask, resources, dryRun, apply, add timeouts
+  const engine = new Engine({ RAG_DOCS_ENGINE_PATH: 'fake' }, '/repo', slowSpawn(10, addJson, seen), 1000, 1000, undefined, 1000, 1000, 1000);
+  const result = await engine.add('lamp.pdf');
+  assert.ok(result.ok);
+  assert.equal(result.value.status, 'added');
+  assert.equal(result.value.file, 'lamp.pdf');
+  assert.equal(seen.killed, false);
+});
