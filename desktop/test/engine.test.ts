@@ -48,7 +48,7 @@ test('engine timeout kills the ask child', async () => {
 	assert.equal(children[0]?.killed, true);
 });
 /** A child that prints `stdout` and closes after `ms`; records argv and stdin. */
-function slowSpawn(ms: number, stdout: string, seen: { args: string[][]; stdin: string[]; killed: boolean }) {
+function slowSpawn(ms: number, stdout: string, seen: { args: string[][]; stdin: string[]; killed?: boolean }) {
 	return {
 		call(file: string, args: string[]) {
 			void file;
