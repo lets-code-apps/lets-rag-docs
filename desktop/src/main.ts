@@ -6,7 +6,7 @@
 import { app, BrowserWindow, Menu, Tray, ipcMain, nativeImage, nativeTheme } from 'electron';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 
 import { defaultSpawn, Engine, type EngineResult } from './engine.ts';
@@ -15,6 +15,7 @@ import { IPC } from './ipc.ts';
 import { buildTrayMenu, PRODUCT_NAME } from './menu.ts';
 import { WindowController } from './window.ts';
 import { denyNavigation, isOwnFile, windowOpenHandler, windowOptions } from './window-policy.ts';
+import { SettingsController, type SettingsHost } from './settings.ts';
 
 const HERE = import.meta.dirname;
 const RENDERER = join(HERE, '..', 'renderer', 'index.html');
@@ -35,6 +36,14 @@ const ctl = new WindowController(() => makeWindow(), {
 	show: () => void app.dock?.show(),
 });
 let tray: Tray | undefined;
+
+// The app's appearance + open-at-login owner. Built once in boot: the real host reads/writes the
+// macOS login item and the app's own settings.json under userData; smoke and shots use a temp file
+// and an in-memory login item (so `npm run smoke` never registers a login item on the user's Mac).
+let settingsController: SettingsController;
+let settingsFile = '';
+let settingsTempDir: string | undefined;
+let memoryLoginItem: { openAtLogin: boolean } | undefined;
 
 const fromUs = (senderFrame?: { url?: string } | null): boolean => senderFrame?.url === INDEX_URL;
 
@@ -116,6 +125,38 @@ function runAction(action: 'openWindow' | 'quit'): void {
 	else if (action === 'quit') app.quit();
 }
 
+function makeSettingsController(): SettingsController {
+	// One factory picks the host. Under smoke/shots it never touches the real userData folder or the
+	// real login item; `setTheme` still drives the real nativeTheme so "appearance is live" is real.
+	const testing = process.env.RAG_DOCS_SMOKE === '1' || process.env.RAG_DOCS_SHOTS === '1';
+	if (testing) {
+		settingsTempDir = mkdtempSync(join(tmpdir(), 'rag-docs-settings-'));
+		settingsFile = join(settingsTempDir, 'settings.json');
+		memoryLoginItem = { openAtLogin: false };
+		const host: SettingsHost = {
+			setTheme: (appearance) => {
+				nativeTheme.themeSource = appearance;
+			},
+			getOpenAtLogin: () => memoryLoginItem?.openAtLogin ?? false,
+			setOpenAtLogin: (value) => {
+				if (memoryLoginItem) memoryLoginItem.openAtLogin = value;
+			},
+		};
+		return new SettingsController(settingsFile, host);
+	}
+	settingsFile = join(app.getPath('userData'), 'settings.json');
+	const host: SettingsHost = {
+		setTheme: (appearance) => {
+			nativeTheme.themeSource = appearance;
+		},
+		getOpenAtLogin: () => app.getLoginItemSettings().openAtLogin,
+		setOpenAtLogin: (value) => {
+			app.setLoginItemSettings({ openAtLogin: value });
+		},
+	};
+	return new SettingsController(settingsFile, host);
+}
+
 function registerIpc(): void {
 	ipcMain.handle(IPC.documents, async (event) => {
 		if (!fromUs(event.senderFrame)) return null;
@@ -179,6 +220,18 @@ function registerIpc(): void {
 		if (!fromUs(event.senderFrame)) return null;
 		return { ok: true, cancelled: engine.cancelAsk() };
 	});
+
+	// Settings cross the same trust boundary: our own page only. `settings` reports the current truth;
+	// `setSetting` validates name+value through the controller and answers with the new truth.
+	ipcMain.handle(IPC.settings, async (event) => {
+		if (!fromUs(event.senderFrame)) return null;
+		return settingsController.payload();
+	});
+
+	ipcMain.handle(IPC.setSetting, async (event, name: unknown, value: unknown) => {
+		if (!fromUs(event.senderFrame)) return null;
+		return settingsController.set(name, value);
+	});
 }
 
 app.on('before-quit', (event) => {
@@ -197,6 +250,8 @@ if (!app.requestSingleInstanceLock()) {
 }
 
 function boot(): void {
+	settingsController = makeSettingsController();
+	settingsController.load();
 	registerIpc();
 	if (process.env.RAG_DOCS_SMOKE === '1') {
 		void runSmoke();
@@ -293,7 +348,7 @@ async function runSmoke(): Promise<void> {
       await d.click('#applyButton');
       const filed = d.find('#noticePill').textContent;
       return { libraryRows, answered, folderRows, notice, moves, filed };
-    `)) as { libraryRows: number; answered: boolean; folderRows: number; notice: boolean; moves: number; filed: string; persisted?: boolean; raceSafe?: boolean };
+    `		)) as { libraryRows: number; answered: boolean; folderRows: number; notice: boolean; moves: number; filed: string; persisted?: boolean; raceSafe?: boolean; titleWide?: boolean; titleNarrow?: boolean; appearanceLive?: boolean; openAtLoginOk?: boolean };
 		// Edit -> save -> reload: the saved list comes back from the engine, not from page memory.
 		const reload = loaded(browser);
 		browser.reload();
@@ -322,11 +377,62 @@ async function runSmoke(): Promise<void> {
       return d.find('#movesSection').hidden && /changed while re-sorting/.test(d.find('#filingError').textContent) && forced.ok === false;
     `)) as boolean;
 		delete process.env.FAKE_DRY_RUN_DELAY_MS;
+
+		// The app name lives in the shared bar, so it shows on every screen. Check it is centred,
+		// clear of the emblem and that nothing scrolls sideways, on ask/filing/settings at 1200px
+		// and at the 360px minimum.
+		const TITLE_ON = String.raw`
+  const check = () => {
+    const t = d.find('#appTitle').getBoundingClientRect();
+    const e = d.find('.emblem').getBoundingClientRect();
+    const w = window.innerWidth;
+    return d.find('#appTitle').textContent === 'rag docs'
+      && Math.abs((t.left + t.right) / 2 - w / 2) <= 1
+      && t.right <= e.left + 1
+      && document.documentElement.scrollWidth <= w + 1;
+  };
+  await d.click('[data-section="ask"]'); const a = check();
+  await d.click('[data-section="filing"]'); const f = check();
+  await d.click('[data-section="settings"]'); const s = check();
+  return a && f && s;
+`;
+		result.titleWide = (await drive(browser, TITLE_ON)) as boolean;
+		browser.setSize(360, 780);
+		const reloadNarrow = loaded(browser);
+		browser.reload();
+		await reloadNarrow;
+		result.titleNarrow = (await drive(browser, TITLE_ON)) as boolean;
+		browser.setSize(1200, 820);
+		const reloadLive = loaded(browser);
+		browser.reload();
+		await reloadLive;
+		// Appearance is live: picking dark drives the real nativeTheme, the page sees dark, the file
+		// stores it, then light and system again.
+		await drive(browser, `${OPEN_SETTINGS} await d.click('#appearance [data-value="dark"]');`);
+		const themeDark =
+			nativeTheme.themeSource === 'dark' &&
+			readFileSync(settingsFile, 'utf8') === '{"appearance":"dark"}' &&
+			(await drive(browser, `return window.matchMedia('(prefers-color-scheme: dark)').matches;`)) === true;
+		await drive(browser, `await d.click('#appearance [data-value="light"]');`);
+		const themeLight = nativeTheme.themeSource === 'light';
+		await drive(browser, `await d.click('#appearance [data-value="system"]');`);
+		result.appearanceLive = themeDark && themeLight && nativeTheme.themeSource === 'system';
+
+		// Open at login reflects the real (here in-memory) login item: off at start, set by the switch,
+		// and a change made outside the app is picked up on the next focus without re-writing our file.
+		const loginOffDefault = memoryLoginItem?.openAtLogin === false;
+		await drive(browser, `await d.click('#loginSwitch');`);
+		const loginSet = memoryLoginItem?.openAtLogin === true;
+		if (memoryLoginItem) memoryLoginItem.openAtLogin = false;
+		await drive(browser, `window.dispatchEvent(new Event('focus')); await d.settle();`);
+		const loginRepainted = (await drive(browser, `return d.find('#loginSwitch').checked === false;`)) as boolean;
+		result.openAtLoginOk = loginOffDefault && loginSet && loginRepainted;
+
 		const title = browser.getTitle();
 		const own = isOwnFile(browser.webContents.getURL(), INDEX_URL);
-		const ok = own && title === PRODUCT_NAME && result.libraryRows > 0 && result.answered && result.folderRows > 0 && result.notice && result.moves > 0 && result.filed === 'filed' && result.persisted === true && result.raceSafe === true;
+		const ok = own && title === PRODUCT_NAME && result.libraryRows > 0 && result.answered && result.folderRows > 0 && result.notice && result.moves > 0 && result.filed === 'filed' && result.persisted === true && result.raceSafe === true && result.titleWide === true && result.titleNarrow === true && result.appearanceLive === true && result.openAtLoginOk === true;
 		if (ok) {
-			console.error(`SMOKE OK: library ${result.libraryRows} rows, answer with citations, ${result.folderRows} folder rows, rename -> notice -> ${result.moves} moves -> applied -> reloaded with the saved list; stale dry-run after a save refused`);
+			console.error(`SMOKE OK: library ${result.libraryRows} rows, answer with citations, ${result.folderRows} folder rows, rename -> notice -> ${result.moves} moves -> applied -> reloaded with the saved list; stale dry-run after a save refused; app name centred on ask/filing/settings at 1200px and 360px; appearance live (dark/light/system); open-at-login reflects the real login item`);
 			code = 0;
 		} else {
 			console.error(`SMOKE FAIL: own=${own} title=${title} checks=${JSON.stringify(result)}`);
@@ -335,6 +441,7 @@ async function runSmoke(): Promise<void> {
 		console.error(`SMOKE FAIL: ${String(error)}`);
 	}
 	clearTimeout(deadline);
+	if (settingsTempDir) rmSync(settingsTempDir, { recursive: true, force: true });
 	rmSync(dir, { recursive: true, force: true });
 	app.exit(code);
 }
@@ -343,13 +450,15 @@ type Shot = { name: string; scenario: 'library' | 'no-owners'; width: number; he
 
 const OPEN_FILING = `await d.click('[data-section="filing"]');`;
 const OPEN_OWNERS = `${OPEN_FILING} await d.click('[data-view="owners"]');`;
+const OPEN_SETTINGS = `await d.click('[data-section="settings"]');`;
+const ASK_STEPS = `await d.type('#askInput', 'When is the car loan paid off?'); await d.click('#askButton'); document.activeElement.blur();`;
 const RENAME_AND_ADD = `${OPEN_FILING} await d.pick('Car'); await d.type('#nameInput', 'Vehicles'); await d.click('#saveButton');
   await d.click('[data-view="owners"]'); await d.click('#addButton'); await d.type('#nameInput', 'Example Studio'); await d.click('#saveButton');
   await d.click('[data-view="folders"]');`;
 
 /** Ask, then RagFiling's ten states, each reached by using the app the way a person would. */
 const SHOTS: Shot[] = [
-	{ name: 'ask', scenario: 'library', width: 1200, height: 820, steps: `await d.type('#askInput', 'When is the car loan paid off?'); await d.click('#askButton'); document.activeElement.blur();` },
+	{ name: 'ask', scenario: 'library', width: 1200, height: 820, steps: ASK_STEPS },
 	{ name: 'filing-folders', scenario: 'library', width: 1200, height: 820, steps: `${OPEN_FILING} await d.pick('Finance');` },
 	{ name: 'filing-editing', scenario: 'library', width: 1200, height: 820, steps: `${OPEN_FILING} await d.pick('Car'); await d.type('#nameInput', 'Vehicles');` },
 	{ name: 'filing-owners', scenario: 'library', width: 1200, height: 820, steps: `${OPEN_OWNERS} await d.pick('Alex Example');` },
@@ -361,6 +470,9 @@ const SHOTS: Shot[] = [
 	{ name: 'filing-preview', scenario: 'library', width: 1200, height: 820, steps: `${RENAME_AND_ADD} await d.click('#resortButton');` },
 	{ name: 'filing-small', scenario: 'library', width: 360, height: 780, steps: `${OPEN_FILING} await d.pick('Finance');` },
 	{ name: 'filing-small-form', scenario: 'library', width: 360, height: 780, steps: `${OPEN_FILING} await d.pick('Finance');`, scrollTo: '#detailPane' },
+	{ name: 'ask-small', scenario: 'library', width: 360, height: 780, steps: ASK_STEPS },
+	{ name: 'settings', scenario: 'library', width: 1200, height: 820, steps: OPEN_SETTINGS },
+	{ name: 'settings-small', scenario: 'library', width: 360, height: 780, steps: OPEN_SETTINGS },
 ];
 
 async function runShots(): Promise<void> {
@@ -393,9 +505,11 @@ async function runShots(): Promise<void> {
 	} catch (error: unknown) {
 		console.error(`SHOTS FAIL: ${String(error)}`);
 		clearTimeout(deadline);
+		if (settingsTempDir) rmSync(settingsTempDir, { recursive: true, force: true });
 		app.exit(1);
 		return;
 	}
+	if (settingsTempDir) rmSync(settingsTempDir, { recursive: true, force: true });
 	console.error(`SHOTS OK: ${SHOTS.length * 2} screenshots in screenshots/`);
 	clearTimeout(deadline);
 	app.exit(0);

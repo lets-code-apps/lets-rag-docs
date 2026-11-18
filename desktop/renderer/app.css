@@ -87,6 +87,7 @@ p {
   flex: none;
   align-items: center;
   justify-content: flex-end;
+  position: relative;
   height: 64px;
   padding: 0 20px 0 calc(var(--s8) + var(--s6));
   border-bottom: 1px solid var(--line);
@@ -100,6 +101,25 @@ p {
   height: 32px;
   background: currentColor;
   -webkit-mask: url('emblem.svg') center / contain no-repeat;
+}
+
+/* The app name, centred on the whole bar like a macOS window title. It keeps 132px clear on each
+   side (window buttons at the left, emblem at the right), never wraps, and ellipsises if it must.
+   pointer-events: none keeps the bar draggable over the title. */
+.appbar-title {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  max-width: calc(100% - 264px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 15px;
+  font-weight: 500;
+  line-height: 1.35;
+  color: var(--fg);
+  pointer-events: none;
 }
 
 /* ---- Window body: nav | screen ---- */
@@ -770,6 +790,106 @@ button.row:hover {
   padding-top: var(--s1);
 }
 
+/* ---- settings: one article, mirroring the RagSettings design (a "general" group) ---- */
+
+.settings-body {
+  box-sizing: border-box;
+  display: flex;
+  flex: 999 1 420px;
+  min-width: 0;
+  max-width: 720px;
+  margin: 0 auto;
+  flex-direction: column;
+  gap: var(--s6);
+  padding: var(--s5) 20px var(--s6);
+  overflow-y: auto;
+}
+
+.settings-body h1 {
+  font-size: 26px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.settings-body h2 {
+  margin: 0 0 var(--s1);
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+/* A setting row: label (with its note) on the left, the control on the right, a 1px rule below. */
+.srow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px 24px;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.slabel {
+  display: flex;
+  flex: 1 1 220px;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.lbl {
+  font-size: 15px;
+  font-weight: 500;
+}
+
+.slabel .meta {
+  overflow-wrap: anywhere;
+}
+
+/* open at login: a 44px row (label left, switch right) with its helper drawn below the row. */
+.loginrow .helper {
+  flex-basis: 100%;
+  margin-top: -8px;
+}
+
+/* The real checkbox the design draws as a switch: filled track and knob right when on, a
+   line outline and knob left when off. Uses this app's own tokens. */
+.switch {
+  position: relative;
+  flex: none;
+  box-sizing: border-box;
+  width: 44px;
+  height: 24px;
+  margin: 0;
+  border: 1.5px solid var(--line-strong);
+  border-radius: var(--r-pill);
+  background: transparent;
+  appearance: none;
+  cursor: pointer;
+}
+
+.switch::before {
+  content: '';
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: var(--line-strong);
+  transition: transform 120ms ease;
+}
+
+.switch:checked {
+  border-color: var(--fg);
+  background: var(--fg);
+}
+
+.switch:checked::before {
+  background: var(--bg);
+  transform: translateX(20px);
+}
+
 /* ---- Smallest window (360px): the panes stack and the whole page scrolls. ---- */
 
 @media (max-width: 480px) {
@@ -801,7 +921,8 @@ button.row:hover {
   }
 
   .conversation,
-  .detail {
+  .detail,
+  .settings-body {
     flex: none;
     overflow: visible;
   }
