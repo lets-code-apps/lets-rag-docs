@@ -121,16 +121,21 @@ CI render is the baseline**, not your laptop.
 
 **Thresholds and noise.** `PIXEL_DELTA = 12` (a per-channel change of up to 12/255 does not count a pixel);
 a shot is **changed** when over `MAX_RATIO = 0.002` (0.2%) of its pixels differ, on a size mismatch, or when a
-pair is missing (`new`/`removed`). These are a starting point: after two CI runs on an unchanged tree, record
-the largest ratio you saw and keep `MAX_RATIO` at least 3× that and at most 0.5%, and note the measured noise
-here.
+pair is missing (`new`/`removed`). These are a starting point: run the CI job twice on an unchanged tree, record
+the largest ratio you saw, keep `MAX_RATIO` at least 3× that and at most 0.5%, and write the measured noise here
+(currently: the two CI runs on the fixed workflow are within `0.002` once the baseline is the CI render — see
+below for why the sizes already agree, so this is antialiasing noise only).
 
-**Known local-vs-CI differences.** The committed baseline is Retina (2400×1640, scale 2). `main.ts` forces
-`force-device-scale-factor=2` while taking shots, so a Retina Mac, a non-Retina Mac and CI all render at the
-same size. Fonts are bundled (Poppins woff2), and controls use `font: inherit`, so text renders the same;
-remaining differences are GPU/software antialiasing and macOS version drift. A runner macOS image bump can
-shift pixels enough to force a re-baseline from the CI artifact (see above). Baseline updates add ~6.7 MB of
-PNG history each time, so keep them rare.
+**Known local-vs-CI differences.** The committed baseline is the **CI render**, not a Retina laptop. The macOS
+GitHub Actions runner is non-Retina and its window chrome is taller, so a `setSize(1200, 820)` / `setSize(360,
+780)` window captures **1200×677** and **360×677** there, while a Retina Mac's `npm run shots` captures 2× (2400×
+1640) at a different height. A device-scale switch cannot reconcile size *and* height across the two, so it is
+not used. Consequence: `npm run shots` + `npm run compare` on your laptop will report every shot as changed — that
+is expected, because your laptop is not the reference. Regenerate the baseline by taking the PNGs from a
+`desktop-ci-<run id>` artifact (they are the runner's render) and committing those; the runner re-renders them
+identically, so CI goes green. Fonts are bundled (Poppins woff2) and controls use `font: inherit`, so within
+the CI render text is stable; a runner macOS image bump can still shift antialiased pixels and force a
+re-baseline from the artifact. Baseline updates add ~6.7 MB of PNG history each time, so keep them rare.
 
 **Privacy.** CI adds no third-party service, cookie or personal data to the app. Smoke and shots hard-set
 `test/fixtures/fake-engine.mjs` (a test checks this), so the artifacts and logs hold only synthetic output —
