@@ -65,7 +65,8 @@ Note: it keeps ~2 GB resident. Fine during the day; add idle unload if it gets i
 
 **Qdrant collection** `documents` (same layout `rag.py` built, so the index carried over during the port):
 named vectors `dense` (1024, cosine) and sparse `sparse`; payload `text`, `source`, `file`,
-`chunk`. Query = RRF fusion of dense and sparse prefetches (limit 20 each).
+`chunk`, and `page` (integer, only when the OCR text carries page markers — points from old marker-less
+files omit it, so their JSON stays byte-identical). Query = RRF fusion of dense and sparse prefetches (limit 20 each).
 
 **Chunking matched `rag.py` exactly; frozen by `testdata/chunk_cases.json`** (the eval baseline depends on it): skip blank lines;
 start a new chunk when the current one plus the next line would exceed 1500 chars (Python
@@ -75,8 +76,23 @@ the next chunk. Each chunk is embedded as `"{source}\n{chunk}"`. `source` = path
 `rsplit(".", 3)[0]` → Rust `rsplitn(4, '.').last()`).
 
 **MCP tool** `search_docs(query: string, limit: int = 5)` → list of
-`{text, source, file, chunk, score}`. No page numbers yet: OCR output has no page markers
-(add page markers to `ocr.py` later).
+`{text, source, file, chunk, page?, score}`. `page` is the 1-based page inside the document
+when the OCR text carries `` markers (`ocr.py` starts every page with one, both methods);
+documents OCR'd before markers simply omit the key, so old output is byte-identical.
+Cite it as `..., p. N` when present, else `chunk N`.
+
+**CLI JSON (the desktop's contract; `testdata/desktop/*.json` locks every shape, the TS tests
+and the fake engine replay them byte for byte):** `search --json --limit N -- <q>` →
+`{version:1, passages:[{source, file, chunk, page?, score}]}` (citation keys only, never text);
+`documents --json` → `{version, max_file_mb, status, documents:[{...,bytes,pages,skipped}]}` where
+an over-limit original (`skipped:"over_limit"`, never indexed) still shows its size;
+`add --json -- <file>` → `{version, status, source, file, type, date, chunks, duplicate_of}` (an
+original over `[ocr] max_file_mb` (default 50) is refused before hashing/copy/OCR);
+`locate --json -- <path>` → `{version, status, kind, path}` with `status:"ok"` only for one
+canonical contained path — this is the only path the app may open;
+`filing save` stdin accepts `renames:[{list:"folders"|"owners", from, to}]` (rows re-file to the
+new name in the same save, DB rows move in one transaction via `db::rename`) and `shared_owner`
+(a string; refused if it isn't safe).
 
 **Eval** `evals/rag.jsonl` lines: `{"id", "lang", "question", "expect", "source"}`. Pass = the
 expected `source` is among the first 5 distinct sources. **Baseline 2026-10-26: 10/10**
@@ -171,14 +187,20 @@ desktop/                 # Electron menu-bar app (Node/TS), ask, filing and sett
    **Ask and filing screens (2026-11-17, #11):** menu-bar app on branch `desktop`. Ask (library from
    `documents --json`, `ask --json` with citations) and filing (`filing show|save` on `[classify]`
     folders/owners, `organize --dry-run --json` preview, `--apply --json` only on the explicit button).
-    No sample data on screen. Still to come: upload (`add`), browse by folder, page counts/sizes,
-    page numbers in citations, a rename that re-files documents. See `desktop/README.md`.
+    No sample data on screen. Still to come: browse by folder. See `desktop/README.md`.
+    **Search, sizes, pages, add, open (2026-11-19, #15):** on the `feature/issue-15` branch.
+    The library pane has a search field (`search --json`, debounced, sequence-checked) and
+    rows show bytes/pages with the `not indexed: over 50 MB` pill; citations carry `p. N`;
+    citations under the answer get `open` buttons whose path main resolves through `locate --json`
+    (the renderer never names a file); the add queue runs the engine's `add --json` one file at a
+    time with a cancel; filing renames send `renames` so stored copies re-file; the shared owner
+    is editable (`shared_owner`). Fake engine + smoke + 36 light/dark screenshots cover it all.
     **Window title and settings (2026-11-18, #13):** the app name "rag docs" is centred in the bar (the
     AppBar `title`) on every screen; a settings screen (RagSettings) holds `appearance` (system/dark/light,
     stored in `settings.json` under userData, applied live through `nativeTheme`) and `open at login` (the
     macOS login item, read live, off by default, never stored by us). TypeScript/Electron only; smoke uses
     a temp file + an in-memory login item.
-10. Later: synthetic sample docs + public eval set, page markers, reranking (bge-reranker-v2-m3).
+10. Later: synthetic sample docs + public eval set, reranking (bge-reranker-v2-m3). (Page markers landed with #15: `ocr.py` emits `\f`, `chunk::paged_chunks` tracks the page, `chunk_cases.json` still locks the old chunk text and byte counts.)
 
 ## Environment
 

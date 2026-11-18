@@ -345,6 +345,11 @@ fn build_plan(config: &Config, conn: &Connection) -> anyhow::Result<Built> {
     };
     let mut lines: Vec<String> = Vec::new();
     let mut items: Vec<PlanItem> = Vec::new();
+    // A bulk-OCR'd original over `[ocr] max_file_mb` must not be re-embedded by `--apply`
+    // either: `add` refuses such a file, so filing it into the index would create an entry
+    // for a document the user cannot add. No new counter: a plan line plus a log warning
+    // explains the gap.
+    let max_bytes: u64 = config.ocr.max_file_mb.saturating_mul(1_000_000);
     // Case-folded key so macOS's case-insensitive filesystem and a shared stem both collide.
     let mut claimed: HashSet<String> = HashSet::new();
     let mut first_by_hash: HashMap<String, String> = HashMap::new();
@@ -354,6 +359,14 @@ fn build_plan(config: &Config, conn: &Connection) -> anyhow::Result<Built> {
         let rel: String = path.strip_prefix(ocr_dir)?.to_string_lossy().to_string();
         let original = classify::original_path(docs_dir, &rel);
         let orel = classify::original_rel(&rel);
+        if classify::over_limit(&original, max_bytes) {
+            tracing::warn!("{} is over the [ocr] max_file_mb limit", rel);
+            lines.push(format!(
+                "not indexed: over {} MB  {rel}",
+                config.ocr.max_file_mb
+            ));
+            continue;
+        }
         let hash = match classify::hash_file(&original) {
             Ok(hash) => hash,
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -652,20 +665,24 @@ async fn reembed(embed: &EmbedClient, entry: &Entry, filed: &Filed) -> anyhow::R
     let text = std::fs::read_to_string(&entry.ocr_abs)
         .with_context(|| format!("cannot read {}", entry.ocr_abs.display()))?;
     let source: String = format!("{}/{}", entry.dir, filed.stem);
-    let parts = chunk::chunks(&text);
-    let inputs: Vec<String> = parts.iter().map(|c| format!("{source}\n{c}")).collect();
+    let parts = chunk::paged_chunks(text.as_str());
+    let inputs: Vec<String> = parts
+        .iter()
+        .map(|(part, _page)| format!("{source}\n{part}"))
+        .collect();
     let embeddings = embed.embed(&inputs).await?;
     let points: Vec<PointStruct> = parts
         .into_iter()
         .zip(embeddings)
         .enumerate()
-        .map(|(n, (part, embedding))| {
+        .map(|(n, ((part, page), embedding))| {
             index::point(
                 index::organized_id(&entry.hash, n),
                 part,
                 &source,
                 &entry.ocr_rel,
                 n,
+                page,
                 embedding,
                 Some(&entry.meta),
             )
@@ -1815,6 +1832,7 @@ mod tests {
             "s",
             "f",
             0,
+            None,
             Embedding {
                 dense: vec![0.0],
                 sparse: Sparse {

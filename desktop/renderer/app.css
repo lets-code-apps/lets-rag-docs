@@ -498,6 +498,36 @@ button.row:hover {
   line-height: 1.55;
 }
 
+/* Library search: the design's field, same styles as the ask form. The inset is padding inside
+the 100%-wide wrap, so the narrow (360px) pane never grows a sideways scrollbar. */
+.library .field-wrap {
+  box-sizing: border-box;
+  padding: 0 var(--s4) var(--s4);
+}
+
+/* Add progress: one row per picked file, the count in its head. */
+.add-panel {
+  display: flex;
+  flex-direction: column;
+  border-bottom: 1px solid var(--line);
+}
+
+.add-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s3);
+  padding: var(--s3) var(--s4) 0;
+}
+
+/* The "open <document>" buttons under the answer, one per cited document. */
+.open-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s3);
+  margin-top: var(--s3);
+}
+
 .conversation {
   display: flex;
   flex: 999 1 520px;

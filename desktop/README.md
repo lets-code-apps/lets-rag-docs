@@ -35,16 +35,21 @@ data; real failures exit non-zero with empty stdout and a reason on stderr.
 
 | Call | Desktop API | Shape |
 |---|---|---|
-| `documents --json` | `rag.documents()` | `{version, status, documents:[{path,title,type,date,folder,owner,filed_as}]}` |
-| `ask --json -- <question>` | `rag.ask()` | `{version, answer:string|null, sources:[{source,file,chunk,score}]}` |
+| `documents --json` | `rag.documents()` | `{version, max_file_mb, status, documents:[{path,title,type,date,folder,owner,filed_as,bytes,pages,skipped}]}` |
+| `search --json --limit 20 -- <query>` | `rag.search()` | `{version, passages:[{source,file,chunk,page?,score}]}` — citation keys only, never text |
+| `ask --json -- <question>` | `rag.ask()` | `{version, answer:string|null, sources:[{source,file,chunk,page?,score}]}` |
 | `filing show --json` | `rag.filing()` | `{version, folders, owners, shared_owner}` |
-| `filing save [--check]` (stdin JSON draft) | `rag.saveFiling()` | `{version, ok, saved, folders, owners, errors}` |
+| `filing save [--check]` (stdin JSON draft) | `rag.saveFiling()` | `{version, ok, saved, renamed, folders, owners, errors}` — the draft may add `renames:[{list,from,to}]` (stored copies re-file) and `shared_owner` (a string) |
+| `add --json -- <file>` | `rag.addNext()` | `{version, status, source,file,type,date,chunks,duplicate_of}` — picked files queue in main, the renderer gets names only |
+| `locate --json -- <path>` | `rag.openDocument()` | `{version, status, kind, path}` — main opens only what the engine vouches for |
 | `organize --dry-run --json` | `rag.dryRun()` | `{version, mode, status, items, counts}` |
 | `organize --apply --json` | `rag.resort()` | same shape as dry-run; refused unless the last report was a dry-run with `status:"ok"`, with no save and no apply since |
 
 Time budgets: reads 10 s, dry-run 10 min (it hashes every original), apply 60 min (it copies and
-re-embeds a batch through the local model), ask 6 min. A call over budget is stopped and reported as
-"… timed out", never parsed as half a report. `ask` and `apply` share one slot (local LLM, concurrency 1).
+re-embeds a batch through the local model), ask 6 min, add 20 min (OCR plus one embedding per file).
+A call over budget is stopped and reported as "… timed out", never parsed as half a report.
+`ask`, `add` and `apply` share one slot (local LLM and Qdrant writes, concurrency 1); `cancelAsk`
+and `cancelAdd` kill the running child.
 
 Binary lookup: `RAG_DOCS_ENGINE_PATH`, then `<resources>/engine/lets-rag-docs`, then
 `<repo>/target/debug/lets-rag-docs`. `--config` is added only when `RAG_DOCS_CONFIG` is set.
@@ -84,6 +89,10 @@ Mail's `menubar.svg` with the RAG emblem's two text lines; `assets/icon.png` (10
 - No references to the private document paths inside the desktop source/renderer.
 - The renderer is sandboxed, context-isolated, preload-only, CSP `default-src 'none'`, and never uses
   `innerHTML`, `outerHTML`, `insertAdjacentHTML` or `document.write`.
+- Search, add and open cross through main: `rag.search`, `rag.pickFiles`, `rag.addNext`,
+  `rag.cancelAdd`, `rag.openDocument`. Picked paths stay in main's queue (the page gets counts and
+  names); the single `shell.openPath` call runs only on the `locate --json` result. The picker and
+  opener are host seams: smoke/shots record paths in memory and hand back synthetic temp files.
 - Smoke/screenshots always use `test/fixtures/fake-engine.mjs` and synthetic fixtures.
 - The real macOS login item is touched only through the Electron host; `app.setLoginItemSettings` appears
   in that one host, and smoke/shots swap in an in-memory login item, so an unattended run registers nothing.

@@ -3,8 +3,8 @@
 // window hides it; Quit/Cmd+Q ends the app. Smoke and screenshots drive the real page against the
 // fake engine (pinned by the npm scripts), never real documents or config.
 
-import { app, BrowserWindow, Menu, Tray, ipcMain, nativeImage, nativeTheme } from 'electron';
-import { join } from 'node:path';
+import { app, BrowserWindow, Menu, Tray, dialog, ipcMain, nativeImage, nativeTheme, shell } from 'electron';
+import { basename, isAbsolute, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -46,6 +46,25 @@ let settingsTempDir: string | undefined;
 let memoryLoginItem: { openAtLogin: boolean } | undefined;
 
 const fromUs = (senderFrame?: { url?: string } | null): boolean => senderFrame?.url === INDEX_URL;
+
+// The two OS seams, built once in boot like the settings host:
+// - `opener` resolves nothing; it opens only what main already resolved. Exactly one
+//   this file). Smoke/shots record the path to `openLog` instead of launching a viewer.
+// - `picker` is the real file dialog; smoke/shots hand back synthetic temp files, so no real folder
+//   is ever listed. Picked paths live in main's queue only: the page gets counts and names.
+type OpenerHost = (path: string) => Promise<string>; // the OS host: '' means opened
+type PickerHost = () => Promise<string[]>;
+let opener: OpenerHost;
+let picker: PickerHost;
+const openLog: string[] = [];
+let addQueue: string[] = [];
+let addTotal = 0;
+let pickedTempDir: string | undefined;
+
+function clearAddQueue(): void {
+	addQueue = [];
+	addTotal = 0;
+}
 
 function isRendererNavigation(url: string): boolean {
 	try {
@@ -157,6 +176,35 @@ function makeSettingsController(): SettingsController {
 	return new SettingsController(settingsFile, host);
 }
 
+function makeHosts(): void {
+	// Same seam pattern as the settings host: one decision, testing or not, made in boot.
+	const testing = process.env.RAG_DOCS_SMOKE === '1' || process.env.RAG_DOCS_SHOTS === '1';
+	if (testing) {
+		// Synthetic temp files only: the fake engine decides by name (`dup` -> duplicate,
+		// `broken` -> failed), and the opener records instead of launching a viewer.
+		const dir = mkdtempSync(join(tmpdir(), 'rag-docs-picked-'));
+		pickedTempDir = dir;
+		const names = ['loan.pdf', 'loan-dup.pdf', 'broken.pdf'];
+		for (const name of names) writeFileSync(join(dir, name), 'synthetic');
+		picker = async () => names.map((name) => join(dir, name));
+		opener = async (path) => {
+			void path;
+			return '';
+		};
+		return;
+	}
+	opener = (path) => shell.openPath(path);
+	picker = async () => {
+		const picked = await dialog.showOpenDialog({
+			title: PRODUCT_NAME,
+			buttonLabel: 'Add',
+			properties: ['openFile', 'multiSelections'],
+			filters: [{ name: 'Documents', extensions: ['pdf', 'jpg', 'jpeg', 'png', 'heic', 'tif', 'tiff'] }],
+		});
+		return picked.canceled ? [] : picked.filePaths;
+	};
+}
+
 function registerIpc(): void {
 	ipcMain.handle(IPC.documents, async (event) => {
 		if (!fromUs(event.senderFrame)) return null;
@@ -221,6 +269,81 @@ function registerIpc(): void {
 		return { ok: true, cancelled: engine.cancelAsk() };
 	});
 
+	// Search is a read like documents: no job gate, query after `--`.
+	ipcMain.handle(IPC.search, async (event, query: unknown) => {
+		if (!fromUs(event.senderFrame)) return null;
+		if (typeof query !== 'string') return { ok: false, error: 'query must be a string' };
+		return guard(async () => toIPC(await engine.search(query)));
+	});
+
+	// The file picker runs where it must: in main. Only counts and display names cross to the page.
+	ipcMain.handle(IPC.pickFiles, async (event) => {
+		if (!fromUs(event.senderFrame)) return null;
+		return guard(async () => {
+			const paths = await picker();
+			if (paths.length === 0) return { ok: true, count: 0, names: [] };
+			addQueue = paths.slice();
+			addTotal = paths.length;
+			const names = paths.map((path) => basename(path));
+			return { ok: true, count: paths.length, names };
+		});
+	});
+
+	// One add per call, straight off main's queue. `done` tells the page the queue is empty;
+	// `outcome` is the row's word (added / duplicate / failed).
+	ipcMain.handle(IPC.addNext, async (event) => {
+		if (!fromUs(event.senderFrame)) return null;
+		return guard(async () => {
+			if (addQueue.length === 0) return { ok: false, error: 'no files were picked' };
+			const reason = jobs.addReason();
+			if (reason !== null) return { ok: false, error: reason };
+			if (!jobs.tryBeginAdd()) return { ok: false, error: 'another long job is running' };
+			const path = addQueue.shift() as string;
+			const index = addTotal - addQueue.length;
+			const name = basename(path);
+			const done = addQueue.length === 0;
+			try {
+				const result = await engine.add(path);
+				if (!result.ok) {
+					return { ok: true, done, index, total: addTotal, name, outcome: 'failed', error: result.error };
+				}
+				const outcome = result.value.status === 'duplicate' ? 'duplicate' : 'added';
+				return { ok: true, done, index, total: addTotal, name, outcome, report: result.value };
+			} catch {
+				// A spawn failure counts as a failed row and still advances the queue.
+				return { ok: true, done, index, total: addTotal, name, outcome: 'failed' };
+			} finally {
+				jobs.endAdd();
+			}
+		});
+	});
+
+	ipcMain.handle(IPC.cancelAdd, async (event) => {
+		if (!fromUs(event.senderFrame)) return null;
+		const cancelled = engine.cancelAdd() || addQueue.length > 0;
+		clearAddQueue();
+		return { ok: true, cancelled };
+	});
+
+	// Open is the only path that reaches the OS: the renderer names a document it already shows,
+	// main resolves it through the engine (never trusts the renderer's string as a file), and only
+	// then hands the path to the host opener.
+	ipcMain.handle(IPC.openDocument, async (event, docPath: unknown) => {
+		if (!fromUs(event.senderFrame)) return null;
+		return guard(async () => {
+			if (typeof docPath !== 'string') return { ok: false, error: 'path must be a string' };
+			const located = await engine.locate(docPath);
+			if (!located.ok) return { ok: false, error: located.error };
+			const file = located.value.path;
+			if (located.value.status !== 'ok' || typeof file !== 'string' || !isAbsolute(file)) {
+				return { ok: false, error: 'this document is not in the library' };
+			}
+			const failure = await opener(file);
+			openLog.push(file);
+			return failure === '' ? { ok: true, opened: true } : { ok: false, error: failure };
+		});
+	});
+
 	// Settings cross the same trust boundary: our own page only. `settings` reports the current truth;
 	// `setSetting` validates name+value through the controller and answers with the new truth.
 	ipcMain.handle(IPC.settings, async (event) => {
@@ -252,6 +375,7 @@ if (!app.requestSingleInstanceLock()) {
 function boot(): void {
 	settingsController = makeSettingsController();
 	settingsController.load();
+	makeHosts();
 	registerIpc();
 	if (process.env.RAG_DOCS_SMOKE === '1') {
 		void runSmoke();
@@ -312,6 +436,11 @@ async function drive(browser: BrowserWindow, steps: string): Promise<unknown> {
 	return browser.webContents.executeJavaScript(`(async () => { ${DRIVER}; const d = window.__drive; await d.settle(); ${steps} })()`, true);
 }
 
+/** Like drive, without the settle first: for checks on a page that is still busy on purpose. */
+async function driveNow(browser: BrowserWindow, steps: string): Promise<unknown> {
+	return browser.webContents.executeJavaScript(`(async () => { ${DRIVER}; const d = window.__drive; ${steps} })()`, true);
+}
+
 function freshFakeState(): string {
 	const dir = mkdtempSync(join(tmpdir(), 'rag-docs-fake-'));
 	process.env.FAKE_STATE_FILE = join(dir, 'state.json');
@@ -321,6 +450,41 @@ function freshFakeState(): string {
 async function loaded(browser: BrowserWindow): Promise<void> {
 	await new Promise<void>((resolve) => browser.webContents.once('did-finish-load', () => resolve()));
 }
+
+type SmokeChecks = {
+	libraryRows: number;
+	answered: boolean;
+	folderRows: number;
+	notice: boolean;
+	moves: number;
+	filed: string;
+	dangerPill: boolean;
+	sizeShown: boolean;
+	searchRows: number;
+	searchMeta: boolean;
+	cleared: number;
+	addDone: boolean;
+	addAdded: boolean;
+	addDuplicate: boolean;
+	addFailed: boolean;
+	grew: boolean;
+	pageCited: boolean;
+	openButtons: number;
+	vehiclesCounts: boolean;
+	movesToVehicles: boolean;
+	noUnsorted: boolean;
+	movesToHousehold: boolean;
+	sharedShownHousehold: boolean;
+	sharedRenamedBack: boolean;
+	applied: string;
+	persisted?: boolean;
+	raceSafe?: boolean;
+	titleWide?: boolean;
+	titleNarrow?: boolean;
+	appearanceLive?: boolean;
+	openAtLoginOk?: boolean;
+	openedPath?: boolean;
+};
 
 async function runSmoke(): Promise<void> {
 	const dir = freshFakeState();
@@ -333,22 +497,73 @@ async function runSmoke(): Promise<void> {
 		const browser = makeWindow();
 		await loaded(browser);
 		const result = (await drive(browser, String.raw`
+      // Sizes and the over-50 MB pill come straight from the report; the big original is listed
+      // with its size and the reason it was never indexed.
+      const big = d.row('#libraryRows', 'big-scan.pdf');
+      const dangerPill = big.querySelector('.pill')?.textContent === 'not indexed: over 50 MB';
+      const sizeShown = (big.querySelector('.row-preview')?.textContent ?? '').includes('64 MB');
       const libraryRows = document.querySelectorAll('#libraryRows .row').length;
+      // Search narrows to the two loan documents, then an empty box restores the full list.
+      await d.type('#librarySearch', 'loan');
+      const searchRows = document.querySelectorAll('#libraryRows .row').length;
+      const searchMeta = / of \d+ documents/.test(d.find('#libraryMeta').textContent);
+      await d.type('#librarySearch', '');
+      const cleared = document.querySelectorAll('#libraryRows .row').length;
+      // Add: the picker seam hands over three synthetic files; one row per file, one outcome each.
+      await d.click('#addDocsButton');
+      const addDone = d.find('#addMeta').textContent === 'done';
+      const addOutcomes = [...document.querySelectorAll('#addRows .row-preview')].map((n) => n.textContent);
+      const addAdded = addOutcomes.some((x) => x.startsWith('added ('));
+      const addDuplicate = addOutcomes.includes('already added');
+      const addFailed = addOutcomes.some((x) => x.startsWith('failed:'));
+      const grew = document.querySelectorAll('#libraryRows .row').length === libraryRows + 1;
+      // Ask: the answer cites with a page, and an open button hands the library path to main.
       await d.type('#askInput', 'When is the car loan paid off?');
       await d.click('#askButton');
       const answered = !d.find('#answerBlock').hidden && d.find('#citations').children.length > 0;
+      const pageCited = [...d.find('#citations').children].some((c) => /, p\. 4/.test(c.textContent));
+      const openButtons = d.find('#openDocs').children.length;
+      d.find('#openDocs').firstChild.click();
+      await d.settle();
+      // Filing: rename Car to Vehicles. After the save the row already counts its documents,
+      // and the preview moves the copies to Vehicles (nothing to unsorted).
       await d.click('[data-section="filing"]');
       const folderRows = document.querySelectorAll('#filingRows .row').length;
       await d.pick('Car');
       await d.type('#nameInput', 'Vehicles');
       await d.click('#saveButton');
       const notice = !d.find('#noticeCard').hidden;
+      const vehiclesCounts = d.row('#filingRows', 'Vehicles').querySelector('.row-time')?.textContent === '2 documents';
       await d.click('#resortButton');
       const moves = document.querySelectorAll('#moveRows .row').length;
+      const movesToVehicles = [...document.querySelectorAll('#moveRows .row-subject')].some((n) => n.textContent.includes('Vehicles'));
+      const noUnsorted = ![...document.querySelectorAll('#moveRows .row-subject')].some((n) => n.textContent.includes('unsorted'));
       await d.click('#applyButton');
       const filed = d.find('#noticePill').textContent;
-      return { libraryRows, answered, folderRows, notice, moves, filed };
-    `		)) as { libraryRows: number; answered: boolean; folderRows: number; notice: boolean; moves: number; filed: string; persisted?: boolean; raceSafe?: boolean; titleWide?: boolean; titleNarrow?: boolean; appearanceLive?: boolean; openAtLoginOk?: boolean };
+      // Shared owner: editable now; "Household" moves unlisted documents in the next preview.
+      await d.click('[data-view="owners"]');
+      await d.pick('Shared');
+      await d.type('#nameInput', 'Household');
+      await d.click('#saveButton');
+      await d.click('#resortButton');
+      const movesToHousehold = [...document.querySelectorAll('#moveRows .row-subject')].some((n) => n.textContent.includes('Household'));
+      // The row itself shows the new name right away (the save report carries it), and the
+      // rename works both ways in one session: Household -> Shared.
+      const sharedRowNamed = (title) => [...document.querySelectorAll('#filingRows .row')]
+        .some((r) => (r.querySelector('.row-title') ?? {}).textContent === title);
+      const sharedShownHousehold = sharedRowNamed('Household');
+      await d.pick('Household');
+      await d.type('#nameInput', 'Shared');
+      await d.click('#saveButton');
+      const sharedRenamedBack = sharedRowNamed('Shared') && !sharedRowNamed('Household');
+      await d.click('#resortButton');
+      await d.click('#applyButton');
+      const applied = d.find('#noticePill').textContent;
+      return { libraryRows, answered, folderRows, notice, moves, filed, dangerPill, sizeShown, searchRows, searchMeta, cleared, addDone, addAdded, addDuplicate, addFailed, grew, pageCited, openButtons, vehiclesCounts, movesToVehicles, noUnsorted, movesToHousehold, sharedShownHousehold, sharedRenamedBack, applied };
+    `		)) as SmokeChecks;
+		// The open button ran in main: it resolved through the engine's locate and recorded the
+		// fake filed copy — the renderer never named a path.
+		result.openedPath = openLog[openLog.length - 1] === '/tmp/rag-docs-fake/library/Finance/Alex Example/2025/2025-03-14 Car loan - Repayment schedule.pdf';
 		// Edit -> save -> reload: the saved list comes back from the engine, not from page memory.
 		const reload = loaded(browser);
 		browser.reload();
@@ -402,6 +617,7 @@ async function runSmoke(): Promise<void> {
 		browser.reload();
 		await reloadNarrow;
 		result.titleNarrow = (await drive(browser, TITLE_ON)) as boolean;
+
 		browser.setSize(1200, 820);
 		const reloadLive = loaded(browser);
 		browser.reload();
@@ -432,9 +648,10 @@ async function runSmoke(): Promise<void> {
 
 		const title = browser.getTitle();
 		const own = isOwnFile(browser.webContents.getURL(), INDEX_URL);
-		const ok = own && title === PRODUCT_NAME && result.libraryRows > 0 && result.answered && result.folderRows > 0 && result.notice && result.moves > 0 && result.filed === 'filed' && result.persisted === true && result.raceSafe === true && result.titleWide === true && result.titleNarrow === true && result.appearanceLive === true && result.openAtLoginOk === true;
+		const ok = own && title === PRODUCT_NAME && result.libraryRows > 0 && result.answered && result.folderRows > 0 && result.notice && result.moves > 0 && result.filed === 'filed' && result.persisted === true && result.raceSafe === true && result.titleWide === true && result.titleNarrow === true && result.appearanceLive === true && result.openAtLoginOk === true
+			&& result.dangerPill && result.sizeShown && result.searchRows === 2 && result.searchMeta && result.cleared === result.libraryRows && result.addDone && result.addAdded && result.addDuplicate && result.addFailed && result.grew && result.pageCited && result.openButtons === 2 && result.openedPath && result.vehiclesCounts && result.movesToVehicles && result.noUnsorted && result.movesToHousehold && result.sharedShownHousehold && result.sharedRenamedBack && result.applied === 'filed';
 		if (ok) {
-			console.error(`SMOKE OK: library ${result.libraryRows} rows, answer with citations, ${result.folderRows} folder rows, rename -> notice -> ${result.moves} moves -> applied -> reloaded with the saved list; stale dry-run after a save refused; app name centred on ask/filing/settings at 1200px and 360px; appearance live (dark/light/system); open-at-login reflects the real login item`);
+			console.error(`SMOKE OK: library ${result.libraryRows} rows (big-scan pill + MB sizes), search "loan" -> 2 rows -> cleared, add 3 files -> added/duplicate/failed + library grew, answer cites p. 4 and an open button handed the located path to main, rename Car->Vehicles counts 2 documents and previews moves to Vehicles (none to unsorted), shared owner "Household" re-files; stale dry-run after a save refused; app name centred on ask/filing/settings at 1200px and 360px; appearance live (dark/light/system); open-at-login reflects the real login item`);
 			code = 0;
 		} else {
 			console.error(`SMOKE FAIL: own=${own} title=${title} checks=${JSON.stringify(result)}`);
@@ -448,7 +665,7 @@ async function runSmoke(): Promise<void> {
 	app.exit(code);
 }
 
-type Shot = { name: string; scenario: 'library' | 'no-owners'; width: number; height: number; steps: string; scrollTo?: string };
+type Shot = { name: string; scenario: 'library' | 'no-owners'; width: number; height: number; steps: string; scrollTo?: string; scrollToRow?: string; delayMs?: number };
 
 const OPEN_FILING = `await d.click('[data-section="filing"]');`;
 const OPEN_OWNERS = `${OPEN_FILING} await d.click('[data-view="owners"]');`;
@@ -458,16 +675,40 @@ const RENAME_AND_ADD = `${OPEN_FILING} await d.pick('Car'); await d.type('#nameI
   await d.click('[data-view="owners"]'); await d.click('#addButton'); await d.type('#nameInput', 'Example Studio'); await d.click('#saveButton');
   await d.click('[data-view="folders"]');`;
 
-/** Ask, then RagFiling's ten states, each reached by using the app the way a person would. */
+/** Ask with sizes and the pill, the add queue mid-run and done, then RagFiling's states, each
+ * reached by using the app the way a person would. */
+const SEARCH_LOAN = `await d.type('#librarySearch', 'loan');`;
+const ADD_DONE = `await d.click('#addDocsButton');`;
+/** Capture the queue WHILE it runs: one row must say adding… and cancel must be offered.
+ * A settle would wait for the last file and show a finished queue, so the steps poll
+ * instead, and throw rather than shoot an empty or finished panel. */
+const ADD_RUNNING_CHECK = `const addPanel = document.querySelector('#addPanel');
+  if (!addPanel || addPanel.hidden || !addPanel.textContent.includes('adding…')) throw new Error('add-running: no row is adding… at capture time');
+  if (!document.querySelector('#addCancel') || document.querySelector('#addCancel')?.hidden) throw new Error('add-running: the cancel button is not visible');`;
+const ADD_RUNNING = `d.find('#addDocsButton').click();
+  for (let i = 0; i < 60; i += 1) {
+    const panel = document.querySelector('#addPanel');
+    if (panel && !panel.hidden && panel.textContent.includes('adding…') && !document.querySelector('#addCancel')?.hidden) break;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  ${ADD_RUNNING_CHECK}`;
+/** The over-limit original: pill and size must be on the row, and the row in view. */
+const OVER_LIMIT = `const big = d.row('#libraryRows', 'big-scan.pdf');
+  if (big.querySelector('.pill')?.textContent !== 'not indexed: over 50 MB') throw new Error('over-limit: the pill is missing');
+  if (!(big.querySelector('.row-preview')?.textContent ?? '').includes(' MB')) throw new Error('over-limit: the size is missing');`;
 const SHOTS: Shot[] = [
 	{ name: 'ask', scenario: 'library', width: 1200, height: 820, steps: ASK_STEPS },
+	{ name: 'ask-search', scenario: 'library', width: 1200, height: 820, steps: SEARCH_LOAN },
+	{ name: 'add-running', scenario: 'library', width: 1200, height: 820, steps: ADD_RUNNING, delayMs: 1500 },
+	{ name: 'over-limit', scenario: 'library', width: 1200, height: 820, steps: OVER_LIMIT, scrollToRow: 'big-scan.pdf' },
+	{ name: 'add-done', scenario: 'library', width: 1200, height: 820, steps: ADD_DONE },
 	{ name: 'filing-folders', scenario: 'library', width: 1200, height: 820, steps: `${OPEN_FILING} await d.pick('Finance');` },
 	{ name: 'filing-editing', scenario: 'library', width: 1200, height: 820, steps: `${OPEN_FILING} await d.pick('Car'); await d.type('#nameInput', 'Vehicles');` },
 	{ name: 'filing-owners', scenario: 'library', width: 1200, height: 820, steps: `${OPEN_OWNERS} await d.pick('Alex Example');` },
 	{ name: 'filing-owners-empty', scenario: 'no-owners', width: 1200, height: 820, steps: OPEN_OWNERS },
 	{ name: 'filing-adding', scenario: 'library', width: 1200, height: 820, steps: `${OPEN_OWNERS} await d.click('#addButton'); await d.type('#nameInput', 'Example Studio');` },
 	{ name: 'filing-error', scenario: 'library', width: 1200, height: 820, steps: `${OPEN_OWNERS} await d.click('#addButton'); await d.type('#nameInput', 'Example/Studio');` },
-	{ name: 'filing-shared', scenario: 'library', width: 1200, height: 820, steps: `${OPEN_OWNERS} await d.pick('Shared');` },
+	{ name: 'filing-shared', scenario: 'library', width: 1200, height: 820, steps: `${OPEN_OWNERS} await d.pick('Shared'); await d.type('#nameInput', 'Household');` },
 	{ name: 'filing-changed', scenario: 'library', width: 1200, height: 820, steps: RENAME_AND_ADD },
 	{ name: 'filing-preview', scenario: 'library', width: 1200, height: 820, steps: `${RENAME_AND_ADD} await d.click('#resortButton');` },
 	{ name: 'filing-small', scenario: 'library', width: 360, height: 780, steps: `${OPEN_FILING} await d.pick('Finance');` },
@@ -493,19 +734,33 @@ async function runShots(): Promise<void> {
 			for (const shot of SHOTS) {
 				const dir = freshFakeState();
 				process.env.FAKE_SCENARIO = shot.scenario;
+				if (shot.delayMs) process.env.FAKE_ADD_DELAY_MS = String(shot.delayMs); else delete process.env.FAKE_ADD_DELAY_MS;
 				browser.setSize(shot.width, shot.height);
 				const reload = loaded(browser);
 				browser.reload();
 				await reload;
 				await drive(browser, shot.steps);
 				if (shot.scrollTo) await drive(browser, `d.find('${shot.scrollTo}').scrollIntoView(); await d.settle();`);
+				if (shot.scrollToRow) {
+					// A named row is scrolled to the middle of the window, then confirmed on screen.
+					await drive(browser, `d.row('#libraryRows', '${shot.scrollToRow}').scrollIntoView({ block: 'center' }); await d.settle();
+  const overRow = d.row('#libraryRows', '${shot.scrollToRow}').getBoundingClientRect();
+  // The last row can overshoot the viewport by a fraction of a pixel; 1 px of slack keeps
+  // the check about readability, not sub-pixel rounding.
+  if (overRow.top < 0 || overRow.bottom > innerHeight + 1) throw new Error('the scrolled row is not in view');`);
+				}
 				// Every shot that starts at the top of the page has to show the window title.
-				if (!shot.scrollTo || shot.scrollTo === '#appBar') {
-					const visible = await drive(browser, `const t = d.find('#appTitle').getBoundingClientRect(); return t.top >= 0 && t.bottom <= innerHeight;`);
+				// A shot with a slow add is taken mid-run: no settle here (it would wait for the
+				// whole queue), and the steps' own checks are repeated right before the capture.
+				if (!shot.scrollTo && !shot.scrollToRow) {
+					const check = `const t = d.find('#appTitle').getBoundingClientRect(); return t.top >= 0 && t.bottom <= innerHeight;`;
+					const visible = shot.delayMs ? await driveNow(browser, `${ADD_RUNNING_CHECK} ${check}`) : await drive(browser, check);
 					if (visible !== true) throw new Error(`${shot.name}-${mode}: the window title is not in view`);
 				}
 				const image = await browser.webContents.capturePage();
 				writeFileSync(join(out, `${shot.name}-${mode}.png`), image.toPNG());
+				// Stop a queue that is still running so it can't touch the next shot.
+				if (shot.delayMs) await driveNow(browser, `d.find('#addCancel').click(); await d.settle();`);
 				rmSync(dir, { recursive: true, force: true });
 			}
 		}

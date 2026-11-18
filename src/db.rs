@@ -182,6 +182,36 @@ pub fn set_library_path(conn: &Connection, hash: &str, rel: &str) -> rusqlite::R
     Ok(())
 }
 
+/// Which column a rename touches. An enum, so the column name in the SQL is chosen by
+/// `match` - it is never interpolated from user input.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Column {
+    Folder,
+    Owner,
+}
+
+/// Renames stored folder/owner values, every pair in ONE transaction: either all pairs land
+/// or none do. A shared-owner rename passes no pair at all (`organize` files the shared owner
+/// as `owner IS NULL`, and `NULL = ?1` is never true, so those rows need no UPDATE). Returns
+/// how many rows changed; re-running the same rename returns 0, which is what makes a repeated
+/// `filing save` safe.
+pub fn rename(
+    conn: &mut Connection,
+    pairs: &[(Column, String, String)],
+) -> rusqlite::Result<usize> {
+    let tx = conn.transaction()?;
+    let mut changed: usize = 0;
+    for (column, from, to) in pairs.iter() {
+        let sql: String = match column {
+            Column::Folder => "UPDATE documents SET folder = ?1 WHERE folder = ?2".to_string(),
+            Column::Owner => "UPDATE documents SET owner = ?1 WHERE owner = ?2".to_string(),
+        };
+        changed += tx.execute(sql.as_str(), params![to.as_str(), from.as_str()])?;
+    }
+    tx.commit()?;
+    Ok(changed)
+}
+
 const SELECT: &str =
     "SELECT hash, path, title, type, date, people, issuer, folder, owner, matter FROM documents";
 
@@ -271,6 +301,52 @@ mod tests {
             Some("Home/Jan Kowalski/2025/x.pdf")
         );
         assert_eq!(library_path(&conn, "nope").unwrap(), None);
+    }
+
+    #[test]
+    fn rename_is_one_transaction() {
+        // The folder UPDATE runs first; a trigger that refuses the owner UPDATE must roll
+        // the whole rename back, so no row is left half-renamed.
+        let dir = tempfile::tempdir().unwrap();
+        let mut conn = open(&dir.path().join("data.db")).unwrap();
+        put(
+            &conn,
+            &Doc {
+                hash: "a1".into(),
+                path: "scans/scan.pdf".into(),
+                meta: Meta {
+                    title: None,
+                    doc_type: "invoice".into(),
+                    date: None,
+                    people: vec![],
+                    issuer: None,
+                    folder: Some("Home".into()),
+                    owner: Some("Alex Example".into()),
+                    matter: None,
+                },
+            },
+        )
+        .unwrap();
+        conn.execute(
+            "CREATE TRIGGER refuse_bad_owner BEFORE UPDATE OF owner ON documents
+             WHEN NEW.owner = 'Bad' BEGIN SELECT RAISE(ABORT, 'owner refused'); END",
+            [],
+        )
+        .unwrap();
+        let pairs: [(Column, String, String); 2] = [
+            (Column::Folder, "Home".to_string(), "Garden".to_string()),
+            (Column::Owner, "Alex Example".to_string(), "Bad".to_string()),
+        ];
+        assert!(
+            rename(&mut conn, &pairs).is_err(),
+            "the trigger must fail the owner UPDATE"
+        );
+        let rows = all(&conn).unwrap();
+        assert_eq!(rows.first().unwrap().meta.folder, Some("Home".into()));
+        assert_eq!(
+            rows.first().unwrap().meta.owner,
+            Some("Alex Example".into())
+        );
     }
 
     #[test]

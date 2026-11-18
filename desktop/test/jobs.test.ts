@@ -72,3 +72,27 @@ test('apply waits while a save is running, and a save disarms an earlier preview
 	jobs.endSave();
 	assert.equal(jobs.tryBeginApply(), false, 'the preview predates the save');
 });
+
+// ---- step 3: add is single-flight with ask and apply (LLM + Qdrant concurrency 1) ----
+
+test('add excludes ask and apply, and vice versa', () => {
+	const j = new Jobs();
+	assert.equal(j.tryBeginAdd(), true);
+	assert.equal(j.tryBeginAsk(), false);
+	assert.equal(j.tryBeginApply(), false);
+	j.endAdd();
+	assert.equal(j.tryBeginAsk(), true);
+	j.endAsk();
+	// reads never gate
+	assert.equal(j.tryBeginAdd(), true);
+	j.endAdd();
+	assert.equal(j.getState().askBusy, false);
+});
+
+test('addReason: a running save blocks add (stale lists)', () => {
+	const j = new Jobs();
+	j.beginSave();
+	assert.equal(j.addReason(), 'a filing save is still running');
+	j.endSave();
+	assert.equal(j.addReason(), null);
+});

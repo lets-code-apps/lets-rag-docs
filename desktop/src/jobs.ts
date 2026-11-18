@@ -9,6 +9,7 @@ import type { OrganizeReport } from './reports.ts';
 
 export type JobState = {
 	askBusy: boolean;
+	addBusy: boolean;
 	applyBusy: boolean;
 	dryRunReady: boolean;
 	dryRunReport: OrganizeReport | null;
@@ -24,6 +25,7 @@ export function isApplicablePreview(report: OrganizeReport | null): boolean {
 export class Jobs {
 	private state: JobState = {
 		askBusy: false,
+		addBusy: false,
 		applyBusy: false,
 		dryRunReady: false,
 		dryRunReport: null,
@@ -37,13 +39,25 @@ export class Jobs {
 	}
 
 	tryBeginAsk(): boolean {
-		if (this.state.askBusy || this.state.applyBusy) return false;
+		if (this.state.askBusy || this.state.applyBusy || this.state.addBusy) return false;
 		this.state.askBusy = true;
 		return true;
 	}
 
 	endAsk(): void {
 		this.state.askBusy = false;
+	}
+
+	/** Adding runs OCR + one embedding per document through the local model, so it is single-flight
+	 * like ask and apply. */
+	tryBeginAdd(): boolean {
+		if (this.state.askBusy || this.state.applyBusy || this.state.addBusy) return false;
+		this.state.addBusy = true;
+		return true;
+	}
+
+	endAdd(): void {
+		this.state.addBusy = false;
 	}
 
 	tryBeginApply(): boolean {
@@ -89,10 +103,18 @@ export class Jobs {
 	}
 
 	applyReason(): string | null {
-		if (this.state.askBusy || this.state.applyBusy) return 'another long job is running';
+		if (this.state.askBusy || this.state.applyBusy || this.state.addBusy) return 'another long job is running';
 		if (this.state.saving > 0) return 'a filing save is still running';
 		if (!this.state.dryRunReady) return 'run a dry-run first';
 		if (this.state.saveSinceDryRun) return 'run a fresh dry-run after saving filing lists';
+		return null;
+	}
+
+	/** Why an add cannot start now: the LLM and Qdrant writes are single-flight, and a save
+	 * mid-flight would make the new row's folder lists stale. */
+	addReason(): string | null {
+		if (this.state.askBusy || this.state.applyBusy || this.state.addBusy) return 'another long job is running';
+		if (this.state.saving > 0) return 'a filing save is still running';
 		return null;
 	}
 }

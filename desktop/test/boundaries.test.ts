@@ -72,7 +72,8 @@ test('preload exposes the ipc channels', () => {
 test('every IPC handler checks senderFrame', () => {
 	const main = readFileSync(join(SRC, 'main.ts'), 'utf8');
 	const handles = main.split('ipcMain.handle(').slice(1);
-	assert.equal(handles.length, 9, 'all declared channels need handlers');
+	// 9 read/edit channels plus step 3's five: search, pickFiles, addNext, cancelAdd, openDocument.
+	assert.equal(handles.length, 14, 'all declared channels need handlers');
 	// The renderer reaches apply in one place only: the explicit "move N copies" button.
 	const page = readFileSync(join(RENDERER, 'app.js'), 'utf8');
 	assert.equal(page.split('api.resort(').length - 1, 1);

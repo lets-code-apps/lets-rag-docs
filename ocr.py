@@ -42,7 +42,16 @@ def pdf_text(path):
             return None  # Vision reads the rendered page, annotations included
         pages.append(page.get_textpage().get_text_range())
     if all(len(p.strip()) >= MIN_CHARS for p in pages):
-        return "\n\n".join(pages)
+        return mark_pages("\f".join(pages))
+
+
+def mark_pages(text):
+    """Turn page-separated text into text where every page starts with a \f marker.
+
+    Split on \f FIRST and trim inside each page: a blank page keeps its marker, so a
+    blank first or last page never shifts later page numbers.
+    """
+    return "".join("\f" + page.strip() for page in text.split("\f"))
 
 
 def vision(path):
@@ -57,7 +66,7 @@ def vision(path):
                 images.append(Path(tmp) / f"{i}.png")
                 page.render(scale=PDF_DPI / 72).to_pil().save(images[-1])
         out = subprocess.run([VISION_BIN, *images], check=True, capture_output=True, text=True).stdout
-    return out.strip().replace("\f", "\n\n")
+    return mark_pages(out)
 
 
 def main(folder, out_root=OUT, only=None):

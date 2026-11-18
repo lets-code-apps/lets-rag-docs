@@ -62,6 +62,7 @@ pub(crate) fn patch_file(
     text: String,
     folders: &[String],
     owners: &[String],
+    shared_owner: Option<&str>,
 ) -> anyhow::Result<(String, bool)> {
     let parsed = DeTable::parse(text.as_str())
         .context("the config file is not valid TOML: edit it by hand")?;
@@ -111,6 +112,7 @@ pub(crate) fn patch_file(
 
         let mut have_folders = false;
         let mut have_owners = false;
+        let mut have_shared = false;
 
         for (child_key, child_value) in classify_table.iter() {
             let child = child_key.get_ref().as_ref();
@@ -142,6 +144,20 @@ pub(crate) fn patch_file(
                     ));
                 }
                 edits.push((old_span.start, old_span.end, render(owners)));
+            } else if child == "shared_owner" {
+                have_shared = true;
+                let old_span = child_value.span();
+                let raw: String = text[old_span.start..old_span.end].to_string();
+                // A TOML string starts with a quote; anything else (a number, an array) is not
+                // ours to rewrite.
+                if !(raw.starts_with("\"") || raw.starts_with("'")) {
+                    return Err(anyhow!(
+                        "`shared_owner` is not a string: edit config.toml by hand"
+                    ));
+                }
+                if let Some(value) = shared_owner {
+                    edits.push((old_span.start, old_span.end, format!("\"{value}\"")));
+                }
             }
         }
 
@@ -151,6 +167,12 @@ pub(crate) fn patch_file(
         }
         if !have_owners {
             insert += format!("\nowners = {list}", list = render(owners)).as_str();
+        }
+        // The shared owner is inserted only when the draft actually renames it (the caller
+        // passes `Some` only for a name that differs from the effective one), and only where
+        // the key is absent. A key present with the same value needs no edit at all.
+        if let (Some(value), false) = (shared_owner, have_shared) {
+            insert += format!("\nshared_owner = \"{value}\"").as_str();
         }
         if !insert.is_empty() {
             edits.push((insert_at, insert_at, insert.to_string()));
@@ -163,8 +185,13 @@ pub(crate) fn patch_file(
         } else {
             "\n"
         };
+        let shared_line: String = if let Some(value) = shared_owner {
+            format!("shared_owner = \"{value}\"\n")
+        } else {
+            String::new()
+        };
         let section = format!(
-            "{sep}[classify]\nfolders = {f}\nowners = {o}\n",
+            "{sep}[classify]\nfolders = {f}\nowners = {o}\n{shared_line}",
             f = render(folders),
             o = render(owners),
         )
@@ -184,25 +211,35 @@ pub(crate) fn patch_file(
             "the rewritten config did not hold exactly the requested lists"
         ));
     }
+    match (shared_owner, result.classify.shared_owner) {
+        (Some(value), stored) if stored != value => {
+            return Err(anyhow!(
+                "the rewritten config did not hold exactly the requested shared owner"
+            ));
+        }
+        _ => {}
+    }
 
     let changed = new_text != text;
     Ok((new_text, changed))
 }
 
-/// Write the two lists to `path`, keeping comments and everything else byte-identical
-/// (via `patch_file`). Returns whether the bytes changed (`false`: already as asked,
-/// nothing written). A missing file is an empty base: the section is created.
+/// Write the two lists (and, when the draft renames it, the shared owner) to `path`, keeping
+/// comments and everything else byte-identical (via `patch_file`). Returns whether the bytes
+/// changed (`false`: already as asked, nothing written). A missing file is an empty base:
+/// the section is created.
 pub(crate) fn write_lists(
     path: &Path,
     folders: &[String],
     owners: &[String],
+    shared_owner: Option<&str>,
 ) -> anyhow::Result<bool> {
     let old: String = match std::fs::read_to_string(path.as_os_str()) {
         Ok(text) => text,
         Err(e) if e.kind() == ErrorKind::NotFound => "".to_string(),
         Err(e) => return Err(e).context(format!("cannot read {}", path.display()).to_string()),
     };
-    let (new, changed) = patch_file(old.to_string(), folders, owners)?;
+    let (new, changed) = patch_file(old.to_string(), folders, owners, shared_owner)?;
     if !changed {
         return Ok(false);
     }
@@ -284,7 +321,7 @@ mod tests {
         let before: String = "[qdrant]\ncollection = \"docs\" # keep me\n\n[classify]\n# folder comment\nfolders = [\"Old\",]\n".to_string();
         let folders: Vec<String> = vec!["New".to_string()];
         let owners: Vec<String> = vec![];
-        let (after, changed) = patch_file(before, &folders, &owners).unwrap();
+        let (after, changed) = patch_file(before, &folders, &owners, None).unwrap();
         assert!(changed);
         assert!(after.contains("collection = \"docs\" # keep me"));
         assert!(after.contains("# folder comment"));
@@ -298,7 +335,7 @@ mod tests {
         let before: String = "[classify]\n# hi\n".to_string();
         let folders: Vec<String> = vec!["One".to_string()];
         let owners: Vec<String> = vec!["Two".to_string()];
-        let (after, changed) = patch_file(before, &folders, &owners).unwrap();
+        let (after, changed) = patch_file(before, &folders, &owners, None).unwrap();
         assert!(changed);
         assert!(after.contains("# hi"));
         assert!(after.contains("folders = ["));
@@ -310,7 +347,7 @@ mod tests {
         let before: String = "# only comment\n".to_string();
         let folders: Vec<String> = vec!["One".to_string()];
         let owners: Vec<String> = vec!["Two".to_string()];
-        let (after, changed) = patch_file(before, &folders, &owners).unwrap();
+        let (after, changed) = patch_file(before, &folders, &owners, None).unwrap();
         assert!(changed);
         assert!(
             after.contains("\n[classify]\nfolders = [\n  \"One\",\n]\nowners = [\n  \"Two\",\n]\n")
@@ -322,13 +359,18 @@ mod tests {
         let y: Vec<String> = vec!["y".to_string()];
         let none: Vec<String> = vec![];
         assert!(
-            patch_file("classify = { folders = [\"x\"] }".to_string(), &y, &none)
-                .unwrap_err()
-                .to_string()
-                .contains("inline")
+            patch_file(
+                "classify = { folders = [\"x\"] }".to_string(),
+                &y,
+                &none,
+                None
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("inline")
         );
         assert!(
-            patch_file("classify.folders = [\"x\"]".to_string(), &y, &none)
+            patch_file("classify.folders = [\"x\"]".to_string(), &y, &none, None)
                 .unwrap_err()
                 .to_string()
                 .contains("dotted")
@@ -337,12 +379,67 @@ mod tests {
             patch_file(
                 "[classify]\nfolders = [\n  \"x\", # keep me\n]\n".to_string(),
                 &y,
-                &none
+                &none,
+                None,
             )
             .unwrap_err()
             .to_string()
             .contains("comment")
         );
+    }
+
+    #[test]
+    fn patch_replaces_shared_owner_span() {
+        let before: String = "[classify]\nshared_owner = \"Shared\"\n".to_string();
+        let folders: Vec<String> = vec!["One".to_string()];
+        let owners: Vec<String> = vec![];
+        let everyone: String = "Everyone".to_string();
+        let (after, changed) =
+            patch_file(before, &folders, &owners, Some(everyone.as_str())).unwrap();
+        assert!(changed);
+        assert!(after.contains("shared_owner = \"Everyone\""));
+        assert!(!after.contains("shared_owner = \"Shared\""));
+    }
+
+    #[test]
+    fn patch_inserts_shared_owner_under_classify() {
+        let before: String = "[classify]\nfolders = [\"One\"]\n".to_string();
+        let folders: Vec<String> = vec!["One".to_string()];
+        let owners: Vec<String> = vec![];
+        let everyone: String = "Everyone".to_string();
+        let (after, changed) =
+            patch_file(before, &folders, &owners, Some(everyone.as_str())).unwrap();
+        assert!(changed);
+        assert!(after.contains("shared_owner = \"Everyone\""));
+    }
+
+    #[test]
+    fn patch_refuses_a_shared_owner_that_is_not_a_string() {
+        let y: Vec<String> = vec!["y".to_string()];
+        let none: Vec<String> = vec![];
+        let everyone: String = "Everyone".to_string();
+        assert!(
+            patch_file(
+                "[classify]\nshared_owner = 7\n".to_string(),
+                &y,
+                &none,
+                Some(everyone.as_str())
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("shared_owner")
+        );
+    }
+
+    #[test]
+    fn patch_is_idempotent_for_shared_owner() {
+        let before: String =
+            "[classify]\nfolders = []\nowners = []\nshared_owner = \"Everyone\"\n".to_string();
+        let folders: Vec<String> = vec![];
+        let owners: Vec<String> = vec![];
+        let everyone: String = "Everyone".to_string();
+        let (_, changed) = patch_file(before, &folders, &owners, Some(everyone.as_str())).unwrap();
+        assert!(!changed);
     }
 
     #[test]
@@ -354,7 +451,7 @@ mod tests {
 
         let folders: Vec<String> = vec!["New".to_string()];
         let owners: Vec<String> = vec!["Alex Example".to_string()];
-        let changed = write_lists(&file, &folders, &owners).unwrap();
+        let changed = write_lists(&file, &folders, &owners, None).unwrap();
         assert!(changed);
 
         let after = fs::read_to_string(file.as_os_str()).unwrap();
@@ -377,11 +474,11 @@ mod tests {
         .unwrap();
         let folders: Vec<String> = vec!["One".to_string()];
         let owners: Vec<String> = vec!["Two".to_string()];
-        let first = write_lists(&file, &folders, &owners).unwrap();
+        let first = write_lists(&file, &folders, &owners, None).unwrap();
         assert!(first);
 
         let after_first = fs::read_to_string(file.as_os_str()).unwrap();
-        let second = write_lists(&file, &folders, &owners).unwrap();
+        let second = write_lists(&file, &folders, &owners, None).unwrap();
         assert!(!second);
         assert_eq!(fs::read_to_string(file.as_os_str()).unwrap(), after_first);
     }

@@ -78,12 +78,16 @@ async fn create(client: &Qdrant, collection: &str) -> Result<(), IndexError> {
 
 /// One chunk as a Qdrant point. Takes `text` and `embedding` by value: they move into the
 /// point instead of being copied. `meta` is the document's row from `classify`, if any.
+// The payload is a field list; passing the fields in order reads better than a wrapper struct
+// here, so the extra `page` argument is a deliberate exception.
+#[allow(clippy::too_many_arguments)]
 pub fn point(
     id: u64,
     text: String,
     source: &str,
     file: &str,
     chunk: usize,
+    page: Option<u32>,
     embedding: Embedding,
     meta: Option<&Meta>,
 ) -> PointStruct {
@@ -98,6 +102,11 @@ pub fn point(
     payload.insert("source", source);
     payload.insert("file", file);
     payload.insert("chunk", chunk as i64);
+    // The page within the document, only when the OCR text carries markers: old points keep
+    // their old payload, so MCP output for documents OCR'd before markers is unchanged.
+    if let Some(page) = page {
+        payload.insert("page", page as i64);
+    }
     if let Some(meta) = meta {
         payload.insert("type", meta.doc_type.as_str());
         if let Some(date) = &meta.date {
@@ -130,16 +139,29 @@ pub async fn document_points(
     meta: Option<&Meta>,
 ) -> Result<Vec<PointStruct>, EmbedError> {
     let source = chunk::source_name(file);
-    let parts = chunk::chunks(&text);
+    // Each chunk remembers the page it started on (`None` without OCR markers).
+    let parts = chunk::paged_chunks(&text);
     // The document's name fronts every chunk, so each chunk is findable by document name too.
-    let inputs: Vec<String> = parts.iter().map(|c| format!("{source}\n{c}")).collect();
+    let inputs: Vec<String> = parts
+        .iter()
+        .map(|(c, _page)| format!("{source}\n{c}"))
+        .collect();
     let embeddings = embed.embed(&inputs).await?;
     Ok(parts
         .into_iter()
         .zip(embeddings)
         .enumerate()
-        .map(|(n, (text, embedding))| {
-            point(point_id(file, n), text, &source, file, n, embedding, meta)
+        .map(|(n, ((part, page), embedding))| {
+            point(
+                point_id(file, n),
+                part,
+                &source,
+                file,
+                n,
+                page,
+                embedding,
+                meta,
+            )
         })
         .collect())
 }
@@ -209,9 +231,16 @@ pub async fn query(
                 text: take_string(&mut hit.payload, "text")?,
                 source: take_string(&mut hit.payload, "source")?,
                 file: take_string(&mut hit.payload, "file")?,
-                chunk: match hit.payload.get("chunk").and_then(|v| v.kind.as_ref()) {
-                    Some(Kind::IntegerValue(n)) => *n,
+                chunk: match hit.payload.remove("chunk").and_then(|v| v.kind) {
+                    Some(Kind::IntegerValue(n)) => n,
                     _ => return Err(IndexError::Payload("chunk")),
+                },
+                // Optional: a point written before page markers existed has no `page`,
+                // and that is data (`None`), not a broken payload.
+                page: match hit.payload.remove("page").and_then(|v| v.kind) {
+                    None => None,
+                    Some(Kind::IntegerValue(n)) => Some(n),
+                    _ => return Err(IndexError::Payload("page")),
                 },
                 score: hit.score,
             })
@@ -322,6 +351,7 @@ mod tests {
             "x",
             &file,
             0,
+            None,
             Embedding {
                 dense: vec![0.0],
                 sparse: Sparse {
@@ -367,6 +397,7 @@ mod tests {
                 "src",
                 &one,
                 0,
+                None,
                 embedding.clone(),
                 None,
             ),
@@ -376,6 +407,7 @@ mod tests {
                 "src",
                 &one,
                 1,
+                None,
                 embedding.clone(),
                 None,
             ),
@@ -385,6 +417,7 @@ mod tests {
                 "src",
                 &two,
                 0,
+                None,
                 embedding,
                 None,
             ),
@@ -456,7 +489,7 @@ mod tests {
         server
     }
 
-    fn payload_keys(meta: Option<&Meta>) -> Vec<String> {
+    fn payload_keys(page: Option<u32>, meta: Option<&Meta>) -> Vec<String> {
         let embedding = Embedding {
             dense: vec![0.0],
             sparse: Sparse {
@@ -464,7 +497,7 @@ mod tests {
                 values: vec![],
             },
         };
-        let p = point(0, "t".into(), "s", "f", 0, embedding, meta);
+        let p = point(0, "t".into(), "s", "f", 0, page, embedding, meta);
         let mut keys: Vec<String> = p.payload.into_keys().collect();
         keys.sort();
         keys
@@ -472,7 +505,10 @@ mod tests {
 
     #[test]
     fn payload_gets_type_and_known_date() {
-        assert_eq!(payload_keys(None), ["chunk", "file", "source", "text"]);
+        assert_eq!(
+            payload_keys(None, None),
+            ["chunk", "file", "source", "text"]
+        );
         let mut meta = Meta {
             title: None,
             doc_type: "invoice".into(),
@@ -484,13 +520,28 @@ mod tests {
             matter: None,
         };
         assert_eq!(
-            payload_keys(Some(&meta)),
+            payload_keys(None, Some(&meta)),
             ["chunk", "date", "file", "source", "text", "type"]
         );
         meta.date = None;
         assert_eq!(
-            payload_keys(Some(&meta)),
+            payload_keys(None, Some(&meta)),
             ["chunk", "file", "source", "text", "type"]
+        );
+    }
+
+    #[test]
+    fn payload_gets_page_only_when_known() {
+        // A point from a marker-less (old) OCR file keeps its old payload exactly: no `page`
+        // key at all, so anything reading old points sees no change.
+        assert_eq!(
+            payload_keys(None, None),
+            ["chunk", "file", "source", "text"]
+        );
+        // Once the OCR text carries markers, the page rides along.
+        assert_eq!(
+            payload_keys(Some(4), None),
+            ["chunk", "file", "page", "source", "text"]
         );
     }
 

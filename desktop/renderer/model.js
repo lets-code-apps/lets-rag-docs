@@ -8,6 +8,12 @@ export function docsLabel(n) {
   return n === 1 ? '1 document' : `${n} documents`;
 }
 
+/** "1 page", "n pages"; unknown (null) or zero prints nothing. */
+export function pagesLabel(n) {
+  if (!n) return '';
+  return n === 1 ? '1 page' : `${n} pages`;
+}
+
 export function basename(path) {
   const parts = String(path).split('/');
   return parts[parts.length - 1];
@@ -42,6 +48,20 @@ export function initials(name) {
   return String(name).slice(0, 2).toUpperCase() || '?';
 }
 
+/** The design's byte size: decimal units, one decimal only under 10. */
+export function formatBytes(bytes) {
+  if (bytes === null || bytes === undefined) return '';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1000 && unit < units.length - 1) {
+    value /= 1000;
+    unit += 1;
+  }
+  const shown = unit === 0 ? String(Math.round(value)) : (value < 10 ? value.toFixed(1) : String(Math.round(value)));
+  return `${shown} ${units[unit]}`;
+}
+
 export function monthOf(date) {
   const m = /^\d{4}-(\d{2})/.exec(date ?? '');
   if (!m) return '';
@@ -60,10 +80,16 @@ export function libraryRows(documents, sources = []) {
     key: doc.path,
     initials: fileType(doc.path),
     title: basename(doc.path),
-    preview: [doc.title ?? 'no title yet', doc.owner].filter(Boolean).join(' · '),
+    // The design's row meta: title, owner, pages and the size that made it skippable.
+    preview: [doc.title ?? 'no title yet', doc.owner, pagesLabel(doc.pages), formatBytes(doc.bytes)].filter(Boolean).join(' · '),
     time: monthOf(doc.date),
     cited: isCited(doc, sources),
+    overLimit: doc.skipped === 'over_limit',
   }));
+}
+
+export function overLimitLabel(maxFileMb) {
+  return maxFileMb === null || maxFileMb === undefined ? 'not indexed' : `not indexed: over ${Math.round(maxFileMb)} MB`;
 }
 
 export function libraryMeta(report) {
@@ -84,9 +110,27 @@ export function libraryNotice(report) {
 export function citations(sources) {
   const seen = new Map();
   for (const s of sources) {
-    if (!seen.has(s.source)) seen.set(s.source, s.chunk);
+    if (!seen.has(s.source)) seen.set(s.source, s);
   }
-  return [...seen.entries()].map(([source, chunk], i) => `[${i + 1}] ${basename(source)}, chunk ${chunk}`);
+  // The design cites the page within the document when the OCR text carries markers; old
+  // documents without markers keep the chunk number.
+  return [...seen.values()].map((s, i) => `[${i + 1}] ${basename(withoutExtensions(s.source))}${s.page !== null && s.page !== undefined ? `, p. ${s.page}` : `, chunk ${s.chunk}`}`);
+}
+
+/** The documents to offer under the answer: distinct cited ones that are in the library, ranked
+ * order, at most 3. The page opens them by their library path — the engine resolves the file. */
+export function openTargets(documents, sources) {
+  const bySource = new Map();
+  for (const s of sources) {
+    if (!bySource.has(s.source)) bySource.set(s.source, s);
+  }
+  const targets = [];
+  for (const s of bySource.values()) {
+    const doc = documents.find((d) => isCited(d, [s]));
+    if (doc) targets.push({ path: doc.path, label: `open ${basename(withoutExtensions(doc.path))}` });
+    if (targets.length === 3) break;
+  }
+  return targets;
 }
 
 export function answerLabel(sources) {
@@ -95,6 +139,29 @@ export function answerLabel(sources) {
 }
 
 export const NO_ANSWER = 'Nothing in your documents matches that question. Try other words, or check that the documents are ingested.';
+
+// ---- add progress ----
+
+/** One listRow per picked file: waiting -> adding… -> added (type) / already added / failed. */
+export function addRows(picked, results) {
+  return picked.map((name, i) => {
+    const r = results[i];
+    if (r === undefined || r.state === 'waiting') return { key: name, title: name, initials: fileType(name), preview: 'waiting', pill: '', tone: 'neutral' };
+    if (r.state === 'adding') return { key: name, title: name, initials: fileType(name), preview: 'adding…', pill: '', tone: 'attention' };
+    if (r.state === 'added') return { key: name, title: name, initials: fileType(name), preview: `added (${r.type})`, pill: '', tone: 'positive' };
+    if (r.state === 'duplicate') return { key: name, title: name, initials: fileType(name), preview: 'already added', pill: '', tone: 'neutral' };
+    if (r.state === 'cancelled') return { key: name, title: name, initials: fileType(name), preview: 'cancelled', pill: '', tone: 'neutral' };
+    return { key: name, title: name, initials: fileType(name), preview: `failed: ${r.error}`, pill: '', tone: 'danger' };
+  });
+}
+
+/** "2 of 3" while adding, "cancelled" after a cancel, "done" when the last row finished. */
+export function addMeta(results, cancelled) {
+  if (cancelled) return 'cancelled';
+  if (results.length === 0) return '';
+  const done = results.filter((r) => r.state !== 'adding' && r.state !== 'waiting').length;
+  return done === results.length ? 'done' : `${done} of ${results.length}`;
+}
 
 // ---- filing ----
 
@@ -119,22 +186,12 @@ export function rowPill(changes, list, name) {
   return '';
 }
 
-/** The stored name a listed name still has on documents: a rename keeps the old one until re-classified. */
-function storedName(changes, list, name) {
-  let current = name;
-  for (let i = changes.length - 1; i >= 0; i--) {
-    const c = changes[i];
-    if (c.list === list && c.kind === 'rename' && c.to === current) current = c.from;
-  }
-  return current;
-}
-
 export function filingRows(view, saved, documents, changes, selected) {
   const list = view === 'folders' ? saved.folders : saved.owners;
   const key = view === 'folders' ? 'folder' : 'owner';
   const counts = countBy(documents, key);
-  // Counts are what the documents say today. A renamed folder starts at 0: its documents keep the
-  // old name (and file under unsorted / the shared owner) until the model re-reads them.
+  // Counts are what the documents say today; after a save the engine has already re-filed the
+  // renamed rows, so a rename shows its documents right away.
   const listed = new Set(list);
   const rows = list.map((name, index) => ({
     kind: 'item',
@@ -189,8 +246,7 @@ function exampleDoc(documents, key, stored) {
  */
 export function examplePath(view, saved, documents, changes, focus) {
   const key = view === 'folders' ? 'folder' : 'owner';
-  const stored = focus.original === null ? null : storedName(changes, view, focus.original);
-  const doc = exampleDoc(documents, key, stored);
+  const doc = exampleDoc(documents, key, focus.original);
   const [folder, owner, year, file] = doc
     ? doc.filed_as.split('/')
     : [saved.folders[0] ?? 'Other', saved.shared_owner, String(new Date().getFullYear()), 'date, matter - title.pdf'];
@@ -205,18 +261,32 @@ export function examplePath(view, saved, documents, changes, focus) {
   return levels.map(([cap, val], i) => ({ cap: cap || ' ', val, on: cap === (view === 'folders' ? 'folder' : 'owner'), sep: i < levels.length - 1 ? ' /' : '' }));
 }
 
-/** The lists to send to `filing save` for one edit. `shared_owner` is never part of a draft. */
+/**
+ * The lists to send to `filing save` for one edit. A rename also carries `renames` so the engine
+ * re-files the stored copies (and updates the DB rows) instead of stranding them; editing the
+ * shared owner sends `shared_owner`. The save report comes back with the applied lists.
+ */
 export function draftFor(saved, view, op) {
   const folders = [...saved.folders];
   const owners = [...saved.owners];
-  const list = view === 'folders' ? folders : owners;
-  if (op.kind === 'rename') list[op.index] = op.name.trim();
-  else if (op.kind === 'add') list.push(op.name.trim());
-  else if (op.kind === 'remove') list.splice(op.index, 1);
-  return { folders, owners };
+  const draft = { folders, owners };
+  if (op.kind === 'rename') {
+    const list = view === 'folders' ? folders : owners;
+    const from = list[op.index];
+    list[op.index] = op.name.trim();
+    draft.renames = [{ list: view, from, to: op.name.trim() }];
+  } else if (op.kind === 'add') {
+    (view === 'folders' ? folders : owners).push(op.name.trim());
+  } else if (op.kind === 'remove') {
+    (view === 'folders' ? folders : owners).splice(op.index, 1);
+  } else if (op.kind === 'shared') {
+    draft.shared_owner = op.name.trim();
+  }
+  return draft;
 }
 
-/** Where in the edited list the changed name sits, to match the engine's `{list, index}` errors. */
+/** Where in the edited list the changed name sits, to match the engine's `{list, index}` errors.
+ * The shared owner reports `list: "shared_owner"` with no index, so null matches it. */
 export function editedIndex(saved, view, op) {
   if (op.kind === 'rename') return op.index;
   if (op.kind === 'add') return (view === 'folders' ? saved.folders : saved.owners).length;
@@ -252,12 +322,24 @@ function listWord(list) {
 export function changeSummary(changes) {
   const parts = changes.map((c) => {
     if (c.kind === 'rename') return `renamed ${c.from} to ${c.to}`;
+    if (c.kind === 'shared') return `set the shared owner to ${c.name}`;
     if (c.kind === 'add') return `added the ${listWord(c.list)} ${c.name}`;
     return `removed the ${listWord(c.list)} ${c.name}`;
   });
   if (parts.length === 0) return '';
   const joined = parts.length === 1 ? parts[0] : `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`;
   return `You ${joined}.`;
+}
+
+/** One sentence about what a re-sort does with this session's changes. Renames re-file: the
+ * engine moved the stored copies when the lists were saved. Only removals need the old warning. */
+export function resortNote(changes) {
+  const renames = changes.some((c) => c.kind === 'rename');
+  const removals = changes.some((c) => c.kind === 'remove');
+  if (renames && removals) return 'Documents keep a renamed name, so re-sorting moves their copies to the new folder; removing a folder sends its documents to unsorted (or the shared owner) until “lets-rag-docs classify --force”.';
+  if (renames) return 'Documents keep a renamed name, so re-sorting moves their copies to the new folder.';
+  if (removals) return 'Documents of a removed folder go to unsorted (or the shared owner) until `classify --force` gives them a new folder.';
+  return '';
 }
 
 export function moveCount(report) {
