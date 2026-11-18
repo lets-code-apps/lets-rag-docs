@@ -7,18 +7,75 @@ import { test } from 'node:test';
 import * as m from '../renderer/model.js';
 
 const docs = [
-  { path: 'scans/2025-03-14-car-loan.pdf', title: 'Car loan - Repayment schedule', type: 'contract', date: '2025-03-14', folder: 'Finance', owner: 'Alex Example', filed_as: 'Finance/Alex Example/2025/2025-03-14 Car loan - Repayment schedule.pdf' },
-  { path: 'scans/2025-05-09-tyre-change.pdf', title: 'Tyre change - Invoice', type: 'invoice', date: '2025-05-09', folder: 'Car', owner: 'Sam Example', filed_as: 'Car/Sam Example/2025/2025-05-09 Tyre change - Invoice.pdf' },
-  { path: 'notes/kickoff-notes.md', title: null, type: 'notes', date: null, folder: null, owner: null, filed_as: null },
+  { path: 'scans/2025-03-14-car-loan.pdf', title: 'Car loan - Repayment schedule', type: 'contract', date: '2025-03-14', folder: 'Finance', owner: 'Alex Example', filed_as: 'Finance/Alex Example/2025/2025-03-14 Car loan - Repayment schedule.pdf', bytes: 100_352, pages: 2, skipped: null },
+  { path: 'scans/2025-05-09-tyre-change.pdf', title: 'Tyre change - Invoice', type: 'invoice', date: '2025-05-09', folder: 'Car', owner: 'Sam Example', filed_as: 'Car/Sam Example/2025/2025-05-09 Tyre change - Invoice.pdf', bytes: 5_400_000, pages: null, skipped: null },
+  { path: 'notes/kickoff-notes.md', title: null, type: 'notes', date: null, folder: null, owner: null, filed_as: null, bytes: null, pages: null, skipped: null },
 ];
+const big = { path: 'big-scan.pdf', title: null, type: 'unsorted', date: null, folder: null, owner: null, filed_as: null, bytes: 64_000_000, pages: null, skipped: 'over_limit' };
 const saved = { version: 1, folders: ['Finance', 'Car', 'Other'], owners: ['Alex Example', 'Sam Example'], shared_owner: 'Shared' };
 
 test('library rows: file name, type, month, and an untitled document still listed', () => {
   const rows = m.libraryRows(docs, []);
   assert.equal(rows.length, 3);
   assert.deepEqual([rows[0].title, rows[0].initials, rows[0].time], ['2025-03-14-car-loan.pdf', 'PDF', 'mar']);
-  assert.equal(rows[0].preview, 'Car loan - Repayment schedule · Alex Example');
+  assert.equal(rows[0].preview, 'Car loan - Repayment schedule · Alex Example · 2 pages · 100 KB');
   assert.deepEqual([rows[2].initials, rows[2].preview, rows[2].time], ['MD', 'no title yet', '']);
+});
+
+test('sizes are decimal and the over-limit row carries its reason', () => {
+  assert.equal(m.formatBytes(6), '6 B');
+  assert.equal(m.formatBytes(100_352), '100 KB');
+  assert.equal(m.formatBytes(5_400_000), '5.4 MB');
+  assert.equal(m.formatBytes(1_500_000_000), '1.5 GB');
+  assert.equal(m.formatBytes(null), '');
+  const rows = m.libraryRows([...docs, big], []);
+  assert.equal(rows[3].overLimit, true);
+  assert.equal(m.overLimitLabel(50), 'not indexed: over 50 MB');
+  assert.equal(m.overLimitLabel(null), 'not indexed');
+  // an engine without the size limit: unknown, not a fake 50
+  assert.equal(m.overLimitLabel(null), 'not indexed');
+});
+
+test('citations show the page when the first passage has one', () => {
+  const paged = [{ source: 'scans/a.pdf.vision.txt', file: 'x', chunk: 2, page: 4, score: 0.9 }];
+  // The engine names the passage by its stem; the page beats the chunk number.
+  assert.deepEqual(m.citations(paged), ['[1] a, p. 4']);
+  const unmarked = [{ source: 'scans/b', file: 'y', chunk: 1, score: 0.5 }];
+  assert.deepEqual(m.citations(unmarked), ['[1] b, chunk 1']);
+});
+
+test('add progress: one row per picked file and a 2-of-3 count', () => {
+  const picked = ['loan.pdf', 'loan-dup.pdf', 'broken.pdf'];
+  const results = [{ state: 'added', type: 'contract' }, { state: 'duplicate' }, { state: 'failed', error: 'no text found' }];
+  const rows = m.addRows(picked, results);
+  assert.deepEqual(rows.map((r) => r.preview), ['added (contract)', 'already added', 'failed: no text found']);
+  assert.equal(m.addMeta(results, false), 'done');
+  const waiting = m.addRows(picked, picked.map(() => ({ state: 'waiting' })));
+  assert.deepEqual(waiting.map((r) => r.preview), ['waiting', 'waiting', 'waiting']);
+  assert.equal(m.addMeta([{ state: 'added' }, { state: 'adding' }, { state: 'waiting' }], false), '1 of 3');
+  assert.equal(m.addMeta([], true), 'cancelled');
+});
+
+test('open buttons name cited library documents, ranked order, at most 3', () => {
+  const sources = [
+    { source: 'notes/kickoff-notes', file: 'n.txt', chunk: 0, score: 0.9 },
+    { source: 'scans/2025-03-14-car-loan', file: 'c.txt', chunk: 1, score: 0.8 },
+    { source: 'ghost', file: 'g.txt', chunk: 0, score: 0.7 },
+    { source: 'scans/2025-05-09-tyre-change', file: 't.txt', chunk: 0, score: 0.6 },
+  ];
+  assert.deepEqual(m.openTargets(docs, sources).map((t) => t.path), [
+    'notes/kickoff-notes.md',
+    'scans/2025-03-14-car-loan.pdf',
+    'scans/2025-05-09-tyre-change.pdf',
+  ]);
+  assert.equal(m.openTargets(docs, sources)[0].label, 'open kickoff-notes');
+});
+
+test('the re-sort notice says renames re-file; removals still warn', () => {
+  assert.equal(m.resortNote([{ kind: 'rename', list: 'folders', from: 'Car', to: 'Vehicles' }]),
+    'Documents keep a renamed name, so re-sorting moves their copies to the new folder.');
+  assert.match(m.resortNote([{ kind: 'remove', list: 'folders', name: 'Car' }]), /until `classify --force`/);
+  assert.equal(m.resortNote([{ kind: 'add', list: 'folders', name: 'Taxes' }]), '');
 });
 
 test('a cited document is marked by the engine source name or OCR file', () => {
@@ -51,7 +108,7 @@ test('folder rows count documents, end with unsorted, and mark this session\'s c
   const rows = m.filingRows('folders', after, docs, changes, { kind: 'item', index: 0 });
   assert.deepEqual(rows.map((r) => [r.title, r.time, r.pill]), [
     ['Finance', '1 document', ''],
-    ['Vehicles', '0 documents', 'was Car'], // documents keep "Car" until re-classified
+    ['Vehicles', '0 documents', 'was Car'], // these docs still say "Car"; the engine re-files on save
     ['Other', '0 documents', ''],
     ['Taxes', '0 documents', 'new'],
     ['unsorted', '2 documents', ''],
@@ -84,11 +141,23 @@ test('with no filed copy the example names the levels instead of inventing a doc
   assert.equal(levels[2].val, 'Shared');
 });
 
-test('drafts change exactly one list and never carry the shared owner', () => {
-  assert.deepEqual(m.draftFor(saved, 'folders', { kind: 'rename', index: 1, name: ' Vehicles ' }), { folders: ['Finance', 'Vehicles', 'Other'], owners: saved.owners });
+test('drafts: renames re-file, the shared owner is an editable op', () => {
+  assert.deepEqual(m.draftFor(saved, 'folders', { kind: 'rename', index: 1, name: ' Vehicles ' }), {
+    folders: ['Finance', 'Vehicles', 'Other'],
+    owners: saved.owners,
+    renames: [{ list: 'folders', from: 'Car', to: 'Vehicles' }],
+  });
+  assert.deepEqual(m.draftFor(saved, 'owners', { kind: 'rename', index: 0, name: 'Alex Exampleson' }).renames,
+    [{ list: 'owners', from: 'Alex Example', to: 'Alex Exampleson' }]);
+  assert.deepEqual(m.draftFor(saved, 'owners', { kind: 'shared', name: ' Household ' }), {
+    folders: saved.folders,
+    owners: saved.owners,
+    shared_owner: 'Household',
+  });
   assert.deepEqual(m.draftFor(saved, 'owners', { kind: 'add', name: 'Example Studio' }).owners, ['Alex Example', 'Sam Example', 'Example Studio']);
   assert.deepEqual(m.draftFor(saved, 'folders', { kind: 'remove', index: 0 }).folders, ['Car', 'Other']);
   assert.equal('shared_owner' in m.draftFor(saved, 'folders', { kind: 'remove', index: 0 }), false);
+  assert.equal('renames' in m.draftFor(saved, 'folders', { kind: 'add', name: 'Taxes' }), false);
   assert.equal(m.editedIndex(saved, 'owners', { kind: 'add', name: 'x' }), 2);
   assert.deepEqual(saved.folders, ['Finance', 'Car', 'Other'], 'the saved lists are not mutated');
 });
@@ -105,6 +174,7 @@ test('engine validation issues read like the design', () => {
 
 test('change summary and the dry-run as "what will move" rows', () => {
   const changes = [{ kind: 'rename', list: 'folders', from: 'Car', to: 'Vehicles' }, { kind: 'add', list: 'owners', name: 'Example Studio' }];
+  assert.equal(m.changeSummary([...changes, { kind: 'shared', list: 'shared_owner', from: 'Shared', name: 'Household' }]), 'You renamed Car to Vehicles, added the owner Example Studio and set the shared owner to Household.');
   assert.equal(m.changeSummary(changes), 'You renamed Car to Vehicles and added the owner Example Studio.');
   const report = {
     version: 1, mode: 'dry_run', status: 'ok',

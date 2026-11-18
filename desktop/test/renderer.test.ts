@@ -37,6 +37,21 @@ test('the ask form sits at the bottom of the conversation, the AppBar holds only
 	assert.ok(conversation.includes('id="askInput"'));
 });
 
+test('the library pane carries search, add and open', () => {
+	const html = readFileSync(join(RENDERER, 'index.html'), 'utf8');
+	// plus button by the heading, labelled for screen readers
+	assert.ok(html.includes('<button id="addDocsButton" type="button" class="btn icon-only" aria-label="add documents">'));
+	// the search field uses the design's field styles and type=search
+	assert.match(html, /<input id="librarySearch" type="search"/);
+	// the arrow glyph for opening documents, sized like every other inline icon
+	assert.ok(html.includes('<symbol id="i-arrow-up-right" viewBox="0 0 24 24"><path d="M7 17 17 7M8 7h9v9"></path></symbol>'));
+	const js = readFileSync(join(RENDERER, 'app.js'), 'utf8');
+	assert.ok(js.includes("icon('arrow-up-right', 18)"), 'open buttons need the arrow glyph');
+	assert.ok(js.includes('api.openDocument('), 'open goes through main');
+	assert.ok(js.includes('api.pickFiles(') && js.includes('api.addNext(') && js.includes('api.cancelAdd('), 'the add queue is driven from main');
+	assert.ok(js.includes('api.search('), 'search goes through main');
+});
+
 test('the page has no demo or sample mode', () => {
 	const js = readFileSync(join(RENDERER, 'app.js'), 'utf8') + readFileSync(join(RENDERER, 'model.js'), 'utf8');
 	for (const token of ['demo', 'SAMPLE', 'location.hash', 'Acme']) assert.equal(js.includes(token), false, token);
@@ -44,7 +59,7 @@ test('the page has no demo or sample mode', () => {
 
 test('renderer has the design surfaces needed for ask and filing', () => {
 	const html = readFileSync(join(RENDERER, 'index.html'), 'utf8');
-	for (const id of ['appBar', 'appTitle', 'askForm', 'askInput', 'askButton', 'libraryRows', 'conversationPane', 'citations', 'filingScreen', 'listPane', 'addButton', 'detailPane', 'viewSwitch', 'filingRows', 'pathTokens', 'noticeCard', 'noticePill', 'resortButton', 'movesSection', 'applyButton', 'showAllButton', 'laterButton', 'nameInput', 'nameHelper', 'saveButton', 'removeButton', 'settingsScreen', 'appearance', 'loginSwitch']) {
+	for (const id of ['appBar', 'appTitle', 'askForm', 'askInput', 'askButton', 'libraryRows', 'conversationPane', 'citations', 'filingScreen', 'listPane', 'addButton', 'addDocsButton', 'librarySearch', 'addPanel', 'addRows', 'addCancel', 'addMeta', 'openDocs', 'openError', 'detailPane', 'viewSwitch', 'filingRows', 'pathTokens', 'noticeCard', 'noticePill', 'resortButton', 'movesSection', 'applyButton', 'showAllButton', 'laterButton', 'nameInput', 'nameHelper', 'saveButton', 'removeButton', 'settingsScreen', 'appearance', 'loginSwitch']) {
 		assert.ok(html.includes(`id="${id}"`), `renderer missing #${id}`);
 	}
 });

@@ -33,6 +33,9 @@ const state = {
     showAll: false,
     applied: null,
   },
+  search: { query: '', seq: 0, hits: null, error: null },
+  add: { picked: [], results: [], running: false, cancelled: false },
+  open: { error: null },
   settings: { appearance: 'system', openAtLogin: false },
 };
 
@@ -147,18 +150,36 @@ function renderAsk() {
   const sources = a.report?.sources ?? [];
 
   // library
-  $('libraryMeta').textContent = state.docs ? m.libraryMeta(state.docs) : '';
+  const searching = state.search.query !== '' && state.search.hits !== null;
+  const allDocs = state.docs?.documents ?? [];
+  const shown = searching ? allDocs.filter((doc) => m.isCited(doc, state.search.hits)) : allDocs;
+  if (searching) {
+    $('libraryMeta').textContent = `${shown.length} of ${m.docsLabel(allDocs.length)}`;
+  } else {
+    $('libraryMeta').textContent = state.docs ? m.libraryMeta(state.docs) : '';
+  }
   const rows = $('libraryRows');
   rows.replaceChildren();
   if (state.docsError) {
     rows.append(el('p', 'empty error', state.docsError));
+  } else if (state.search.error) {
+    rows.append(el('p', 'empty error', state.search.error));
   } else if (state.docs) {
-    const notice = m.libraryNotice(state.docs);
+    const notice = searching ? null : m.libraryNotice(state.docs);
     if (notice) rows.append(el('p', 'empty', notice));
-    for (const row of m.libraryRows(state.docs.documents, sources)) {
-      rows.append(listRow({ ...row, selected: row.cited, pill: row.cited ? 'cited' : '', tone: 'positive' }, null));
+    if (searching && shown.length === 0) rows.append(el('p', 'empty', `no match for “${state.search.query}” in the library.`));
+    const maxMb = state.docs.max_file_mb;
+    for (const row of m.libraryRows(shown, sources)) {
+      const pillText = row.cited ? 'cited' : row.overLimit ? m.overLimitLabel(maxMb) : '';
+      rows.append(listRow({
+        ...row,
+        selected: row.cited,
+        pill: pillText,
+        tone: row.cited ? 'positive' : row.overLimit ? 'danger' : 'neutral',
+      }, null));
     }
   }
+  renderAddPanel();
 
   // conversation
   const asked = a.question !== '';
@@ -177,10 +198,38 @@ function renderAsk() {
     $('answerLabelText').textContent = has ? m.answerLabel(sources) : '';
     $('answerText').textContent = has ? report.answer : m.NO_ANSWER;
     $('citations').replaceChildren(...m.citations(sources).map((label) => pill(label, 'neutral')));
+    // One button per cited document that is in the library (max 3): opening asks main,
+    // which resolves the path through the engine. The renderer only names the document.
+    const targets = report.answer !== null ? m.openTargets(state.docs?.documents ?? [], sources) : [];
+    $('openDocs').replaceChildren(...targets.map((target) => {
+      const button = el('button', 'btn secondary');
+      button.type = 'button';
+      button.append(icon('arrow-up-right', 18), el('span', '', target.label));
+      button.addEventListener('click', () => void openDoc(target.path));
+      return button;
+    }));
     $('copyAnswer').hidden = !has;
     $('copyAnswerLabel').textContent = a.copied ? 'copied' : 'copy answer';
   }
-  $('askButton').disabled = a.busy;
+  $('askButton').disabled = a.busy || state.add.running;
+  $('openError').hidden = state.open.error === null;
+  $('openError').textContent = state.open.error ?? '';
+}
+
+function renderAddPanel() {
+  const add = state.add;
+  const panel = $('addPanel');
+  panel.hidden = add.picked.length === 0;
+  if (panel.hidden) return;
+  $('addMeta').textContent = m.addMeta(add.results, add.cancelled);
+  $('addCancel').hidden = !add.running;
+  $('addRows').replaceChildren(...m.addRows(add.picked, add.results).map((row) => listRow(row, null)));
+}
+
+async function openDoc(path) {
+  const res = await track(api.openDocument(path));
+  state.open.error = res && res.ok ? null : (res?.error ?? 'Could not open this document.');
+  render();
 }
 
 async function ask(event) {
@@ -197,7 +246,41 @@ async function ask(event) {
   } else if (state.ask.cancelled) {
     state.ask.error = 'Stopped. Ask again when you are ready.';
   } else {
-    state.ask.error = res?.error === 'busy' ? 'The model is busy with another job. Try again in a moment.' : (res?.error ?? 'The engine did not answer.');
+    state.ask.error = res?.error === 'busy' || res?.error === 'another long job is running'
+      ? 'The model is busy with another job. Try again in a moment.'
+      : (res?.error ?? 'The engine did not answer.');
+  }
+  render();
+}
+
+let searchTimer = null;
+
+/** Library search: debounce 400 ms, needs 2 characters, and a sequence number so a reply that
+ * arrives after a newer query (or a cleared box) is dropped instead of flickering back. */
+function onSearchChange() {
+  const query = $('librarySearch').value.trim();
+  clearTimeout(searchTimer);
+  state.search.seq += 1;
+  state.search.query = query;
+  state.search.hits = null;
+  state.search.error = null;
+  if (query.length >= 2) {
+    searchTimer = setTimeout(() => {
+      void runSearch(query, state.search.seq);
+    }, 400);
+  }
+  render();
+}
+
+async function runSearch(query, seq) {
+  const res = await track(api.search(query));
+  if (seq !== state.search.seq) return; // the box moved on
+  if (res && res.ok) {
+    state.search.hits = res.report.passages;
+    state.search.error = null;
+  } else {
+    state.search.hits = null;
+    state.search.error = res?.error ?? 'Search failed: the engine did not answer.';
   }
   render();
 }
@@ -205,6 +288,41 @@ async function ask(event) {
 async function cancelAsk() {
   state.ask.cancelled = true;
   await track(api.cancelAsk());
+}
+
+async function addDocs() {
+  if (state.add.running) return;
+  const picked = await track(api.pickFiles());
+  if (!picked || !picked.ok || picked.count === 0) return;
+  state.add = { picked: picked.names, results: picked.names.map(() => ({ state: 'waiting' })), running: true, cancelled: false };
+  render();
+  // One add at a time; ask/apply refuse while this runs (the page says so through the same gate).
+  while (!state.add.cancelled) {
+    const index = state.add.results.findIndex((r) => r.state === 'waiting');
+    if (index < 0) break;
+    state.add.results[index] = { state: 'adding' };
+    render();
+    const res = await track(api.addNext());
+    const ok = res && res.ok;
+    if (!ok) state.add.results[index] = { state: 'failed', error: res?.error ?? 'the engine did not answer' };
+    else if (res.outcome === 'duplicate') state.add.results[index] = { state: 'duplicate' };
+    else if (res.outcome === 'failed') state.add.results[index] = { state: 'failed', error: res.error ?? 'the engine failed' };
+    else {
+      state.add.results[index] = { state: 'added', type: res.report?.type ?? 'document' };
+      void loadDocs();
+    }
+    if (ok && res.done) break;
+  }
+  state.add.running = false;
+  render();
+}
+
+async function cancelAdd() {
+  if (!state.add.running) return;
+  state.add.cancelled = true;
+  state.add.results = state.add.results.map((r) => (r.state === 'waiting' || r.state === 'adding' ? { state: 'cancelled' } : r));
+  await track(api.cancelAdd());
+  render();
 }
 
 async function copyAnswer() {
@@ -278,6 +396,7 @@ function currentOp() {
   if (!sel || name === '') return null;
   if (sel.kind === 'item') return name === currentList()[sel.index] ? null : { kind: 'rename', index: sel.index, name };
   if (sel.kind === 'add') return { kind: 'add', name };
+  if (sel.kind === 'shared') return name === f().saved.shared_owner ? null : { kind: 'shared', name };
   return null;
 }
 
@@ -285,14 +404,19 @@ function changeFor(op) {
   const list = f().view;
   if (op.kind === 'rename') return { kind: 'rename', list, from: currentList()[op.index], to: op.name };
   if (op.kind === 'add') return { kind: 'add', list, name: op.name };
+  if (op.kind === 'shared') return { kind: 'shared', list: 'shared_owner', from: f().saved.shared_owner, name: op.name };
   return { kind: 'remove', list, name: currentList()[op.index] };
 }
 
 /** Splits the engine's issues: the one about the edited name goes under the field, the rest above. */
 function placeIssues(op, issues) {
   const index = m.editedIndex(f().saved, f().view, op);
-  const shared = f().saved.shared_owner;
-  const mine = issues.filter((i) => i.list === f().view && i.index === index);
+  // The draft's shared name is the truth the engine just rejected; quote that, not the stored one.
+  const draft = m.draftFor(f().saved, f().view, op);
+  const shared = draft.shared_owner ?? f().saved.shared_owner;
+  const mine = issues.filter((i) => (op.kind === 'shared'
+    ? i.list === 'shared_owner'
+    : i.list === f().view && i.index === index));
   const rest = issues.filter((i) => !mine.includes(i));
   f().fieldError = mine.length > 0 ? m.friendlyError(mine[0], shared) : null;
   f().error = rest.length > 0 ? rest.map((i) => `${i.list}${i.name ? ` "${i.name}"` : ''}: ${m.friendlyError(i, shared)}`).join(' ') : null;
@@ -340,7 +464,12 @@ async function save(op) {
     placeIssues(op, res.report.errors);
   } else {
     f().changes.push(changeFor(op));
-    f().saved = { ...f().saved, folders: res.report.folders, owners: res.report.owners };
+    f().saved = {
+      ...f().saved,
+      folders: res.report.folders,
+      owners: res.report.owners,
+      shared_owner: res.report.shared_owner ?? f().saved.shared_owner,
+    };
     f().error = null;
     f().fieldError = null;
     f().selected = null;
@@ -348,6 +477,8 @@ async function save(op) {
     f().dry = null;
     f().showAll = false;
     f().notice = 'ask';
+    // A rename re-files the stored copies, so the row counts on the ask screen follow the save.
+    void loadDocs();
   }
   render();
 }
@@ -467,11 +598,11 @@ function renderFiling() {
 function renderNotice() {
   const s = f();
   const card = { pill: 're-sort needed', tone: 'attention', text: '', note: '', resort: true, done: false };
-  const renamed = s.changes.some((c) => c.kind !== 'add');
   if (s.notice === 'ask' || s.notice === 'running') {
     card.text = s.changes.length > 0 ? `${m.changeSummary(s.changes)} Re-sorting shows where every filed copy goes with the new lists.` : (s.pendingText ?? '');
     card.note = 'Nothing moves yet. You get a preview first, and your original files are never touched.';
-    if (renamed) card.note += ' Documents still filed under a renamed or removed name go to unsorted (or the shared owner) until the model re-reads them with “lets-rag-docs classify --force”.';
+    const resort = m.resortNote(s.changes);
+    if (resort) card.note += ` ${resort}`;
   } else if (s.notice === 'preview' || s.notice === 'applying') {
     const problem = m.dryRunProblem(s.dry);
     const count = problem ? 0 : m.moveCount(s.dry);
@@ -553,8 +684,7 @@ function renderForm() {
     form.meta = `${m.docsLabel(n)} filed here`;
     form.label = 'shared folder name';
     form.helper = 'For documents that belong to nobody on the list, or to several people.';
-    form.note = 'This name is shared_owner in config.toml. The app shows it but does not change it.';
-    form.readonly = true;
+    form.note = 'Saved as shared_owner in config.toml. Re-sorting files unlisted documents under the new name.';
   }
   $('formTitle').textContent = form.title;
   $('formMeta').textContent = form.meta;
@@ -611,6 +741,15 @@ function wire() {
     button.addEventListener('click', () => showSection(button.dataset.section));
   }
   $('askForm').addEventListener('submit', (event) => void ask(event));
+  $('librarySearch').addEventListener('input', onSearchChange);
+  $('librarySearch').addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape') return;
+    event.preventDefault();
+    $('librarySearch').value = '';
+    onSearchChange(); // empty box restores the full list
+  });
+  $('addDocsButton').addEventListener('click', () => void addDocs());
+  $('addCancel').addEventListener('click', () => void cancelAdd());
   $('cancelAsk').addEventListener('click', () => void cancelAsk());
   $('copyAnswer').addEventListener('click', () => void copyAnswer());
 
