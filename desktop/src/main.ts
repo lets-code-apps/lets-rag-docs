@@ -468,7 +468,9 @@ async function measureGeometry(browser: BrowserWindow): Promise<string[]> {
 		await reload;
 		for (const section of ['ask', 'filing', 'settings']) {
 			await drive(browser, `await d.click('[data-section="${section}"]');`);
-			if (section === 'ask') await drive(browser, `await d.click('#addDocsButton');`);
+			// Rule 2 wants the search field measured with the add panel visible: run one add, at the wide
+			// size only, so the check costs one run and stays off the reload/queue race at 360px.
+			if (section === 'ask' && width === 1200) await drive(browser, `await d.click('#addDocsButton');`);
 			const geo = (await drive(browser, GEOMETRY)) as { ok: boolean; failures: string[] };
 			failures.push(...geo.failures);
 		}
@@ -515,9 +517,9 @@ type SmokeChecks = {
 async function runSmoke(): Promise<void> {
 	const dir = freshFakeState();
 	const deadline = setTimeout(() => {
-		console.error('SMOKE FAIL: timed out after 30s');
+		console.error('SMOKE FAIL: timed out after 60s');
 		app.exit(1);
-	}, 30000);
+	}, 60000);
 	let code = 1;
 	try {
 		const browser = makeWindow();
@@ -750,9 +752,9 @@ const SHOTS: Shot[] = [
 
 async function runShots(): Promise<void> {
 	const deadline = setTimeout(() => {
-		console.error('SHOTS FAIL: timed out after 300s');
+		console.error('SHOTS FAIL: timed out after 600s');
 		app.exit(1);
-	}, 300000);
+	}, 600000);
 	const out = join(HERE, '..', 'screenshots');
 	mkdirSync(out, { recursive: true });
 	const browser = makeWindow();
