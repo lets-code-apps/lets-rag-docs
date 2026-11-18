@@ -82,7 +82,8 @@ jobs:
         run: npm run shots 2>&1 | tee "$RUNNER_TEMP/out/shots.txt"
       - name: Require all 38 shots
         if: ${{ !cancelled() }}
-        run: grep -q '^SHOTS OK: 38' "$RUNNER_TEMP/out/shots.txt"
+        run: >-
+          grep -q '^SHOTS OK: 38' "$RUNNER_TEMP/out/shots.txt"
       # Fails the job when any shot differs from the committed baseline (size, new, removed, or above the
       # pixel ratio). Writes the report + diff PNGs regardless.
       - name: Compare against the baseline
