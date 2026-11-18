@@ -195,7 +195,7 @@ async fn ingest(config: &Config) -> anyhow::Result<()> {
     for path in &files {
         let rel = path.strip_prefix(ocr_dir)?.to_string_lossy();
         let original = classify::original_path(&config.paths.docs_dir, &rel);
-        if classify::over_limit(&original, max_bytes) {
+        if skips_over_limit(&original, max_bytes) {
             println!(
                 "not indexed: over {} MB  {}",
                 config.ocr.max_file_mb,
@@ -279,11 +279,22 @@ fn init_logging(verbosity: u8) {
         .init();
 }
 
+/// Whether one OCR text file is skipped by `ingest`: its original is over
+/// `[ocr] max_file_mb`, so a bulk OCR must not have slipped it into the index behind
+/// the user's back (`add` refuses such a file outright). A missing original is NOT
+/// "over": the document still indexes, just without a type or date.
+fn skips_over_limit(original: &Path, max_bytes: u64) -> bool {
+    classify::over_limit(original, max_bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use clap::Parser;
 
+    use std::fs;
+
     use super::Cli;
+    use super::skips_over_limit;
 
     // The clap contract the desktop shell and the acceptance tests rely on: `organize --json`
     // alone is not a mode, and adding --json must not have widened the exactly-one group.
@@ -317,5 +328,30 @@ mod tests {
             let label: String = extra.join(" ");
             assert!(parses(extra.as_slice()), "should parse: {}", label);
         }
+    }
+
+    #[test]
+    fn ingest_skips_over_limit_original() {
+        // max_file_mb = 1 and a 1,000,001-byte original: `ingest` must skip that OCR text
+        // BEFORE embedding, exactly as `add` refuses the file outright.
+        let dir = tempfile::tempdir().unwrap();
+        let docs = dir.path().join("docs");
+        fs::create_dir(&docs).unwrap();
+        fs::write(&docs.join("big.pdf"), "x".repeat(1_000_001).as_bytes()).unwrap();
+        fs::write(&docs.join("loan.pdf"), "tiny".as_bytes()).unwrap();
+        let limit: u64 = 1u64.saturating_mul(1_000_000);
+        assert!(
+            skips_over_limit(&docs.join("big.pdf"), limit),
+            "the 1,000,001-byte original"
+        );
+        assert!(
+            !skips_over_limit(&docs.join("loan.pdf"), limit),
+            "the tiny original"
+        );
+        // No original at all: not "over" - the document indexes without a type or date.
+        assert!(
+            !skips_over_limit(&docs.join("gone.pdf"), limit),
+            "a missing original"
+        );
     }
 }

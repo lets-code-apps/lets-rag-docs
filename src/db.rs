@@ -304,6 +304,52 @@ mod tests {
     }
 
     #[test]
+    fn rename_is_one_transaction() {
+        // The folder UPDATE runs first; a trigger that refuses the owner UPDATE must roll
+        // the whole rename back, so no row is left half-renamed.
+        let dir = tempfile::tempdir().unwrap();
+        let mut conn = open(&dir.path().join("data.db")).unwrap();
+        put(
+            &conn,
+            &Doc {
+                hash: "a1".into(),
+                path: "scans/scan.pdf".into(),
+                meta: Meta {
+                    title: None,
+                    doc_type: "invoice".into(),
+                    date: None,
+                    people: vec![],
+                    issuer: None,
+                    folder: Some("Home".into()),
+                    owner: Some("Alex Example".into()),
+                    matter: None,
+                },
+            },
+        )
+        .unwrap();
+        conn.execute(
+            "CREATE TRIGGER refuse_bad_owner BEFORE UPDATE OF owner ON documents
+             WHEN NEW.owner = 'Bad' BEGIN SELECT RAISE(ABORT, 'owner refused'); END",
+            [],
+        )
+        .unwrap();
+        let pairs: [(Column, String, String); 2] = [
+            (Column::Folder, "Home".to_string(), "Garden".to_string()),
+            (Column::Owner, "Alex Example".to_string(), "Bad".to_string()),
+        ];
+        assert!(
+            rename(&mut conn, &pairs).is_err(),
+            "the trigger must fail the owner UPDATE"
+        );
+        let rows = all(&conn).unwrap();
+        assert_eq!(rows.first().unwrap().meta.folder, Some("Home".into()));
+        assert_eq!(
+            rows.first().unwrap().meta.owner,
+            Some("Alex Example".into())
+        );
+    }
+
+    #[test]
     fn an_older_database_gets_the_new_columns() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("old.sqlite");
