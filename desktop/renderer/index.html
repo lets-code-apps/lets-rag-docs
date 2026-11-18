@@ -20,10 +20,13 @@
     <symbol id="i-sparkle" viewBox="0 0 24 24"><path d="M12 4c.6 4 2 5.4 6 6-4 .6-5.4 2-6 6-.6-4-2-5.4-6-6 4-.6 5.4-2 6-6Z"></path></symbol>
     <symbol id="i-file" viewBox="0 0 24 24"><path d="M7 3h7l4 4v14H7zM14 3v4h4M10 12h5M10 16h5"></path></symbol>
     <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.5 10 17 19 7"></path></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2ZM12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6Z"></path></symbol>
   </svg>
 
-  <!-- AppBar, emblem only: inset on the left for the window buttons, emblem at the right end. -->
+  <!-- AppBar, emblem only: inset on the left for the window buttons, emblem at the right end.
+       The app name sits centred in the bar like a macOS window title, clear of the emblem. -->
   <header id="appBar" class="appbar">
+    <span id="appTitle" class="appbar-title">rag docs</span>
     <span class="emblem" role="img" aria-label="Let's RAG Docs"></span>
   </header>
 
@@ -31,6 +34,7 @@
     <nav class="nav" aria-label="sections">
       <button id="askView" type="button" data-section="ask" aria-current="page"><svg class="icon" width="18" height="18" aria-hidden="true"><use href="#i-search"></use></svg><span>ask</span></button>
       <button id="filingView" type="button" data-section="filing"><svg class="icon" width="18" height="18" aria-hidden="true"><use href="#i-archive"></use></svg><span>filing</span></button>
+      <button id="settingsView" type="button" data-section="settings"><svg class="icon" width="18" height="18" aria-hidden="true"><use href="#i-settings"></use></svg><span>settings</span></button>
     </nav>
 
     <!-- ask: the library on the left, the conversation and the question form on the right -->
@@ -139,6 +143,37 @@
           </div>
           <p id="formNote" class="meta note"></p>
         </form>
+      </article>
+    </div>
+
+    <!-- settings: one article, "general" group with appearance (segmented control) and open at
+         login (a switch with its helper below). Same layout as the RagSettings design. -->
+    <div id="settingsScreen" class="screen settings" hidden>
+      <article class="settings-body">
+        <h1>settings</h1>
+        <section>
+          <h2>general</h2>
+
+          <div class="srow">
+            <div class="slabel">
+              <span id="appearanceLabel" class="lbl">appearance</span>
+              <span class="meta">Follows macOS unless you pick one.</span>
+            </div>
+            <div id="appearance" class="seg" role="radiogroup" aria-labelledby="appearanceLabel">
+              <button type="button" role="radio" aria-checked="true" data-value="system">system</button>
+              <button type="button" role="radio" aria-checked="false" data-value="dark">dark</button>
+              <button type="button" role="radio" aria-checked="false" data-value="light">light</button>
+            </div>
+          </div>
+
+          <div class="srow loginrow">
+            <label class="switchrow" for="loginSwitch">
+              <span class="lbl">open at login</span>
+              <input id="loginSwitch" class="switch" type="checkbox" role="switch" aria-describedby="loginHelper" />
+            </label>
+            <span id="loginHelper" class="helper">Opens rag docs when you sign in to your Mac.</span>
+          </div>
+        </section>
       </article>
     </div>
   </div>

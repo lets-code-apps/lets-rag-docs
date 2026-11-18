@@ -141,6 +141,8 @@ Evals are JSON lines: `{"id", "lang", "question", "expect", "source"}`; a questi
   copies `organize --apply` files) and `evals/rag.jsonl` are in `.gitignore`.
 - The desktop shell makes no network calls; `npm ci` downloads the Electron binary once at setup, and
   the running app loads only local content in a sandboxed window.
+- The desktop app keeps one small local file, `settings.json` (your appearance choice), in its own
+  app-data folder; open at login is a standard macOS login item. Neither sends anything anywhere.
 
 ## Roadmap
 

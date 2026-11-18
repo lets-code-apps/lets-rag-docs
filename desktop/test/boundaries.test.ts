@@ -61,10 +61,10 @@ test('child_process is only used by engine.ts', () => {
 test('preload exposes the ipc channels', () => {
 	const ipc = readFileSync(join(SRC, 'ipc.ts'), 'utf8');
 	const preload = readFileSync(join(SRC, 'preload.cjs'), 'utf8');
-	for (const name of ['ask', 'cancelAsk', 'documents', 'filingShow', 'filingSave', 'dryRun', 'resort']) {
+	for (const name of ['ask', 'cancelAsk', 'documents', 'filingShow', 'filingSave', 'dryRun', 'resort', 'settings', 'setSetting']) {
 		assert.ok(ipc.includes(`'rag.${name}'`), `ipc.ts missing ${name}`);
 	}
-	for (const fn of ['ask', 'cancelAsk', 'documents', 'filing', 'saveFiling', 'dryRun', 'resort']) {
+	for (const fn of ['ask', 'cancelAsk', 'documents', 'filing', 'saveFiling', 'dryRun', 'resort', 'settings', 'setSetting']) {
 		assert.ok(preload.includes(`${fn}:`), `preload missing ${fn}`);
 	}
 });
@@ -72,7 +72,7 @@ test('preload exposes the ipc channels', () => {
 test('every IPC handler checks senderFrame', () => {
 	const main = readFileSync(join(SRC, 'main.ts'), 'utf8');
 	const handles = main.split('ipcMain.handle(').slice(1);
-	assert.equal(handles.length, 7, 'all declared channels need handlers');
+	assert.equal(handles.length, 9, 'all declared channels need handlers');
 	// The renderer reaches apply in one place only: the explicit "move N copies" button.
 	const page = readFileSync(join(RENDERER, 'app.js'), 'utf8');
 	assert.equal(page.split('api.resort(').length - 1, 1);
@@ -80,6 +80,15 @@ test('every IPC handler checks senderFrame', () => {
 	for (const block of handles) {
 		assert.ok(block.includes('fromUs(event.senderFrame)'), 'handlers must reject foreign senders');
 	}
+});
+
+test('settings cross the boundary; only the real host ever registers a login item', () => {
+	const main = readFileSync(join(SRC, 'main.ts'), 'utf8');
+	// The setSetting handler routes through the controller, which is where the allow-list lives.
+	assert.ok(main.includes('settingsController.set('), 'setSetting must return through the controller');
+	// Exactly one call to the real OS login item (the Electron host); smoke/shots use the in-memory one.
+	assert.equal(main.split('setLoginItemSettings').length - 1, 1, 'only the real host registers a login item');
+	assert.ok(main.includes('memoryLoginItem'), 'smoke/shots must use an in-memory login item, not the OS one');
 });
 
 test('smoke and shots hard-set the fake engine', () => {

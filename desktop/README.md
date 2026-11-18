@@ -1,9 +1,9 @@
 # Let's RAG Docs — desktop
 
 A macOS menu-bar Electron companion for the `lets-rag-docs` Rust engine. It lives in the menu bar
-(click the icon to show or focus the window, right-click for Open/Quit), shows the **ask** and
-**filing** screens from the approved RagAsk/RagFiling designs, and calls the engine one-shot over its
-command line. It never
+(click the icon to show or focus the window, right-click for Open/Quit), shows the **ask**, **filing**
+and **settings** screens from the approved RagAsk/RagFiling/RagSettings designs, and calls the engine
+one-shot over its command line. It never
 reads the repository's local model, database, config file or document folders itself, and it never
 points the app at real data: `npm run smoke` and `npm run shots` hard-set `test/fixtures/fake-engine.mjs`.
 
@@ -25,7 +25,7 @@ Run from this `desktop/` directory.
 | Build | `npm run build` | `tsc -p tsconfig.build.json` into `dist/` and copy `preload.cjs` |
 | Dev launch | `npm start` | build, then open a visible window (`RAG_DOCS_START_WINDOW=1 electron .`) |
 | Smoke | `npm run smoke` | build, then hidden Electron with the fake engine; exits `SMOKE OK` / `SMOKE FAIL` |
-| Screenshots | `npm run shots` | build, then drive the real page against the fake engine (type, click, save, re-sort) and `capturePage` ask plus the 10 RagFiling states (and the 360px form, scrolled) in light and dark: 24 PNGs under `screenshots/` |
+| Screenshots | `npm run shots` | build, then drive the real page against the fake engine (type, click, save, re-sort) and `capturePage` ask, the 10 RagFiling states and settings (and the 360px views), in light and dark: 30 PNGs under `screenshots/` |
 | Icons | `npm run icons` | re-render `assets/*.png` from SVG (see below) |
 
 ## Engine contract
@@ -58,6 +58,16 @@ in citations, "open" for a cited document, the AppBar search and "add documents"
 owner's name, and a rename that also re-files documents (today they go to unsorted until
 `lets-rag-docs classify --force`).
 
+## Settings
+
+The settings screen owns one setting: `appearance`. It writes a single `settings.json` (just
+`{"appearance":"system"|"dark"|"light"}`) into the app's own userData folder, and `nativeTheme` makes
+the window follow it through `prefers-color-scheme`. The other row, **open at login**, is the macOS
+login item: it is read live from the OS every time the screen paints (so it reflects a change made in
+System Settings, and is off by default) and written back with `app.setLoginItemSettings`; we never store
+it in our file. `npm run smoke` and `npm run shots` use a throwaway temp file and an in-memory login
+item, so a headless run never registers a real login item on the machine.
+
 ## Icons
 
 `npm run icons` (`scripts/make-icons.mjs`) renders the PNGs with Electron's own Chromium, no image
@@ -75,3 +85,5 @@ Mail's `menubar.svg` with the RAG emblem's two text lines; `assets/icon.png` (10
 - The renderer is sandboxed, context-isolated, preload-only, CSP `default-src 'none'`, and never uses
   `innerHTML`, `outerHTML`, `insertAdjacentHTML` or `document.write`.
 - Smoke/screenshots always use `test/fixtures/fake-engine.mjs` and synthetic fixtures.
+- The real macOS login item is touched only through the Electron host; `app.setLoginItemSettings` appears
+  in that one host, and smoke/shots swap in an in-memory login item, so an unattended run registers nothing.

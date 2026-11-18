@@ -10,4 +10,6 @@ contextBridge.exposeInMainWorld('ragDocs', {
 	saveFiling: (draft, check) => ipcRenderer.invoke('rag.filingSave', draft, check),
 	dryRun: () => ipcRenderer.invoke('rag.dryRun'),
 	resort: () => ipcRenderer.invoke('rag.resort'),
+	settings: () => ipcRenderer.invoke('rag.settings'),
+	setSetting: (name, value) => ipcRenderer.invoke('rag.setSetting', name, value),
 });

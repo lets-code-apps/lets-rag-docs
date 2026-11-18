@@ -33,6 +33,7 @@ const state = {
     showAll: false,
     applied: null,
   },
+  settings: { appearance: 'system', openAtLogin: false },
 };
 
 // ---- small DOM helpers ----
@@ -115,14 +116,17 @@ function render() {
   }
   $('askScreen').hidden = state.section !== 'ask';
   $('filingScreen').hidden = state.section !== 'filing';
+  $('settingsScreen').hidden = state.section !== 'settings';
   renderAsk();
   renderFiling();
+  renderSettings();
 }
 
 function showSection(section) {
   state.section = section;
   render();
   if (section === 'filing' && !state.filing.loaded) void loadFiling();
+  if (section === 'settings') void loadSettings();
 }
 
 // ---- ask ----
@@ -573,6 +577,33 @@ function renderForm() {
   $('formNote').textContent = form.note;
 }
 
+// ---- settings ----
+// The renderer never owns a theme: main sets `nativeTheme.themeSource`, which flips prefers-color-scheme
+// and tokens.css follows it. The page only shows what `api.settings()` reports. open at login mirrors the
+// OS login item, so every reply re-reads the real state and the page paints from that.
+
+async function loadSettings() {
+  const res = await track(api.settings());
+  if (res) state.settings = { appearance: res.appearance, openAtLogin: res.openAtLogin === true };
+  renderSettings();
+}
+
+function renderSettings() {
+  const s = state.settings;
+  for (const button of $('appearance').querySelectorAll('button')) {
+    button.setAttribute('aria-checked', button.dataset.value === s.appearance ? 'true' : 'false');
+  }
+  $('loginSwitch').checked = s.openAtLogin;
+}
+
+/** Send one setting and repaint from the truth that comes back; a rejected write snaps back to the truth. */
+async function commitSetting(name, value) {
+  const res = await track(api.setSetting(name, value));
+  if (res) state.settings = { appearance: res.appearance, openAtLogin: res.openAtLogin === true };
+  else await loadSettings();
+  renderSettings();
+}
+
 // ---- wiring ----
 
 function wire() {
@@ -620,9 +651,26 @@ function wire() {
   });
   $('laterButton').addEventListener('click', closeNotice);
   $('noticeDone').addEventListener('click', closeNotice);
+
+  // settings: the segmented control picks an appearance; the checkbox is a switch that writes the
+  // login item. Both repaint from the truth main sends back.
+  for (const button of $('appearance').querySelectorAll('button')) {
+    button.addEventListener('click', () => {
+      if (state.settings.appearance === button.dataset.value) return;
+      void commitSetting('appearance', button.dataset.value);
+    });
+  }
+  $('loginSwitch').addEventListener('change', () => {
+    void commitSetting('openAtLogin', $('loginSwitch').checked);
+  });
+
+  // macOS lets the user change the login item in System Settings while the app is open; refocusing
+  // re-reads it, so the switch never shows a state the OS no longer has.
+  window.addEventListener('focus', () => void loadSettings());
 }
 
 document.body.dataset.pending = '0';
 wire();
 render();
 void loadDocs();
+void loadSettings();
