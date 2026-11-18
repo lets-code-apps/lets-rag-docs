@@ -103,7 +103,8 @@ line. Two controls are drawn under 44px today and are allow-listed in `KNOWN_SHO
 **Reading the PR comment.** After `shots`, CI copies the committed PNGs to a temp baseline, takes fresh
 shots, and runs `npm run compare`. If shots match, one comment (marked `<!-- desktop-shots -->`, updated on
 each push, not stacked) says all 38 match. If not, it lists the changed shots and links the run artifact
-(`desktop-ci-<run id>`) that holds the new `screenshots/*.png`, `smoke.txt`, `shots.txt`, `compare-report.md|json`
+(`desktop-ci-<run id>`) that holds the new `screenshots/*.png`, `smoke.txt`, `shots.txt`, `compare-report.md|json`,
+`compare-measured.json`
 and `diff/<name>.png` (red where pixels differ). The same markdown also lands in the step summary; on fork PRs
 only the summary is written (a fork cannot comment).
 
@@ -122,9 +123,12 @@ CI render is the baseline**, not your laptop.
 **Thresholds and noise.** `PIXEL_DELTA = 12` (a per-channel change of up to 12/255 does not count a pixel);
 a shot is **changed** when over `MAX_RATIO = 0.002` (0.2%) of its pixels differ, on a size mismatch, or when a
 pair is missing (`new`/`removed`). These are a starting point: run the CI job twice on an unchanged tree, record
-the largest ratio you saw, keep `MAX_RATIO` at least 3× that and at most 0.5%, and write the measured noise here
-(currently: the two CI runs on the fixed workflow are within `0.002` once the baseline is the CI render — see
-below for why the sizes already agree, so this is antialiasing noise only).
+the largest ratio you saw, keep `MAX_RATIO` at least 3× that and at most 0.5%, and write the measured noise here.
+Every run also uploads `compare-measured.json` (the ratio of all 38 shots, green or red), which is where these
+numbers come from. Measured on the fixed workflow, two runs against a CI-rendered baseline: run 44420909156 had
+6 of 38 shots with any differing pixels, run 44421965171 had 5, and the largest ratio in either run was **0.0000258
+(0.0026%)**. `MAX_RATIO = 0.002` is therefore ~77× the observed noise and still under the 0.5% ceiling — keep it
+unless a real render change pushes the numbers up (the sizes already agree, so this is antialiasing noise only).
 
 **Known local-vs-CI differences.** The committed baseline is the **CI render**, not a Retina laptop. The macOS
 GitHub Actions runner is non-Retina and its window chrome is taller, so a `setSize(1200, 820)` / `setSize(360,
