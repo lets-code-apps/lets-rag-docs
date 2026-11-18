@@ -16,6 +16,7 @@ import { buildTrayMenu, PRODUCT_NAME } from './menu.ts';
 import { WindowController } from './window.ts';
 import { denyNavigation, isOwnFile, windowOpenHandler, windowOptions } from './window-policy.ts';
 import { SettingsController, type SettingsHost } from './settings.ts';
+import { GEOMETRY } from './geometry.ts';
 
 const HERE = import.meta.dirname;
 const RENDERER = join(HERE, '..', 'renderer', 'index.html');
@@ -368,6 +369,11 @@ app.on('before-quit', (event) => {
 if (!app.requestSingleInstanceLock()) {
 	app.quit();
 } else {
+	// The committed screenshot baseline is Retina (2400x1640, scale 2). A CI or plain display is often
+	// scale 1, which would render every shot at 1200x820 and read as "all 38 changed". Force a scale
+	// factor of 2 only while taking shots, so the baseline is the same size on a Retina Mac, a non-Retina
+	// Mac and the runner. Normal runs and smoke are untouched.
+	if (process.env.RAG_DOCS_SHOTS === '1') app.commandLine.appendSwitch('force-device-scale-factor', '2');
 	app.on('second-instance', () => ctl.open());
 	void app.whenReady().then(boot);
 }
@@ -451,6 +457,25 @@ async function loaded(browser: BrowserWindow): Promise<void> {
 	await new Promise<void>((resolve) => browser.webContents.once('did-finish-load', () => resolve()));
 }
 
+/** Run the page-side GEOMETRY rules on every screen at both widths; the add panel is shown on ask so
+ * rule 2 also checks the panel cannot push the search field down. Returns the combined failures. */
+async function measureGeometry(browser: BrowserWindow): Promise<string[]> {
+	const failures: string[] = [];
+	for (const width of [1200, 360]) {
+		browser.setSize(width, width < 480 ? 780 : 820);
+		const reload = loaded(browser);
+		browser.reload();
+		await reload;
+		for (const section of ['ask', 'filing', 'settings']) {
+			await drive(browser, `await d.click('[data-section="${section}"]');`);
+			if (section === 'ask') await drive(browser, `await d.click('#addDocsButton');`);
+			const geo = (await drive(browser, GEOMETRY)) as { ok: boolean; failures: string[] };
+			failures.push(...geo.failures);
+		}
+	}
+	return failures;
+}
+
 type SmokeChecks = {
 	libraryRows: number;
 	answered: boolean;
@@ -484,6 +509,7 @@ type SmokeChecks = {
 	appearanceLive?: boolean;
 	openAtLoginOk?: boolean;
 	openedPath?: boolean;
+	geometry?: string[];
 };
 
 async function runSmoke(): Promise<void> {
@@ -646,12 +672,16 @@ async function runSmoke(): Promise<void> {
 		const loginRepainted = (await drive(browser, `return d.find('#loginSwitch').checked === false;`)) as boolean;
 		result.openAtLoginOk = loginOffDefault && loginNamed && loginSet && loginRepainted;
 
+		// Layout rules (settings article, library search, AppBar clear, control targets) on all three
+		// screens at both widths, with the add panel showing on ask. Failures show up in the SMOKE line.
+		result.geometry = await measureGeometry(browser);
+
 		const title = browser.getTitle();
 		const own = isOwnFile(browser.webContents.getURL(), INDEX_URL);
 		const ok = own && title === PRODUCT_NAME && result.libraryRows > 0 && result.answered && result.folderRows > 0 && result.notice && result.moves > 0 && result.filed === 'filed' && result.persisted === true && result.raceSafe === true && result.titleWide === true && result.titleNarrow === true && result.appearanceLive === true && result.openAtLoginOk === true
-			&& result.dangerPill && result.sizeShown && result.searchRows === 2 && result.searchMeta && result.cleared === result.libraryRows && result.addDone && result.addAdded && result.addDuplicate && result.addFailed && result.grew && result.pageCited && result.openButtons === 2 && result.openedPath && result.vehiclesCounts && result.movesToVehicles && result.noUnsorted && result.movesToHousehold && result.sharedShownHousehold && result.sharedRenamedBack && result.applied === 'filed';
+			&& result.dangerPill && result.sizeShown && result.searchRows === 2 && result.searchMeta && result.cleared === result.libraryRows && result.addDone && result.addAdded && result.addDuplicate && result.addFailed && result.grew && result.pageCited && result.openButtons === 2 && result.openedPath && result.vehiclesCounts && result.movesToVehicles && result.noUnsorted && result.movesToHousehold && result.sharedShownHousehold && result.sharedRenamedBack && result.applied === 'filed' && (result.geometry ?? []).length === 0;
 		if (ok) {
-			console.error(`SMOKE OK: library ${result.libraryRows} rows (big-scan pill + MB sizes), search "loan" -> 2 rows -> cleared, add 3 files -> added/duplicate/failed + library grew, answer cites p. 4 and an open button handed the located path to main, rename Car->Vehicles counts 2 documents and previews moves to Vehicles (none to unsorted), shared owner "Household" re-files; stale dry-run after a save refused; app name centred on ask/filing/settings at 1200px and 360px; appearance live (dark/light/system); open-at-login reflects the real login item`);
+			console.error(`SMOKE OK: library ${result.libraryRows} rows (big-scan pill + MB sizes), search "loan" -> 2 rows -> cleared, add 3 files -> added/duplicate/failed + library grew, answer cites p. 4 and an open button handed the located path to main, rename Car->Vehicles counts 2 documents and previews moves to Vehicles (none to unsorted), shared owner "Household" re-files; stale dry-run after a save refused; app name centred on ask/filing/settings at 1200px and 360px; appearance live (dark/light/system); open-at-login reflects the real login item; layout checks clean (settings article, library search top, AppBar 132px clear, 44px targets) on ask/filing/settings at 1200px and 360px`);
 			code = 0;
 		} else {
 			console.error(`SMOKE FAIL: own=${own} title=${title} checks=${JSON.stringify(result)}`);
