@@ -200,6 +200,9 @@ desktop/                 # Electron menu-bar app (Node/TS), ask, filing and sett
     stored in `settings.json` under userData, applied live through `nativeTheme`) and `open at login` (the
     macOS login item, read live, off by default, never stored by us). TypeScript/Electron only; smoke uses
     a temp file + an in-memory login item.
+    **CI (#17, 2026-11-18):** `.github/workflows/desktop.yml` — a `rust` job (fmt/clippy `-D warnings`/test)
+    and a `desktop` job (typecheck/test/smoke/shots), a screenshot-baseline diff with a PR comment, and layout
+    checks in smoke (`src/geometry.ts`). TypeScript/YAML only; the only Rust step is CI running `cargo`.
 10. Later: synthetic sample docs + public eval set, reranking (bge-reranker-v2-m3). (Page markers landed with #15: `ocr.py` emits `\f`, `chunk::paged_chunks` tracks the page, `chunk_cases.json` still locks the old chunk text and byte counts.)
 
 ## Environment

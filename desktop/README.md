@@ -25,7 +25,8 @@ Run from this `desktop/` directory.
 | Build | `npm run build` | `tsc -p tsconfig.build.json` into `dist/` and copy `preload.cjs` |
 | Dev launch | `npm start` | build, then open a visible window (`RAG_DOCS_START_WINDOW=1 electron .`) |
 | Smoke | `npm run smoke` | build, then hidden Electron with the fake engine; exits `SMOKE OK` / `SMOKE FAIL` |
-| Screenshots | `npm run shots` | build, then drive the real page against the fake engine (type, click, save, re-sort) and `capturePage` ask, the 10 RagFiling states and settings (and the 360px views), in light and dark: 30 PNGs under `screenshots/` |
+| Screenshots | `npm run shots` | build, then drive the real page against the fake engine (type, click, save, re-sort) and `capturePage` ask, the 10 RagFiling states and settings (and the 360px views), in light and dark: 38 PNGs under `screenshots/` |
+| Compare | `npm run compare -- <baseline> <shots> [out]` | diff `<shots>` against `<baseline>` PNGs with Electron's `nativeImage` (no image library): writes `out/compare-report.md`, `out/compare-report.json` and `out/diff/<name>.png` for changed shots, exits non-zero if anything changed |
 | Icons | `npm run icons` | re-render `assets/*.png` from SVG (see below) |
 
 ## Engine contract
@@ -80,6 +81,60 @@ library: `assets/menubarTemplate.png` / `@2x` (18 and 36 px, black on transparen
 Mail's `menubar.svg` with the RAG emblem's two text lines; `assets/icon.png` (1024 px) is a grain tile
 (radius 23%) with the white emblem from `renderer/emblem.svg` at 64%. macOS tints the template through
 `nativeImage.setTemplateImage(true)`; the dock icon is set only when running unpackaged.
+
+## CI and the screenshot baseline
+
+`.github/workflows/desktop.yml` runs two macOS jobs on every push to `desktop`/`feature/**` and every
+pull request into `desktop` or `main`: `rust` (crate `cargo fmt --all --check`, `cargo clippy --all-targets
+-- -D warnings`, `cargo test`) and `desktop` (`npm ci`, `typecheck`, `test`, `smoke`, `shots`, then a
+baseline diff). The desktop job installs no Rust and the Rust job installs no Node, so each proves the
+other's tests are not secretly load-bearing. The three `#[ignore]`d Rust tests (`src/add.rs`, `src/index.rs`,
+`src/organize.rs`) need Qdrant through `docker compose`; macOS runners have no Docker, so `rust` runs the
+default set only (noted in the YAML).
+
+**Smoke is blocking and checks layout.** `npm run smoke` prints `SMOKE OK`/`SMOKE FAIL`; CI fails if the
+`SMOKE OK` line is missing so a silent skip cannot go green. It also runs `src/geometry.ts` (`GEOMETRY`) on
+ask, filing and settings at 1200px and 360px: the settings article sits against the sidebar, the library
+search stays at the top of its pane (including with the add panel showing), the app name keeps 132px clear
+on both sides of the bar, and every visible control is at least 44px. Any failure is listed in the `SMOKE FAIL`
+line. Two controls are drawn under 44px today and are allow-listed in `KNOWN_SHORT` (`.seg button` 38px,
+`.nav button` ≈39px); raising them is a separate design follow-up, so this CI change does not touch CSS.
+
+**Reading the PR comment.** After `shots`, CI copies the committed PNGs to a temp baseline, takes fresh
+shots, and runs `npm run compare`. If shots match, one comment (marked `<!-- desktop-shots -->`, updated on
+each push, not stacked) says all 38 match. If not, it lists the changed shots and links the run artifact
+(`desktop-ci-<run id>`) that holds the new `screenshots/*.png`, `smoke.txt`, `shots.txt`, `compare-report.md|json`
+and `diff/<name>.png` (red where pixels differ). The same markdown also lands in the step summary; on fork PRs
+only the summary is written (a fork cannot comment).
+
+**How to update the baseline.** When a change to the app intentionally moves pixels, regenerate and commit
+together with that change:
+```sh
+cd desktop
+cp -R screenshots /tmp/base          # snapshot the current baseline
+npm run shots                       # re-render desktop/screenshots/ in place
+npm run compare -- /tmp/base screenshots   # list what changed; commit only if intended
+```
+Then commit the new PNGs in the same commit as the change that caused them. If CI still disagrees with your
+local render, take the PNGs from that run's `desktop-ci-<run id>` artifact and commit those instead — **the
+CI render is the baseline**, not your laptop.
+
+**Thresholds and noise.** `PIXEL_DELTA = 12` (a per-channel change of up to 12/255 does not count a pixel);
+a shot is **changed** when over `MAX_RATIO = 0.002` (0.2%) of its pixels differ, on a size mismatch, or when a
+pair is missing (`new`/`removed`). These are a starting point: after two CI runs on an unchanged tree, record
+the largest ratio you saw and keep `MAX_RATIO` at least 3× that and at most 0.5%, and note the measured noise
+here.
+
+**Known local-vs-CI differences.** The committed baseline is Retina (2400×1640, scale 2). `main.ts` forces
+`force-device-scale-factor=2` while taking shots, so a Retina Mac, a non-Retina Mac and CI all render at the
+same size. Fonts are bundled (Poppins woff2), and controls use `font: inherit`, so text renders the same;
+remaining differences are GPU/software antialiasing and macOS version drift. A runner macOS image bump can
+shift pixels enough to force a re-baseline from the CI artifact (see above). Baseline updates add ~6.7 MB of
+PNG history each time, so keep them rare.
+
+**Privacy.** CI adds no third-party service, cookie or personal data to the app. Smoke and shots hard-set
+`test/fixtures/fake-engine.mjs` (a test checks this), so the artifacts and logs hold only synthetic output —
+never document text.
 
 ## Boundary rules
 
