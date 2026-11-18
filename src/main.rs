@@ -337,8 +337,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let docs = dir.path().join("docs");
         fs::create_dir(&docs).unwrap();
-        fs::write(&docs.join("big.pdf"), "x".repeat(1_000_001).as_bytes()).unwrap();
-        fs::write(&docs.join("loan.pdf"), "tiny".as_bytes()).unwrap();
+        fs::write(docs.join("big.pdf"), "x".repeat(1_000_001).as_bytes()).unwrap();
+        fs::write(docs.join("loan.pdf"), "tiny".as_bytes()).unwrap();
         let limit: u64 = 1u64.saturating_mul(1_000_000);
         assert!(
             skips_over_limit(&docs.join("big.pdf"), limit),
