@@ -561,14 +561,22 @@ mod tests {
         // Repeating the same save: nothing to write, the UPDATE matches nothing, still ok.
         let second = save_report(&config, &file, &draft, false).unwrap();
         assert!(second.ok);
-        // A later draft that never mentions shared_owner still reports the current truth.
+        // The shared_owner in the report is the value THIS save decided on: the draft's when
+        // it renames the name, otherwise whatever the caller's config carries. The desktop
+        // starts that chain from `filing show`, so its row repaints after every save.
+        assert_eq!(second.shared_owner, "Everyone");
         let plain = Draft {
             folders: vec!["Home".to_string()],
             owners: vec!["Alex Example".to_string()],
             shared_owner: None,
             renames: None,
         };
-        assert_eq!(save_report(&config, &file, &plain, false).unwrap().shared_owner, "Everyone");
+        assert_eq!(
+            save_report(&config, &file, &plain, false)
+                .unwrap()
+                .shared_owner,
+            "Shared"
+        );
         assert!(!second.saved);
         assert_eq!(second.renamed, 0);
         assert_eq!(fs::read_to_string(file.as_os_str()).unwrap(), after);
