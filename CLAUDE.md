@@ -106,7 +106,7 @@ src/mcp.rs
 src/ask.rs
 embed_server.py
 ocr.py, vision_ocr.swift
-desktop/                 # Electron menu-bar app (Node/TS), ask + filing: no Cargo involvement, `exclude`d from the crate
+desktop/                 # Electron menu-bar app (Node/TS), ask, filing and settings: no Cargo involvement, `exclude`d from the crate
 ```
 
 ## Implementation plan
@@ -170,9 +170,14 @@ desktop/                 # Electron menu-bar app (Node/TS), ask + filing: no Car
    ignores it. The Electron-vs-Tauri and final-UX decisions above still stand for later increments.
    **Ask and filing screens (2026-11-17, #11):** menu-bar app on branch `desktop`. Ask (library from
    `documents --json`, `ask --json` with citations) and filing (`filing show|save` on `[classify]`
-   folders/owners, `organize --dry-run --json` preview, `--apply --json` only on the explicit button).
-   No sample data on screen. Still to come: upload (`add`), browse by folder, page counts/sizes,
-   page numbers in citations, a rename that re-files documents. See `desktop/README.md`.
+    folders/owners, `organize --dry-run --json` preview, `--apply --json` only on the explicit button).
+    No sample data on screen. Still to come: upload (`add`), browse by folder, page counts/sizes,
+    page numbers in citations, a rename that re-files documents. See `desktop/README.md`.
+    **Window title and settings (2026-11-18, #13):** the app name "rag docs" is centred in the bar (the
+    AppBar `title`) on every screen; a settings screen (RagSettings) holds `appearance` (system/dark/light,
+    stored in `settings.json` under userData, applied live through `nativeTheme`) and `open at login` (the
+    macOS login item, read live, off by default, never stored by us). TypeScript/Electron only; smoke uses
+    a temp file + an in-memory login item.
 10. Later: synthetic sample docs + public eval set, page markers, reranking (bge-reranker-v2-m3).
 
 ## Environment
