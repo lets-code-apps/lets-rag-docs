@@ -8,17 +8,23 @@ import { EventEmitter } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';
 
 import {
+	parseAdd,
 	parseAsk,
 	parseDocuments,
 	parseFilingSave,
 	parseFilingShow,
+	parseLocate,
 	parseOrganize,
+	parseSearch,
+	type AddReport,
 	type AskReport,
 	type DocumentsReport,
 	type FilingSaveReport,
 	type FilingShowReport,
+	type LocateReport,
 	type OrganizeReport,
 	type Parse,
+	type SearchReport,
 } from './reports.ts';
 import { resolveEngine } from './engine-path.ts';
 
@@ -54,6 +60,7 @@ export const TIMEOUTS = {
 	dryRunMs: 10 * 60_000,
 	applyMs: 60 * 60_000,
 	askMs: 6 * 60_000,
+	addMs: 20 * 60_000,
 } as const;
 
 function minutes(ms: number): string {
@@ -71,7 +78,9 @@ export class Engine {
 	private readonly askTimeoutMs: number;
 	private readonly dryRunTimeoutMs: number;
 	private readonly applyTimeoutMs: number;
+	private readonly addTimeoutMs: number;
 	private askChild: EngineProcess | null = null;
+	private addChild: EngineProcess | null = null;
 
 	constructor(
 		env: NodeJS.ProcessEnv,
@@ -82,6 +91,7 @@ export class Engine {
 		resourcesPath: string | undefined = undefined,
 		dryRunTimeoutMs: number = TIMEOUTS.dryRunMs,
 		applyTimeoutMs: number = TIMEOUTS.applyMs,
+		addTimeoutMs: number = TIMEOUTS.addMs,
 	) {
 		this.env = env;
 		this.repoRoot = repoRoot;
@@ -91,6 +101,7 @@ export class Engine {
 		this.resourcesPath = resourcesPath;
 		this.dryRunTimeoutMs = dryRunTimeoutMs;
 		this.applyTimeoutMs = applyTimeoutMs;
+		this.addTimeoutMs = addTimeoutMs;
 	}
 
 	resolve(): { file: string; baseArgs: string[] } {
@@ -170,9 +181,62 @@ export class Engine {
 		if (!Array.isArray((draft as { folders?: unknown }).folders) || !Array.isArray((draft as { owners?: unknown }).owners)) {
 			return { ok: false, error: 'draft must contain folders and owners arrays' };
 		}
+		// The draft names never enter argv; still, type-check the new fields here so the engine only
+		// ever sees the shape it documents (a stray object must not reach SQLite or config.toml).
+		const sharedOwner = (draft as { shared_owner?: unknown }).shared_owner;
+		if (sharedOwner !== undefined && typeof sharedOwner !== 'string') {
+			return { ok: false, error: 'draft shared_owner must be a string when present' };
+		}
+		const renames = (draft as { renames?: unknown }).renames;
+		if (renames !== undefined) {
+			if (!Array.isArray(renames)) return { ok: false, error: 'draft renames must be an array when present' };
+			for (const rename of renames) {
+				const row = rename as { list?: unknown; from?: unknown; to?: unknown };
+				if (typeof rename !== 'object' || rename === null
+					|| (row.list !== 'folders' && row.list !== 'owners')
+					|| typeof row.from !== 'string' || typeof row.to !== 'string') {
+					return { ok: false, error: 'each rename is {list: folders|owners, from, to} with strings' };
+				}
+			}
+		}
 		const subArgs = check ? ['filing', 'save', '--check'] : ['filing', 'save'];
 		const outcome = await this.collect(subArgs, `${JSON.stringify(draft)}\n`);
 		return this.finish(outcome, 'filing save', this.readTimeoutMs, (o) => parseFilingSave(o.stdout, o.stderrTail));
+	}
+
+	/** Search is a read: fixed argv, query after `--`, never parsed back into options. */
+	async search(query: string): Promise<EngineResult<SearchReport>> {
+		if (typeof query !== 'string') return { ok: false, error: 'query must be a string' };
+		const outcome = await this.collect(['search', '--json', '--limit', '20', '--', query]);
+		return this.finish(outcome, 'search', this.readTimeoutMs, (o) => parseSearch(o.stdout, o.stderrTail));
+	}
+
+	/** Locate resolves one library path to the file the OS may open; it opens nothing itself. */
+	async locate(path: string): Promise<EngineResult<LocateReport>> {
+		if (typeof path !== 'string') return { ok: false, error: 'path must be a string' };
+		const outcome = await this.collect(['locate', '--json', '--', path]);
+		return this.finish(outcome, 'locate', this.readTimeoutMs, (o) => parseLocate(o.stdout, o.stderrTail));
+	}
+
+	/** Add OCRs and embeds one file: OCR is fast, the local model is not, so it gets its own
+	 * killable child (cancel from the page kills the child; the queue is main's business). */
+	async add(file: string): Promise<EngineResult<AddReport>> {
+		if (typeof file !== 'string') return { ok: false, error: 'file must be a string' };
+		const { file: exe, baseArgs } = this.resolve();
+		const child = this.spawn.call(exe, [...baseArgs, 'add', '--json', '--', file], { stdio: ['ignore', 'pipe', 'pipe'] });
+		this.addChild = child;
+		try {
+			return await this.runChild(child, 'add', this.addTimeoutMs, (o) => parseAdd(o.stdout, o.stderrTail));
+		} finally {
+			if (this.addChild === child) this.addChild = null;
+		}
+	}
+
+	cancelAdd(): boolean {
+		const child = this.addChild;
+		if (child === null) return false;
+		child.kill('SIGKILL');
+		return true;
 	}
 
 	async dryRun(): Promise<EngineResult<OrganizeReport>> {
@@ -191,7 +255,7 @@ export class Engine {
 		const child = this.spawn.call(file, [...baseArgs, 'ask', '--json', '--', question], { stdio: ['ignore', 'pipe', 'pipe'] });
 		this.askChild = child;
 		try {
-			return await this.runAskChild(child);
+			return await this.runChild(child, 'ask', this.askTimeoutMs, (o) => parseAsk(o.stdout, o.stderrTail));
 		} finally {
 			if (this.askChild === child) this.askChild = null;
 		}
@@ -204,7 +268,14 @@ export class Engine {
 		return true;
 	}
 
-	private async runAskChild(child: EngineProcess): Promise<EngineResult<AskReport>> {
+	/** A child the page can cancel or that may hit its time budget: identical collection code,
+	 * only the timeout and the parser differ. */
+	private async runChild<T>(
+		child: EngineProcess,
+		call: string,
+		timeoutMs: number,
+		parse: (o: EngineOutcome) => Parse<T>,
+	): Promise<EngineResult<T>> {
 		let stdout = '';
 		const stderrTail: string[] = [];
 		let exitCode: number | null = null;
@@ -225,16 +296,18 @@ export class Engine {
 			child.once('error', () => resolve());
 		});
 
-		const outcome = await Promise.race([
+		const outcome: EngineOutcome = { stdout, stderrTail, exitCode, timedOut: false };
+		// Parse as data flows out; a kill flips the flag and the report is replaced by the timeout
+		// message, so half a JSON document is never shown.
+		const race = await Promise.race([
 			closed.then(() => 'closed' as const),
-			delay(this.askTimeoutMs).then(() => 'timeout' as const),
+			delay(timeoutMs).then(() => 'timeout' as const),
 		]);
-		if (outcome === 'timeout') {
+		if (race === 'timeout') {
 			child.kill('SIGKILL');
 			await closed;
-			return { ok: false, error: `ask timed out after ${minutes(this.askTimeoutMs)} and was stopped` };
+			return { ok: false, error: `${call} timed out after ${minutes(timeoutMs)} and was stopped` };
 		}
-
-		return this.parse(parseAsk(stdout, stderrTail));
+		return this.parse(parse(outcome));
 	}
 }

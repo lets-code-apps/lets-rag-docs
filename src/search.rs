@@ -81,3 +81,57 @@ pub async fn search_docs(
         .expect("embed returns one embedding per text");
     Ok(index::query(qdrant, collection, embedding, limit).await?)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::PathBuf;
+
+    use super::{Passage, report_of};
+
+    #[test]
+    fn search_json_shape() {
+        // The shape only: built from Passages directly, so the fixture lock needs no Qdrant.
+        // The first passage has a page (markers present), the second proves the key is absent.
+        let passages: [Passage; 2] = [
+            Passage {
+                text: "the loan was paid off".to_string(),
+                source: "car loan".to_string(),
+                file: "home/car-loan-invoice.pdf.vision.txt".to_string(),
+                chunk: 1,
+                page: Some(4),
+                score: 0.5,
+            },
+            Passage {
+                text: "a manual page".to_string(),
+                source: "manual".to_string(),
+                file: "manual.pdf.text.txt".to_string(),
+                chunk: 0,
+                page: None,
+                score: 0.3,
+            },
+        ];
+        lock(
+            "search.json".to_string(),
+            serde_json::to_string(&report_of(&passages))
+                .unwrap()
+                .to_string(),
+        );
+    }
+
+    // Fixture lock shared with the TS tests and the fake engine (see documents.rs).
+    fn lock(name: String, actual: String) {
+        let path: PathBuf = PathBuf::from("testdata/desktop").join(name);
+        if std::env::var("LOCK_FIXTURES")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+        {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, actual).unwrap();
+            return;
+        }
+        let want: String = fs::read_to_string(&path)
+            .expect("fixture missing: run the tests once with LOCK_FIXTURES=1");
+        assert_eq!(actual, want, "JSON shape changed (or the fixture is stale)");
+    }
+}

@@ -103,3 +103,76 @@ test('a filing draft goes on stdin, never into argv', async () => {
 	assert.deepEqual(seen.args, [['filing', 'save', '--check']]);
 	assert.deepEqual(seen.stdin, ['{"folders":["A b"],"owners":[]}\n']);
 });
+
+// ---- step 3: search, locate, add (add is a killable child like ask) ----
+
+test('search argv is exactly search --json --limit 20 -- <query>', async () => {
+	const recorded: string[][] = [];
+	const spawn = {
+		call(file: string, args: string[]) {
+			void file;
+			recorded.push(args);
+			const child = new FakeChild();
+			queueMicrotask(() => child.emit('close'));
+			return child as unknown as EngineProcess;
+		},
+	};
+	const engine = new Engine({ RAG_DOCS_ENGINE_PATH: 'fake' }, '/repo', spawn, 0);
+	await engine.search('-drop table');
+	assert.deepEqual(recorded, [['search', '--json', '--limit', '20', '--', '-drop table']]);
+});
+
+test('locate argv is exactly locate --json -- <path>', async () => {
+	const recorded: string[][] = [];
+	const spawn = {
+		call(file: string, args: string[]) {
+			void file;
+			recorded.push(args);
+			const child = new FakeChild();
+			queueMicrotask(() => child.emit('close'));
+			return child as unknown as EngineProcess;
+		},
+	};
+	const engine = new Engine({ RAG_DOCS_ENGINE_PATH: 'fake' }, '/repo', spawn, 0);
+	await engine.locate('--weird name.pdf');
+	assert.deepEqual(recorded, [['locate', '--json', '--', '--weird name.pdf']]);
+});
+
+test('add argv is exactly add --json -- <file> and cancelAdd kills the child', async () => {
+	const recorded: string[][] = [];
+	const children: FakeChild[] = [];
+	const spawn = {
+		call(file: string, args: string[]) {
+			void file;
+			recorded.push(args);
+			const child = new FakeChild();
+			children.push(child);
+			// Never closes on its own: only cancelAdd's kill ends it.
+			return child as unknown as EngineProcess;
+		},
+	};
+	const engine = new Engine({ RAG_DOCS_ENGINE_PATH: 'fake' }, '/repo', spawn, 0, 0, undefined, 0, 0, 1000);
+	const running = engine.add('loan.pdf');
+	const cancelled = engine.cancelAdd();
+	const result = await running;
+	assert.deepEqual(recorded, [['add', '--json', '--', 'loan.pdf']]);
+	assert.equal(cancelled, true);
+	assert.equal(children[0]?.killed, true);
+	assert.ok(!result.ok);
+});
+
+test('a filing draft rejects a wrong-typed shared_owner or rename before touching the engine', async () => {
+	const seen = { args: [] as string[][], stdin: [] as string[] };
+	const save = JSON.stringify({ version: 1, ok: true, saved: false, renamed: 0, folders: [], owners: [], errors: [] });
+	const engine = new Engine({ RAG_DOCS_ENGINE_PATH: 'fake' }, '/repo', slowSpawn(1, save, seen), 1000);
+	const badOwner = await engine.filingSave({ folders: [], owners: [], shared_owner: 42 }, true);
+	assert.ok(!badOwner.ok);
+	const badRename = await engine.filingSave({ folders: [], owners: [], renames: [{ list: 'folders', from: 'A' }] }, true);
+	assert.ok(!badRename.ok);
+	assert.equal(seen.args.length, 0, 'no engine call for an invalid draft');
+	// A well-formed rename is forwarded verbatim on stdin.
+	const good = await engine.filingSave({ folders: [], owners: [], renames: [{ list: 'owners', from: 'Car', to: 'Vehicles' }] }, true);
+	assert.ok(good.ok);
+	assert.deepEqual(seen.args, [['filing', 'save', '--check']]);
+	assert.match(seen.stdin[0], /"renames":\[\{"list":"owners","from":"Car","to":"Vehicles"\}\]/);
+});

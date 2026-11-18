@@ -5,6 +5,7 @@
 
 export type DocumentsReport = {
 	version: number;
+	max_file_mb: number | null;
 	status: string;
 	documents: DocumentRow[];
 };
@@ -17,6 +18,40 @@ export type DocumentRow = {
 	folder: string | null;
 	owner: string | null;
 	filed_as: string | null;
+	bytes: number | null;
+	pages: number | null;
+	skipped: string | null;
+};
+
+export type SearchReport = {
+	version: number;
+	passages: PassageRow[];
+};
+
+export type PassageRow = {
+	source: string;
+	file: string;
+	chunk: number;
+	page: number | null;
+	score: number;
+};
+
+export type AddReport = {
+	version: number;
+	status: string;
+	source: string | null;
+	file: string | null;
+	type: string | null;
+	date: string | null;
+	chunks: number | null;
+	duplicate_of: string | null;
+};
+
+export type LocateReport = {
+	version: number;
+	status: string;
+	kind: string | null;
+	path: string | null;
 };
 
 export type AskReport = {
@@ -29,6 +64,7 @@ export type SourceRow = {
 	source: string;
 	file: string;
 	chunk: number;
+	page: number | null;
 	score: number;
 };
 
@@ -43,6 +79,7 @@ export type FilingSaveReport = {
 	version: number;
 	ok: boolean;
 	saved: boolean;
+	renamed: number;
 	folders: string[];
 	owners: string[];
 	errors: NameIssueRow[];
@@ -81,10 +118,23 @@ function firstLine(stderrTail: string[]): string {
 	return line === undefined ? '' : line.trim();
 }
 
-function parseJson(stdout: string, stderrTail: string[]): { ok: true; value: unknown } | { ok: false; error: string } {
+/** The failure line from a real engine error. `tracing` logs share stderr and often come first,
+ * so the `Error: ...` line is the answer; if the engine wrote no such line, its last line is. */
+export function errorLine(stderrTail: string[]): string {
+	const errorLine = [...stderrTail].reverse().find((x) => x.trim().startsWith('Error:'));
+	if (errorLine !== undefined) return errorLine.trim();
+	const last = [...stderrTail].reverse().find((x) => x.trim() !== '');
+	return last === undefined ? '' : last.trim();
+}
+
+function parseJson(
+	stdout: string,
+	stderrTail: string[],
+	pick: (tail: string[]) => string = firstLine,
+): { ok: true; value: unknown } | { ok: false; error: string } {
 	const text = stdout.trim();
 	if (text === '') {
-		const line = firstLine(stderrTail);
+		const line = pick(stderrTail);
 		if (line !== '') return { ok: false, error: line };
 		return { ok: false, error: 'engine printed no JSON on stdout' };
 	}
@@ -121,12 +171,15 @@ export function parseDocuments(stdout: string, stderrTail: string[]): Parse<Docu
 	const parsed = parseJson(stdout, stderrTail);
 	if (!parsed.ok) return { ok: false, error: parsed.error };
 	if (!requireVersion(parsed.value) || typeof parsed.value !== 'object') return err('documents report version is not 1');
-	const rowObj = parsed.value as { status: unknown; documents: unknown };
+	const rowObj = parsed.value as { max_file_mb?: unknown; status: unknown; documents: unknown };
 	if (typeof rowObj.status !== 'string' || !Array.isArray(rowObj.documents)) return err('documents report is missing status/documents');
+	// An engine older than the size limit has no max_file_mb: absent or wrong-typed is null, not a
+	// crash and not a fake 50.
+	const maxFileMb = numberOrNull(rowObj.max_file_mb);
 	const docs: DocumentRow[] = [];
 	for (const row of rowObj.documents) {
 		if (typeof row !== 'object' || row === null) return err('documents row is not an object');
-		const obj = row as { path: unknown; title: unknown; type: unknown; date: unknown; folder: unknown; owner: unknown; filed_as: unknown };
+		const obj = row as { path: unknown; title: unknown; type: unknown; date: unknown; folder: unknown; owner: unknown; filed_as: unknown; bytes?: unknown; pages?: unknown; skipped?: unknown };
 		const path = stringOrNull(obj.path);
 		const type = stringOrNull(obj.type);
 		if (path === null || type === null) return err('documents row has a missing text field');
@@ -141,9 +194,68 @@ export function parseDocuments(stdout: string, stderrTail: string[]): Parse<Docu
 			folder: stringOrNull(obj.folder),
 			owner: stringOrNull(obj.owner),
 			filed_as: stringOrNull(obj.filed_as),
+			// Sizes, pages and the skip reason arrive with the size limit; an older engine simply
+			// omits them, which reads as null (unknown) rather than zero.
+			bytes: numberOrNull(obj.bytes),
+			pages: numberOrNull(obj.pages),
+			skipped: stringOrNull(obj.skipped),
 		});
 	}
-	return { ok: true, value: { version: 1, status: rowObj.status, documents: docs } };
+	return { ok: true, value: { version: 1, max_file_mb: maxFileMb, status: rowObj.status, documents: docs } };
+}
+
+export function parseSearch(stdout: string, stderrTail: string[]): Parse<SearchReport> {
+	const parsed = parseJson(stdout, stderrTail);
+	if (!parsed.ok) return { ok: false, error: parsed.error };
+	if (!requireVersion(parsed.value) || typeof parsed.value !== 'object') return err('search report version is not 1');
+	const obj = parsed.value as { passages: unknown };
+	if (!Array.isArray(obj.passages)) return err('search report is missing passages');
+	const passages: PassageRow[] = [];
+	for (const passage of obj.passages) {
+		if (typeof passage !== 'object' || passage === null) return err('search passage is not an object');
+		const row = passage as { source: unknown; file: unknown; chunk: unknown; page?: unknown; score: unknown };
+		const source = stringOrNull(row.source);
+		const file = stringOrNull(row.file);
+		if (source === null || file === null) return err('search passage has a missing text field');
+		const chunk = numberOrNull(row.chunk);
+		const score = numberOrNull(row.score);
+		if (chunk === null || score === null) return err('search passage has a missing number field');
+		// No page marker in the OCR text means no page: old documents stay honest.
+		const page = row.page === null || row.page === undefined ? null : numberOrNull(row.page);
+		passages.push({ source, file, chunk, page, score });
+	}
+	return { ok: true, value: { version: 1, passages } };
+}
+
+export function parseAdd(stdout: string, stderrTail: string[]): Parse<AddReport> {
+	// An `add` failure's real message is the `Error:` line; tracing logs share stderr ahead of it.
+	const parsed = parseJson(stdout, stderrTail, errorLine);
+	if (!parsed.ok) return { ok: false, error: parsed.error };
+	if (!requireVersion(parsed.value) || typeof parsed.value !== 'object') return err('add report version is not 1');
+	const obj = parsed.value as { status: unknown; source?: unknown; file?: unknown; type?: unknown; date?: unknown; chunks?: unknown; duplicate_of?: unknown };
+	if (typeof obj.status !== 'string') return err('add report is missing status');
+	return {
+		ok: true,
+		value: {
+			version: 1,
+			status: obj.status,
+			source: stringOrNull(obj.source),
+			file: stringOrNull(obj.file),
+			type: stringOrNull(obj.type),
+			date: stringOrNull(obj.date),
+			chunks: numberOrNull(obj.chunks),
+			duplicate_of: stringOrNull(obj.duplicate_of),
+		},
+	};
+}
+
+export function parseLocate(stdout: string, stderrTail: string[]): Parse<LocateReport> {
+	const parsed = parseJson(stdout, stderrTail);
+	if (!parsed.ok) return { ok: false, error: parsed.error };
+	if (!requireVersion(parsed.value) || typeof parsed.value !== 'object') return err('locate report version is not 1');
+	const obj = parsed.value as { status: unknown; kind?: unknown; path?: unknown };
+	if (typeof obj.status !== 'string') return err('locate report is missing status');
+	return { ok: true, value: { version: 1, status: obj.status, kind: stringOrNull(obj.kind), path: stringOrNull(obj.path) } };
 }
 
 export function parseAsk(stdout: string, stderrTail: string[]): Parse<AskReport> {
@@ -156,14 +268,16 @@ export function parseAsk(stdout: string, stderrTail: string[]): Parse<AskReport>
 	const sources: SourceRow[] = [];
 	for (const source of obj.sources) {
 		if (typeof source !== 'object' || source === null) return err('source row is not an object');
-		const row = source as { source: unknown; file: unknown; chunk: unknown; score: unknown };
+		const row = source as { source: unknown; file: unknown; chunk: unknown; page?: unknown; score: unknown };
 		const src = stringOrNull(row.source);
 		const file = stringOrNull(row.file);
 		if (src === null || file === null) return err('source row has a missing text field');
 		const chunk = numberOrNull(row.chunk);
 		const score = numberOrNull(row.score);
 		if (chunk === null || score === null) return err('source row has a missing number field');
-		sources.push({ source: src, file, chunk, score });
+		// The page within the document, when the OCR text has markers; null means unknown.
+		const page = row.page === null || row.page === undefined ? null : numberOrNull(row.page);
+		sources.push({ source: src, file, chunk, page, score });
 	}
 	return { ok: true, value: { version: 1, answer: typeof obj.answer === 'string' ? obj.answer : null, sources } };
 }
@@ -184,7 +298,7 @@ export function parseFilingSave(stdout: string, stderrTail: string[]): Parse<Fil
 	const parsed = parseJson(stdout, stderrTail);
 	if (!parsed.ok) return { ok: false, error: parsed.error };
 	if (!requireVersion(parsed.value) || typeof parsed.value !== 'object') return err('save report version is not 1');
-	const obj = parsed.value as { ok: unknown; saved: unknown; folders: unknown; owners: unknown; errors: unknown };
+	const obj = parsed.value as { ok: unknown; saved: unknown; renamed?: unknown; folders: unknown; owners: unknown; errors: unknown };
 	if (typeof obj.ok !== 'boolean' || typeof obj.saved !== 'boolean' || !Array.isArray(obj.errors)) return err('save report is missing ok/saved/errors');
 	const folders = stringArrayOrNull(obj.folders);
 	const owners = stringArrayOrNull(obj.owners);
@@ -203,7 +317,9 @@ export function parseFilingSave(stdout: string, stderrTail: string[]): Parse<Fil
 		if (name === null && row.name !== null) return err('save error name has the wrong type');
 		errors.push({ list, index, name, code, message });
 	}
-	return { ok: true, value: { version: 1, ok: obj.ok, saved: obj.saved, folders, owners, errors } };
+	// `renamed` is how many rows the rename updates touched; an engine without renames reports 0.
+	const renamed = typeof obj.renamed === 'number' ? obj.renamed : 0;
+	return { ok: true, value: { version: 1, ok: obj.ok, saved: obj.saved, renamed, folders, owners, errors } };
 }
 
 export function parseOrganize(stdout: string, stderrTail: string[]): Parse<OrganizeReport> {

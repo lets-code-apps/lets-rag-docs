@@ -3,8 +3,8 @@
 // window hides it; Quit/Cmd+Q ends the app. Smoke and screenshots drive the real page against the
 // fake engine (pinned by the npm scripts), never real documents or config.
 
-import { app, BrowserWindow, Menu, Tray, ipcMain, nativeImage, nativeTheme } from 'electron';
-import { join } from 'node:path';
+import { app, BrowserWindow, Menu, Tray, dialog, ipcMain, nativeImage, nativeTheme, shell } from 'electron';
+import { basename, isAbsolute, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -46,6 +46,25 @@ let settingsTempDir: string | undefined;
 let memoryLoginItem: { openAtLogin: boolean } | undefined;
 
 const fromUs = (senderFrame?: { url?: string } | null): boolean => senderFrame?.url === INDEX_URL;
+
+// The two OS seams, built once in boot like the settings host:
+// - `opener` resolves nothing; it opens only what main already resolved. Exactly one
+//   this file). Smoke/shots record the path to `openLog` instead of launching a viewer.
+// - `picker` is the real file dialog; smoke/shots hand back synthetic temp files, so no real folder
+//   is ever listed. Picked paths live in main's queue only: the page gets counts and names.
+type OpenerHost = (path: string) => Promise<string>; // the OS host: '' means opened
+type PickerHost = () => Promise<string[]>;
+let opener: OpenerHost;
+let picker: PickerHost;
+const openLog: string[] = [];
+let addQueue: string[] = [];
+let addTotal = 0;
+let pickedTempDir: string | undefined;
+
+function clearAddQueue(): void {
+	addQueue = [];
+	addTotal = 0;
+}
 
 function isRendererNavigation(url: string): boolean {
 	try {
@@ -157,6 +176,35 @@ function makeSettingsController(): SettingsController {
 	return new SettingsController(settingsFile, host);
 }
 
+function makeHosts(): void {
+	// Same seam pattern as the settings host: one decision, testing or not, made in boot.
+	const testing = process.env.RAG_DOCS_SMOKE === '1' || process.env.RAG_DOCS_SHOTS === '1';
+	if (testing) {
+		// Synthetic temp files only: the fake engine decides by name (`dup` -> duplicate,
+		// `broken` -> failed), and the opener records instead of launching a viewer.
+		const dir = mkdtempSync(join(tmpdir(), 'rag-docs-picked-'));
+		pickedTempDir = dir;
+		const names = ['loan.pdf', 'loan-dup.pdf', 'broken.pdf'];
+		for (const name of names) writeFileSync(join(dir, name), 'synthetic');
+		picker = async () => names.map((name) => join(dir, name));
+		opener = async (path) => {
+			void path;
+			return '';
+		};
+		return;
+	}
+	opener = (path) => shell.openPath(path);
+	picker = async () => {
+		const picked = await dialog.showOpenDialog({
+			title: PRODUCT_NAME,
+			buttonLabel: 'Add',
+			properties: ['openFile', 'multiSelections'],
+			filters: [{ name: 'Documents', extensions: ['pdf', 'jpg', 'jpeg', 'png', 'heic', 'tif', 'tiff'] }],
+		});
+		return picked.canceled ? [] : picked.filePaths;
+	};
+}
+
 function registerIpc(): void {
 	ipcMain.handle(IPC.documents, async (event) => {
 		if (!fromUs(event.senderFrame)) return null;
@@ -221,6 +269,81 @@ function registerIpc(): void {
 		return { ok: true, cancelled: engine.cancelAsk() };
 	});
 
+	// Search is a read like documents: no job gate, query after `--`.
+	ipcMain.handle(IPC.search, async (event, query: unknown) => {
+		if (!fromUs(event.senderFrame)) return null;
+		if (typeof query !== 'string') return { ok: false, error: 'query must be a string' };
+		return guard(async () => toIPC(await engine.search(query)));
+	});
+
+	// The file picker runs where it must: in main. Only counts and display names cross to the page.
+	ipcMain.handle(IPC.pickFiles, async (event) => {
+		if (!fromUs(event.senderFrame)) return null;
+		return guard(async () => {
+			const paths = await picker();
+			if (paths.length === 0) return { ok: true, count: 0, names: [] };
+			addQueue = paths.slice();
+			addTotal = paths.length;
+			const names = paths.map((path) => basename(path));
+			return { ok: true, count: paths.length, names };
+		});
+	});
+
+	// One add per call, straight off main's queue. `done` tells the page the queue is empty;
+	// `outcome` is the row's word (added / duplicate / failed).
+	ipcMain.handle(IPC.addNext, async (event) => {
+		if (!fromUs(event.senderFrame)) return null;
+		return guard(async () => {
+			if (addQueue.length === 0) return { ok: false, error: 'no files were picked' };
+			const reason = jobs.addReason();
+			if (reason !== null) return { ok: false, error: reason };
+			if (!jobs.tryBeginAdd()) return { ok: false, error: 'another long job is running' };
+			const path = addQueue.shift() as string;
+			const index = addTotal - addQueue.length;
+			const name = basename(path);
+			const done = addQueue.length === 0;
+			try {
+				const result = await engine.add(path);
+				if (!result.ok) {
+					return { ok: true, done, index, total: addTotal, name, outcome: 'failed', error: result.error };
+				}
+				const outcome = result.value.status === 'duplicate' ? 'duplicate' : 'added';
+				return { ok: true, done, index, total: addTotal, name, outcome, report: result.value };
+			} catch {
+				// A spawn failure counts as a failed row and still advances the queue.
+				return { ok: true, done, index, total: addTotal, name, outcome: 'failed' };
+			} finally {
+				jobs.endAdd();
+			}
+		});
+	});
+
+	ipcMain.handle(IPC.cancelAdd, async (event) => {
+		if (!fromUs(event.senderFrame)) return null;
+		const cancelled = engine.cancelAdd() || addQueue.length > 0;
+		clearAddQueue();
+		return { ok: true, cancelled };
+	});
+
+	// Open is the only path that reaches the OS: the renderer names a document it already shows,
+	// main resolves it through the engine (never trusts the renderer's string as a file), and only
+	// then hands the path to the host opener.
+	ipcMain.handle(IPC.openDocument, async (event, docPath: unknown) => {
+		if (!fromUs(event.senderFrame)) return null;
+		return guard(async () => {
+			if (typeof docPath !== 'string') return { ok: false, error: 'path must be a string' };
+			const located = await engine.locate(docPath);
+			if (!located.ok) return { ok: false, error: located.error };
+			const file = located.value.path;
+			if (located.value.status !== 'ok' || typeof file !== 'string' || !isAbsolute(file)) {
+				return { ok: false, error: 'this document is not in the library' };
+			}
+			const failure = await opener(file);
+			openLog.push(file);
+			return failure === '' ? { ok: true, opened: true } : { ok: false, error: failure };
+		});
+	});
+
 	// Settings cross the same trust boundary: our own page only. `settings` reports the current truth;
 	// `setSetting` validates name+value through the controller and answers with the new truth.
 	ipcMain.handle(IPC.settings, async (event) => {
@@ -252,6 +375,7 @@ if (!app.requestSingleInstanceLock()) {
 function boot(): void {
 	settingsController = makeSettingsController();
 	settingsController.load();
+	makeHosts();
 	registerIpc();
 	if (process.env.RAG_DOCS_SMOKE === '1') {
 		void runSmoke();
