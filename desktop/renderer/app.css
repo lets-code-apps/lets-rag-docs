@@ -828,6 +828,7 @@ the 100%-wide wrap, so the narrow (360px) pane never grows a sideways scrollbar.
   flex: 999 1 420px;
   min-width: 0;
   max-width: 720px;
+  margin-left: 8px;
   flex-direction: column;
   gap: var(--s6);
   padding: var(--s5) 20px var(--s6);
