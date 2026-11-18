@@ -32,6 +32,22 @@ def make_pdf(path, annot=None, pages=1):
     pdf.save(path)
 
 
+class MarkPagesTest(unittest.TestCase):
+    """Page markers for the Vision path: blank pages must keep their number."""
+
+    def test_blank_first_page_keeps_its_number(self):
+        # Swift prints nothing for a blank page, so the text starts with the separator.
+        # Dropping that marker would make page 2 look like page 1.
+        self.assertEqual(ocr.mark_pages("\fSECOND PAGE\ntext"), "\f\fSECOND PAGE\ntext")
+
+    def test_blank_last_page_keeps_its_number(self):
+        # A trailing separator means a blank last page: keep it, so the count stays 2.
+        self.assertEqual(ocr.mark_pages("FIRST PAGE\ntext\f"), "\fFIRST PAGE\ntext\f")
+
+    def test_two_blank_pages_in_the_middle(self):
+        self.assertEqual(ocr.mark_pages("A\f\f\fD"), "\fA\f\f\fD")
+
+
 class PdfTextTest(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
