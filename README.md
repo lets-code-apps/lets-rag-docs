@@ -75,13 +75,22 @@ directory, so run the commands below from the repo root or make them absolute.
 
 lets-rag-docs ingest                      # (re)build the index from data/ocr/
 lets-rag-docs add ~/inbox/invoice.pdf     # one document: copy it in, OCR, classify, index
-lets-rag-docs search "when does the warranty end"   # best-matching passages
+lets-rag-docs search "when does the warranty end"   # best-matching passages (--json gives
+                                # citation keys only: source, file, chunk, page when known)
 lets-rag-docs eval                        # did the right document come back? (evals/rag.jsonl)
 lets-rag-docs ask "when does the warranty end"      # answer with citations from a local LLM
 lets-rag-docs organize --dry-run          # planned copies and moves in library/; changes nothing
 lets-rag-docs organize --apply            # copy originals into the library and re-embed the copies
 lets-rag-docs mcp                         # MCP server over stdio
+lets-rag-docs documents --json            # every row incl. bytes, pages and skipped:"over_limit"
+lets-rag-docs locate --json -- docs/x.pdf # the file a UI may open (ok only for a contained path)
+lets-rag-docs filing show                 # the [classify] folders/owners and the shared owner
+lets-rag-docs filing save                 # stdin JSON: lists (+ renames re-file the copies, shared_owner)
 ```
+
+An original over the configured `[ocr] max_file_mb` (default 50 MB) is never indexed: `add`
+refuses it and `ingest` skips it, and `documents --json` still lists it with its size and
+`skipped:"over_limit"`.
 
 `ingest` drops the collection and rebuilds it from `data/ocr/`, so never run `add` and `ingest` at
 the same time: a rebuild that lands in the middle of an `add` can drop the document `add` is
