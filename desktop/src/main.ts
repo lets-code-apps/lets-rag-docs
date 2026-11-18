@@ -436,6 +436,11 @@ async function drive(browser: BrowserWindow, steps: string): Promise<unknown> {
 	return browser.webContents.executeJavaScript(`(async () => { ${DRIVER}; const d = window.__drive; await d.settle(); ${steps} })()`, true);
 }
 
+/** Like drive, without the settle first: for checks on a page that is still busy on purpose. */
+async function driveNow(browser: BrowserWindow, steps: string): Promise<unknown> {
+	return browser.webContents.executeJavaScript(`(async () => { ${DRIVER}; const d = window.__drive; ${steps} })()`, true);
+}
+
 function freshFakeState(): string {
 	const dir = mkdtempSync(join(tmpdir(), 'rag-docs-fake-'));
 	process.env.FAKE_STATE_FILE = join(dir, 'state.json');
@@ -677,15 +682,16 @@ const ADD_DONE = `await d.click('#addDocsButton');`;
 /** Capture the queue WHILE it runs: one row must say adding… and cancel must be offered.
  * A settle would wait for the last file and show a finished queue, so the steps poll
  * instead, and throw rather than shoot an empty or finished panel. */
+const ADD_RUNNING_CHECK = `const addPanel = document.querySelector('#addPanel');
+  if (!addPanel || addPanel.hidden || !addPanel.textContent.includes('adding…')) throw new Error('add-running: no row is adding… at capture time');
+  if (!document.querySelector('#addCancel') || document.querySelector('#addCancel')?.hidden) throw new Error('add-running: the cancel button is not visible');`;
 const ADD_RUNNING = `d.find('#addDocsButton').click();
   for (let i = 0; i < 60; i += 1) {
     const panel = document.querySelector('#addPanel');
     if (panel && !panel.hidden && panel.textContent.includes('adding…') && !document.querySelector('#addCancel')?.hidden) break;
     await new Promise((r) => setTimeout(r, 50));
   }
-  const addPanel = document.querySelector('#addPanel');
-  if (!addPanel || addPanel.hidden || !addPanel.textContent.includes('adding…')) throw new Error('add-running: no row is adding… at capture time');
-  if (!document.querySelector('#addCancel') || document.querySelector('#addCancel')?.hidden) throw new Error('add-running: the cancel button is not visible');`;
+  ${ADD_RUNNING_CHECK}`;
 /** The over-limit original: pill and size must be on the row, and the row in view. */
 const OVER_LIMIT = `const big = d.row('#libraryRows', 'big-scan.pdf');
   if (big.querySelector('.pill')?.textContent !== 'not indexed: over 50 MB') throw new Error('over-limit: the pill is missing');
@@ -744,12 +750,17 @@ async function runShots(): Promise<void> {
   if (overRow.top < 0 || overRow.bottom > innerHeight + 1) throw new Error('the scrolled row is not in view');`);
 				}
 				// Every shot that starts at the top of the page has to show the window title.
+				// A shot with a slow add is taken mid-run: no settle here (it would wait for the
+				// whole queue), and the steps' own checks are repeated right before the capture.
 				if (!shot.scrollTo && !shot.scrollToRow) {
-					const visible = await drive(browser, `const t = d.find('#appTitle').getBoundingClientRect(); return t.top >= 0 && t.bottom <= innerHeight;`);
+					const check = `const t = d.find('#appTitle').getBoundingClientRect(); return t.top >= 0 && t.bottom <= innerHeight;`;
+					const visible = shot.delayMs ? await driveNow(browser, `${ADD_RUNNING_CHECK} ${check}`) : await drive(browser, check);
 					if (visible !== true) throw new Error(`${shot.name}-${mode}: the window title is not in view`);
 				}
 				const image = await browser.webContents.capturePage();
 				writeFileSync(join(out, `${shot.name}-${mode}.png`), image.toPNG());
+				// Stop a queue that is still running so it can't touch the next shot.
+				if (shot.delayMs) await driveNow(browser, `d.find('#addCancel').click(); await d.settle();`);
 				rmSync(dir, { recursive: true, force: true });
 			}
 		}
