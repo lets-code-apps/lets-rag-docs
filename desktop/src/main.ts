@@ -658,7 +658,7 @@ async function runSmoke(): Promise<void> {
 	app.exit(code);
 }
 
-type Shot = { name: string; scenario: 'library' | 'no-owners'; width: number; height: number; steps: string; scrollTo?: string; delayMs?: number };
+type Shot = { name: string; scenario: 'library' | 'no-owners'; width: number; height: number; steps: string; scrollTo?: string; scrollToRow?: string; delayMs?: number };
 
 const OPEN_FILING = `await d.click('[data-section="filing"]');`;
 const OPEN_OWNERS = `${OPEN_FILING} await d.click('[data-view="owners"]');`;
@@ -672,10 +672,27 @@ const RENAME_AND_ADD = `${OPEN_FILING} await d.pick('Car'); await d.type('#nameI
  * reached by using the app the way a person would. */
 const SEARCH_LOAN = `await d.type('#librarySearch', 'loan');`;
 const ADD_DONE = `await d.click('#addDocsButton');`;
+/** Capture the queue WHILE it runs: one row must say adding… and cancel must be offered.
+ * A settle would wait for the last file and show a finished queue, so the steps poll
+ * instead, and throw rather than shoot an empty or finished panel. */
+const ADD_RUNNING = `d.find('#addDocsButton').click();
+  for (let i = 0; i < 60; i += 1) {
+    const panel = document.querySelector('#addPanel');
+    if (panel && !panel.hidden && panel.textContent.includes('adding…') && !document.querySelector('#addCancel')?.hidden) break;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  const addPanel = document.querySelector('#addPanel');
+  if (!addPanel || addPanel.hidden || !addPanel.textContent.includes('adding…')) throw new Error('add-running: no row is adding… at capture time');
+  if (!document.querySelector('#addCancel') || document.querySelector('#addCancel')?.hidden) throw new Error('add-running: the cancel button is not visible');`;
+/** The over-limit original: pill and size must be on the row, and the row in view. */
+const OVER_LIMIT = `const big = d.row('#libraryRows', 'big-scan.pdf');
+  if (big.querySelector('.pill')?.textContent !== 'not indexed: over 50 MB') throw new Error('over-limit: the pill is missing');
+  if (!(big.querySelector('.row-preview')?.textContent ?? '').includes(' MB')) throw new Error('over-limit: the size is missing');`;
 const SHOTS: Shot[] = [
 	{ name: 'ask', scenario: 'library', width: 1200, height: 820, steps: ASK_STEPS },
 	{ name: 'ask-search', scenario: 'library', width: 1200, height: 820, steps: SEARCH_LOAN },
-	{ name: 'add-running', scenario: 'library', width: 1200, height: 820, steps: `d.find('#addDocsButton').click(); await new Promise((r) => setTimeout(r, 400));`, delayMs: 1500 },
+	{ name: 'add-running', scenario: 'library', width: 1200, height: 820, steps: ADD_RUNNING, delayMs: 1500 },
+	{ name: 'over-limit', scenario: 'library', width: 1200, height: 820, steps: OVER_LIMIT, scrollToRow: 'big-scan.pdf' },
 	{ name: 'add-done', scenario: 'library', width: 1200, height: 820, steps: ADD_DONE },
 	{ name: 'filing-folders', scenario: 'library', width: 1200, height: 820, steps: `${OPEN_FILING} await d.pick('Finance');` },
 	{ name: 'filing-editing', scenario: 'library', width: 1200, height: 820, steps: `${OPEN_FILING} await d.pick('Car'); await d.type('#nameInput', 'Vehicles');` },
@@ -716,8 +733,16 @@ async function runShots(): Promise<void> {
 				await reload;
 				await drive(browser, shot.steps);
 				if (shot.scrollTo) await drive(browser, `d.find('${shot.scrollTo}').scrollIntoView(); await d.settle();`);
+				if (shot.scrollToRow) {
+					// A named row is scrolled to the middle of the window, then confirmed on screen.
+					await drive(browser, `d.row('#libraryRows', '${shot.scrollToRow}').scrollIntoView({ block: 'center' }); await d.settle();
+  const overRow = d.row('#libraryRows', '${shot.scrollToRow}').getBoundingClientRect();
+  // The last row can overshoot the viewport by a fraction of a pixel; 1 px of slack keeps
+  // the check about readability, not sub-pixel rounding.
+  if (overRow.top < 0 || overRow.bottom > innerHeight + 1) throw new Error('the scrolled row is not in view');`);
+				}
 				// Every shot that starts at the top of the page has to show the window title.
-				if (!shot.scrollTo || shot.scrollTo === '#appBar') {
+				if (!shot.scrollTo && !shot.scrollToRow) {
 					const visible = await drive(browser, `const t = d.find('#appTitle').getBoundingClientRect(); return t.top >= 0 && t.bottom <= innerHeight;`);
 					if (visible !== true) throw new Error(`${shot.name}-${mode}: the window title is not in view`);
 				}
