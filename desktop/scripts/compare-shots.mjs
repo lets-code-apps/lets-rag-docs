@@ -66,6 +66,9 @@ app.whenReady().then(async () => {
     const report = renderMarkdown(results, runUrl, actualNames.length);
     writeFileSync(join(outDir, 'compare-report.md'), report);
     writeFileSync(join(outDir, 'compare-report.json'), JSON.stringify(results, null, 2) + '\n');
+    // Every shot's measured ratio, green or not: this is what CI threshold calibration needs, because compare-report
+    // only lists problems and a green run would otherwise record no numbers at all.
+    writeFileSync(join(outDir, 'compare-measured.json'), JSON.stringify(measured, null, 2) + '\n');
     // The report is also printed so a green run shows "all match" in the CI log.
     console.error(report);
     app.exit(code);

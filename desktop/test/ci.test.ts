@@ -41,6 +41,10 @@ test('the artifact upload uses path (not the invalid files key) and the comment 
 	assert.ok(workflow.includes('GH_TOKEN'), 'the gh comment step must set GH_TOKEN');
 	assert.ok(workflow.includes('pull-requests: write'), 'the desktop job needs pull-requests: write');
 	assert.ok(workflow.includes('DESKTOP_CI_URL'), 'the compare step must link the run in the report');
+	// Threshold calibration needs the measured ratio of every shot, not just the problems, so a green run
+	// still leaves numbers behind.
+	assert.ok(workflow.includes('compare-measured.json'), 'the upload must carry the measured per-shot ratios');
+	assert.ok(readFileSync(join(ROOT, 'desktop', 'scripts', 'compare-shots.mjs'), 'utf8').includes('compare-measured.json'));
 });
 
 test('no pull_request_target and no secrets in a public-repo workflow', () => {

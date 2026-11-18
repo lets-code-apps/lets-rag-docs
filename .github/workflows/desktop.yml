@@ -104,6 +104,7 @@ jobs:
             ${{ runner.temp }}/out/shots.txt
             ${{ runner.temp }}/out/compare-report.md
             ${{ runner.temp }}/out/compare-report.json
+            ${{ runner.temp }}/out/compare-measured.json
             ${{ runner.temp }}/out/diff/*.png
       # Put the baseline report in the step summary for every run, and (same-repo PRs only) post one
       # updated PR comment via the runner's preinstalled gh. Values pass through env, never interpolated
