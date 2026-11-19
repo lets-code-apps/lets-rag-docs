@@ -1,0 +1,129 @@
+# CI for RAG Docs: two independent jobs on macOS.
+#   rust    — the crate: fmt, clippy (-D warnings), test. Installs no Node.
+#   desktop — the Electron shell: typecheck, unit tests, a blocking smoke, screenshots compared
+#             against the committed baseline. Installs no Rust (proof the desktop tests need no Cargo).
+# See desktop/README.md, section "CI and the screenshot baseline", for how to read and update it.
+name: desktop
+
+on:
+  push:
+    branches: [desktop, 'feature/**']
+  pull_request:
+    # For pull_request, `branches` filters the BASE branch: desktop (this PR's target) plus main, so the
+    # later desktop -> main PR is checked too. feature/** only matters for stacked PRs into a feature branch.
+    branches: [desktop, main, 'feature/**']
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    timeout-minutes: 25
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Edition 2024, rust-version 1.88; rust-toolchain@stable is new enough. --all-targets also lints
+      # tests/*.rs and #[cfg(test)] code.
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Lint
+        run: cargo clippy --all-targets -- -D warnings
+      # The three #[ignore]d tests (src/add.rs, src/index.rs, src/organize.rs) need Qdrant through
+      # `docker compose`; macOS runners have no Docker, so this job runs the default (non-ignored) set.
+      - name: Test
+        run: cargo test
+
+  desktop:
+    timeout-minutes: 25
+    runs-on: macos-latest
+    # The PR-comment step writes one comment on this PR; read-only elsewhere. Fork PRs cannot write, so that
+    # step is gated to same-repo PRs (see below) and the markdown still lands in the step summary for every
+    # run. Fork code is never run with write access: the comment step is gated to same-repo PRs below.
+    permissions:
+      contents: read
+      pull-requests: write
+    defaults:
+      run:
+        working-directory: desktop
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      # The Electron binary is the slow download; key it on the lockfile so CI reuses it across runs.
+      - name: Cache the Electron binary
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/electron
+          key: ${{ runner.os }}-electron-${{ hashFiles('desktop/package-lock.json') }}
+          restore-keys: ${{ runner.os }}-electron-
+      - name: Install
+        run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Unit tests
+        run: npm test
+      - name: Prepare report folders
+        run: mkdir -p "$RUNNER_TEMP/out" && cp -R screenshots "$RUNNER_TEMP/baseline"
+      - name: Smoke
+        run: npm run smoke 2>&1 | tee "$RUNNER_TEMP/out/smoke.txt"
+      # Fail if the smoke line is missing, so a silent skip can never go green (the SMOKE OK line itself
+      # is what a real pass prints).
+      - name: Require a smoke pass
+        run: grep -q '^SMOKE OK' "$RUNNER_TEMP/out/smoke.txt"
+      # if: !cancelled() so a red smoke still produces the screenshot comparison for the PR comment.
+      - name: Screenshots
+        if: ${{ !cancelled() }}
+        run: npm run shots 2>&1 | tee "$RUNNER_TEMP/out/shots.txt"
+      - name: Require all 38 shots
+        if: ${{ !cancelled() }}
+        run: >-
+          grep -q '^SHOTS OK: 38' "$RUNNER_TEMP/out/shots.txt"
+      # Fails the job when any shot differs from the committed baseline (size, new, removed, or above the
+      # pixel ratio). Writes the report + diff PNGs regardless.
+      - name: Compare against the baseline
+        if: ${{ !cancelled() }}
+        env:
+          # Links the report to this run so the artifact with the diff PNGs is reachable from the PR comment.
+          DESKTOP_CI_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: npm run compare -- "$RUNNER_TEMP/baseline" screenshots "$RUNNER_TEMP/out"
+      - name: Upload desktop CI artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-ci-${{ github.run_id }}
+          if-no-files-found: ignore
+          path: |-
+            desktop/screenshots/*.png
+            ${{ runner.temp }}/out/smoke.txt
+            ${{ runner.temp }}/out/shots.txt
+            ${{ runner.temp }}/out/compare-report.md
+            ${{ runner.temp }}/out/compare-report.json
+            ${{ runner.temp }}/out/compare-measured.json
+            ${{ runner.temp }}/out/diff/*.png
+      # Put the baseline report in the step summary for every run, and (same-repo PRs only) post one
+      # updated PR comment via the runner's preinstalled gh. Values pass through env, never interpolated
+      # into the script text.
+      - name: Publish the baseline report
+        if: ${{ !cancelled() }}
+        env:
+          # gh needs a token with pull-requests:write (granted on this job); the runner's default token
+          # has that scope for same-repo PRs.
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          EVENT: ${{ github.event_name }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          REPO: ${{ github.repository }}
+          REPORT: ${{ runner.temp }}/out/compare-report.md
+          RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ ! -f "$REPORT" ]; then exit 0; fi
+          cat "$REPORT" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$EVENT" = pull_request ] && [ -n "$PR" ] && [ "$HEAD_REPO" = "$REPO" ]; then
+            gh pr comment "$PR" --body-file "$REPORT" --edit-last --create-if-none
+          fi

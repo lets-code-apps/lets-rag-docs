@@ -12,6 +12,7 @@
     "test": "node --test test/*.test.ts test/*.test.mjs",
     "smoke": "npm run build && RAG_DOCS_SMOKE=1 RAG_DOCS_ENGINE_PATH=test/fixtures/fake-engine.mjs electron .",
     "shots": "npm run build && RAG_DOCS_SHOTS=1 RAG_DOCS_ENGINE_PATH=test/fixtures/fake-engine.mjs electron .",
+    "compare": "electron scripts/compare-shots.mjs",
     "start": "npm run build && RAG_DOCS_START_WINDOW=1 electron .",
     "icons": "electron scripts/make-icons.mjs"
   },
