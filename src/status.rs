@@ -77,31 +77,38 @@ async fn reachable(llm: &LlmConfig) -> bool {
     }
 }
 
-/// The library's own clock: mtime of the database file, no query run against it. A pre-1970
-/// mtime (a negative count of seconds in the Unix metadata) is unknown like a missing
-/// file, not a crash.
+/// The library's own clock: mtime of the database file, no query run against it. The formatting
+/// and the pre-1970 guard live in `format_mtime` so the rule is testable on its own (a file on
+/// this machine is never dated 1969, and the OS will not let a test set a pre-1970 mtime).
 fn last_sync(config: &Config) -> Option<String> {
-    let mtime = match std::fs::symlink_metadata(&config.paths.db) {
-        Err(_) => return None,
-        Ok(meta) => file_mtime(meta),
-    };
-    if mtime < 0 {
+    match std::fs::symlink_metadata(&config.paths.db) {
+        Err(_) => None,
+        Ok(meta) => format_mtime(file_mtime(meta)),
+    }
+}
+
+/// Whole seconds since the epoch to the timestamp, or `null` when the count is negative. The
+/// negative check comes before any cast: a pre-1970 mtime is unknown, never fed to the date walk
+/// (casting `-1` to `u64` would walk ~500 billion years). Split from `last_sync` so a test can
+/// drive both halves without a hand-made 1969 file.
+fn format_mtime(seconds: i64) -> Option<String> {
+    if seconds < 0 {
         return None;
     }
-    Some(rfc3339_utc(mtime as u64))
+    Some(rfc3339_utc(seconds as u64))
 }
 
-/// `st_mtime` comes from `std::os::macos::fs::MetadataExt`, one body per OS (same
-/// `#[cfg]` pattern `documents.rs` uses for `st_flags`): off macOS there is no
-/// portable seconds-resolution mtime in the standard library, so `null` — unknown —
-/// rather than a guess.
-#[cfg(target_os = "macos")]
+/// The database file's mtime in whole seconds. `mtime()` is `std::os::unix::fs::MetadataExt`,
+/// which every Unix target (macOS included) implements — the same `#[cfg]`-per-platform pattern
+/// `documents.rs` uses for `st_flags`. Off Unix the standard library gives no portable
+/// seconds-resolution mtime, so `null` — unknown — rather than a guess.
+#[cfg(unix)]
 fn file_mtime(meta: std::fs::Metadata) -> i64 {
-    use std::os::macos::fs::MetadataExt;
-    meta.st_mtime()
+    use std::os::unix::fs::MetadataExt;
+    meta.mtime()
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(unix))]
 fn file_mtime(_meta: std::fs::Metadata) -> i64 {
     -1
 }
@@ -113,8 +120,8 @@ fn civil_from_days(days: i64) -> (i64, u8, u8) {
     let leap = |year: i64| year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
     let mut year = 1970;
     let mut rest = days;
-    // Years before 1970 are filtered out upstream (`duration_since` fails first), so the
-    // walk only moves forward.
+    // Years before 1970 are filtered out upstream (`format_mtime` guards a negative
+    // count before any date math), so the walk only ever moves forward.
     loop {
         let length = if leap(year) { 366 } else { 365 };
         if rest < length {
@@ -245,10 +252,42 @@ mod tests {
         );
         fs_touch(&config.paths.db);
         let meta = std::fs::symlink_metadata(&config.paths.db).unwrap();
+        // Self-consistent on every target: the figure is whatever `file_mtime` reads, formatted.
+        // No negative is ever cast here, so this cannot spin the year-by-year date walk.
         assert_eq!(
             last_sync(&config),
-            Some(rfc3339_utc(file_mtime(meta) as u64)),
+            format_mtime(file_mtime(meta)),
             "the mtime, formatted"
+        );
+    }
+
+    #[test]
+    fn format_mtime_formats_a_known_value_and_guards_a_negative() {
+        // A fixed known mtime (2024-02-29, a leap day) becomes the timestamp, and a pre-1970
+        // count is unknown — the guard runs before any cast, so no negative reaches `rfc3339_utc`.
+        assert_eq!(
+            format_mtime(1_709_164_800),
+            Some("2024-02-29T00:00:00Z".to_string()),
+            "a known mtime"
+        );
+        assert_eq!(
+            format_mtime(-1),
+            None,
+            "a pre-1970 mtime is unknown, never a date"
+        );
+    }
+
+    #[test]
+    fn last_sync_is_known_on_unix() {
+        // This command only runs on the desktop (macOS), where a file just written has a real,
+        // positive mtime, so the overview's "last sync" figure is a timestamp, not `never`.
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.paths.db = dir.path().join("documents.sqlite");
+        fs_touch(&config.paths.db);
+        assert!(
+            last_sync(&config).is_some(),
+            "a just-written database has a known mtime on Unix"
         );
     }
 
