@@ -929,6 +929,161 @@ the 100%-wide wrap, so the narrow (360px) pane never grows a sideways scrollbar.
   transform: translateX(20px);
 }
 
+/* ---- overview: one column like settings — figures, then the needs-you rows or the clear line.
+     Count pill on the sidebar row: 20px, `raised` fill (`surface` when current), 12/500 `fg`,
+     never coloured: the rows' own pills carry the tone with words. ---- */
+
+.nav .count {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  margin-left: auto;
+  border-radius: var(--r-pill);
+  background: var(--raised);
+  color: var(--fg);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.nav button[aria-current='page'] .count {
+  background: var(--surface);
+}
+
+.overview-body {
+  box-sizing: border-box;
+  display: flex;
+  flex: 999 1 420px;
+  min-width: 0;
+  max-width: 760px;
+  flex-direction: column;
+  gap: var(--s6);
+  padding: var(--s5) 20px var(--s6);
+  overflow-y: auto;
+}
+
+.overview-body h1 {
+  font-size: 26px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+/* Figures: label above value in an auto-fit grid; two columns by two at 360px. */
+.figures {
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: var(--s4) var(--s5);
+}
+
+.figures > div {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.figures dt {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--muted);
+}
+
+.figures dd {
+  margin: 0;
+  min-height: 26px;
+  display: flex;
+  align-items: center;
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+/* The all-clear line: figures and one muted sentence with a check, no list, no illustration. */
+.all-clear {
+  margin: 0;
+  padding-top: var(--s4);
+  border-top: 1px solid var(--line);
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  font-size: 16px;
+  line-height: 1.55;
+  color: var(--muted);
+}
+
+.needs-head {
+  margin: 0 0 var(--s1);
+  display: flex;
+  align-items: baseline;
+  gap: var(--s2);
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.needs-head .count-text {
+  font-size: 13px;
+  font-weight: 400;
+  letter-spacing: 0;
+  color: var(--muted);
+}
+
+/* Settings-style row: pill + title + meta on the left, one secondary button on the right;
+   the button wraps under the text when the window is narrow. */
+.need-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px 24px;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.need-text {
+  display: flex;
+  flex: 1 1 260px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+}
+
+.need-title {
+  font-size: 15px;
+  font-weight: 500;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.need-meta {
+  max-width: 62ch;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--muted);
+}
+
+/* The "keep downloaded" note, inline under its row: static copy, no engine data. */
+.howto {
+  flex-basis: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+}
+
+.howto .howto-steps {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--muted);
+}
+
 /* ---- Smallest window (360px): the panes stack and the whole page scrolls. ---- */
 
 @media (max-width: 480px) {
@@ -961,7 +1116,8 @@ the 100%-wide wrap, so the narrow (360px) pane never grows a sideways scrollbar.
 
   .conversation,
   .detail,
-  .settings-body {
+  .settings-body,
+  .overview-body {
     flex: none;
     overflow: visible;
   }

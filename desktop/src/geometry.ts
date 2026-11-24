@@ -40,6 +40,20 @@ export const GEOMETRY = `
     }
   }
 
+  // 5) overview-article: the overview article sits hard against the sidebar exactly like rule 1's
+  // settings article (side by side at wide, stacked flush-left at the 360px minimum). Only on the
+  // overview screen, which is the one the window opens on.
+  const oBody = document.querySelector('.overview-body');
+  if (oBody && nav && shown(oBody)) {
+    const b = oBody.getBoundingClientRect();
+    const n = nav.getBoundingClientRect();
+    if (window.innerWidth > 480) {
+      if (Math.abs(b.left - n.right) > ${TOLERANCE}) fail.push('overview-article gap=' + (b.left - n.right).toFixed(1));
+    } else if (b.top < n.bottom - ${TOLERANCE} || b.left > ${TOLERANCE}) {
+      fail.push('overview-article top=' + (b.top - n.bottom).toFixed(1) + ' left=' + b.left.toFixed(1));
+    }
+  }
+
   // 2) library-search: the search field stays at the top of the library pane, under its heading, above
   // the rows and above the add panel when an add is showing. Only on the ask screen.
   const lib = document.querySelector('.library');
