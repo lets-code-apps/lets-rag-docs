@@ -156,7 +156,8 @@ function filed(state) {
   // What the ORIGINAL lists filed against the ORIGINAL rows: edits since (a rename, a new shared
   // owner) show up as moves. Files added later have no copy on disk yet.
   const base = { folders: FOLDERS, owners: scenario === 'no-owners' ? [] : OWNERS, shared: SHARED, docs: null };
-  return Object.fromEntries(DOCUMENTS.map((doc) => [doc[0], target(doc, base)]));
+  const source = scenario === 'clear' ? docsOf(initialState()) : DOCUMENTS; // tidy rows file where the tidy rows put them
+  return Object.fromEntries(source.map((doc) => [doc[0], target(doc, base)]));
 }
 
 function documents(state) {

@@ -538,7 +538,21 @@ async function runSmoke(): Promise<void> {
 		process.env.FAKE_MODEL = 'down';
 		const browser = makeWindow();
 		await loaded(browser);
-		const result = (await drive(browser, String.raw`
+		const bootOverview = (await drive(browser, String.raw`
+      const nav = [...document.querySelectorAll('.nav button')].map((b) => b.dataset.section).join(',');
+      const row = d.find('.nav [data-section="overview"]');
+      const pills = [...document.querySelectorAll('#needRows .need-row .pill')].map((x) => x.textContent);
+      const oneBtn = [...document.querySelectorAll('#needRows .need-row')].every((r) => r.querySelectorAll('.btn.secondary').length === 1);
+      const noPrimary = d.find('#needRows').querySelectorAll('.btn.primary').length === 0;
+      return nav === 'overview,ask,filing,settings' && !d.find('#overviewScreen').hidden && d.find('#askScreen').hidden
+        && row.getAttribute('aria-current') === 'page' && row.getAttribute('aria-label') === 'overview, 4 need you'
+        && row.querySelector('.count').textContent === '4'
+        && d.find('#figures').children.length === 4 && d.find('#figModel').textContent === 'unreachable'
+        && pills.join('|') === 'model unreachable|no known owner|not indexed|only in iCloud'
+        && oneBtn && noPrimary;
+    `)) as boolean;
+    const result = (await drive(browser, String.raw`
+      await d.click('[data-section="ask"]');
       // Sizes and the over-50 MB pill come straight from the report; the big original is listed
       // with its size and the reason it was never indexed.
       await d.click('[data-section="ask"]');
@@ -584,6 +598,7 @@ async function runSmoke(): Promise<void> {
       // The overview mid-preview: five items (model, re-sort, owners, unindexed, iCloud) and
       // its "preview and apply" button reopens the SAME preview without a second dry-run.
       await d.click('[data-section="overview"]');
+      await d.settle();
       const pills = [...document.querySelectorAll('#needRows .need-row .pill')].map((x) => x.textContent);
       const overviewFive = pills.length === 5 && d.find('.nav [data-section="overview"]').getAttribute('aria-label') === 'overview, 5 need you'
         && pills.join('|') === 'model unreachable|re-sort waiting|no known owner|not indexed|only in iCloud';
@@ -617,19 +632,7 @@ async function runSmoke(): Promise<void> {
 		// fake filed copy — the renderer never named a path.
 		// The window opened on overview: shared sidebar in the design's order, count 4 before any
 		// rename exists (no re-sort item yet), four figures, neutral one-button rows, model pill red.
-		result.bootOverview = (await drive(browser, String.raw`
-      const nav = [...document.querySelectorAll('.nav button')].map((b) => b.dataset.section).join(',');
-      const row = d.find('.nav [data-section="overview"]');
-      const pills = [...document.querySelectorAll('#needRows .need-row .pill')].map((x) => x.textContent);
-      const oneBtn = [...document.querySelectorAll('#needRows .need-row')].every((r) => r.querySelectorAll('.btn.secondary').length === 1);
-      const noPrimary = d.find('#needRows').querySelectorAll('.btn.primary').length === 0;
-      return nav === 'overview,ask,filing,settings' && !d.find('#overviewScreen').hidden && d.find('#askScreen').hidden
-        && row.getAttribute('aria-current') === 'page' && row.getAttribute('aria-label') === 'overview, 4 need you'
-        && row.querySelector('.count').textContent === '4'
-        && d.find('#figures').children.length === 4 && d.find('#figModel').textContent === 'unreachable'
-        && pills.join('|') === 'model unreachable|no known owner|not indexed|only in iCloud'
-        && oneBtn && noPrimary;
-    `)) as boolean;
+		result.bootOverview = bootOverview;
 		result.openedPath = openLog[openLog.length - 1] === '/tmp/rag-docs-fake/library/Finance/Alex Example/2025/2025-03-14 Car loan - Repayment schedule.pdf';
 		// Edit -> save -> reload: the saved list comes back from the engine, not from page memory.
 		const reload = loaded(browser);
@@ -644,6 +647,7 @@ async function runSmoke(): Promise<void> {
 		// and main must refuse apply.
 		process.env.FAKE_DRY_RUN_DELAY_MS = '1500';
 		result.raceSafe = (await drive(browser, String.raw`
+      await d.click('[data-section="filing"]');
       await d.pick('Finance');
       await d.type('#nameInput', 'Money');
       await d.click('#saveButton');
@@ -663,8 +667,8 @@ async function runSmoke(): Promise<void> {
 		// Every overview route, taken in order: settings, the filtered library, the iCloud steps with
 		// "got it", and review into filing's owners view with Shared picked. Then the all-clear pass on the
 		// tidy library with the model back: one line, no list, no count.
-		result.clearRoutes = (await drive(browser, String.raw`
-      const btn = (t) => [...document.querySelectorAll('#needRows .need-row button')].find((b) => b.textContent.includes(t));
+		const clearFlags = (await drive(browser, String.raw`
+      const btn = (t) => [...document.querySelectorAll('#needRows .need-row button')].find((b) => b.textContent.trim() === t);
       await d.click('[data-section="overview"]');
       btn('open settings').click();
       const settingsOn = !d.find('#settingsScreen').hidden;
@@ -680,19 +684,23 @@ async function runSmoke(): Promise<void> {
       const stepsShown = !!document.querySelector('.howto .howto-steps') && !!document.querySelector('.howto button');
       document.querySelector('.howto button').click();
       await d.settle();
-      const howGone = ![...document.querySelectorAll('#needRows .need-row button')].some((b) => b.textContent.includes('show how'));
+      const howGone = ![...document.querySelectorAll('#needRows .need-row button')].some((b) => b.textContent.trim() === 'show how');
       await d.click('[data-section="overview"]');
       btn('review').click();
+      await new Promise((r) => setTimeout(r, 50));
       const sharedSelected = d.find('.nav [data-section="filing"]').getAttribute('aria-current') === 'page'
         && document.querySelector('#viewSwitch').querySelector('[data-view="owners"]')?.getAttribute('aria-checked') === 'true'
         && [...document.querySelectorAll('#filingRows .row')].some((r) => r.getAttribute('aria-pressed') === 'true' && r.querySelector('.row-title')?.textContent === 'Shared');
-      const kb = [...document.querySelectorAll('.nav button'), ...document.querySelectorAll('#needRows .need-row button')];
-      return settingsOn && onlySkipped && restored && stepsShown && howGone && sharedSelected;
-    `)) as boolean;
+      return { settingsOn, onlySkipped, restored, stepsShown, howGone, sharedSelected };
+    `)) as Record<string, boolean>;
+		result.clearRoutes = Object.values(clearFlags).every(Boolean);
 		result.keyboardOk = (await drive(browser, String.raw`
       const kb = [...document.querySelectorAll('.nav button'), ...document.querySelectorAll('#needRows .need-row button')];
       return kb.length > 4 && kb.every((b) => b.tagName === 'BUTTON' && !b.disabled && b.tabIndex >= 0);
     `)) as boolean;
+		// All-clear pass on a clean state: lists saved by the race pass would otherwise
+		// leave a re-sort pending, which is not what this pass is about.
+		process.env.FAKE_STATE_FILE = join(freshFakeState(), 'state.json');
 		process.env.FAKE_SCENARIO = 'clear';
 		delete process.env.FAKE_MODEL;
 		const reloadClear = loaded(browser);
