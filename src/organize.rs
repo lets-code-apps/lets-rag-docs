@@ -27,6 +27,7 @@ use crate::chunk;
 use crate::classify;
 use crate::config::Config;
 use crate::db;
+use crate::documents;
 use crate::embed::EmbedClient;
 use crate::index;
 use qdrant_client::Qdrant;
@@ -102,6 +103,7 @@ enum Action {
     AlreadyThere,
     Duplicate,
     MissingOriginal,
+    Dataless,
 }
 
 /// `organize --json`: one JSON object. `items` is the plan, `counts` the outcome (dry-run fills
@@ -299,6 +301,32 @@ pub fn parse_mode(dry_run: bool, apply: bool) -> Option<Mode> {
     }
 }
 
+/// Whether an original is left out of the plan before any open: its contents live only in iCloud
+/// (`SF_DATALESS`), so hashing it would make macOS download it, and `documents --json` already
+/// flags the same file for the overview's iCloud item. Pure over the flag value — macOS refuses
+/// to create a real dataless file, so the tests feed the flag directly and check a real ordinary
+/// file reads as not dataless (the metadata-only half).
+fn leaves_for_icloud(flags: u32) -> bool {
+    documents::is_dataless(flags)
+}
+
+/// `st_flags` of a file, read with `symlink_metadata` (a `stat`, never a download). `st_flags()`
+/// is a `std::os::macos::fs::MetadataExt` method, so this is one body per OS — the same `#[cfg]`
+/// pattern `documents.rs` uses; off macOS there is no such flag, so `0` (never dataless).
+#[cfg(target_os = "macos")]
+fn read_flags(path: &Path) -> u32 {
+    use std::os::macos::fs::MetadataExt;
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_file() => meta.st_flags(),
+        _ => 0,
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn read_flags(_path: &Path) -> u32 {
+    0
+}
+
 /// The library must be a place of its own: if it is inside (or contains) `docs_dir` or `ocr_dir`, a
 /// filed copy could later be OCR'd or classified as a new original. Refuse rather than risk that.
 fn check_library_separation(config: &Config) -> anyhow::Result<()> {
@@ -359,6 +387,18 @@ fn build_plan(config: &Config, conn: &Connection) -> anyhow::Result<Built> {
         let rel: String = path.strip_prefix(ocr_dir)?.to_string_lossy().to_string();
         let original = classify::original_path(docs_dir, &rel);
         let orel = classify::original_rel(&rel);
+        // An iCloud-only (dataless) original is left for the overview's iCloud item: hashing it
+        // below would open the file and ask macOS to download it, which this command must never
+        // do. The check is a `stat` (`st_flags`), so even deciding stays cheap and safe.
+        if leaves_for_icloud(read_flags(&original)) {
+            lines.push(format!("only in iCloud  {rel}"));
+            items.push(PlanItem {
+                action: Action::Dataless,
+                from: rel.to_string(),
+                to: None,
+            });
+            continue;
+        }
         if classify::over_limit(&original, max_bytes) {
             tracing::warn!("{} is over the [ocr] max_file_mb limit", rel);
             lines.push(format!(
@@ -1160,6 +1200,72 @@ mod tests {
         assert_eq!(
             plan_line(&plan.counts),
             "planned 1: 1 to copy, 0 to move, 0 already there, 0 failed, 0 duplicate, 0 not classified, 0 missing original",
+        );
+    }
+
+    #[test]
+    fn dataless_original_is_left_out_before_hashing() {
+        // The flag check is fed a stand-in: macOS refuses to create a real dataless file, so the
+        // SF_DATALESS bit is passed in rather than read. `build_plan` runs `leaves_for_icloud`
+        // before `classify::hash_file` opens (and downloads) the original, so a dataless original
+        // becomes the iCloud item, never a copy.
+        assert!(
+            leaves_for_icloud(0x4000_0000),
+            "a dataless original is left to the iCloud item"
+        );
+        assert!(
+            leaves_for_icloud(0x4000_8000),
+            "the bit set among other flags still counts"
+        );
+        assert!(
+            !leaves_for_icloud(0),
+            "an ordinary original is hashed and planned"
+        );
+        assert!(
+            !leaves_for_icloud(0x8000_0000),
+            "a neighbouring flag is not dataless"
+        );
+
+        // The plan records the iCloud action, not a copy.
+        let item = PlanItem {
+            action: Action::Dataless,
+            from: "x.pdf.vision.txt".to_string(),
+            to: None,
+        };
+        assert!(
+            serde_json::to_string(&item)
+                .unwrap()
+                .contains("\"action\":\"dataless\"")
+        );
+
+        // The metadata-only half: a real ordinary file on this machine reads as not dataless, and
+        // the check is a `stat`, so it never opens the file. The plan puts it where the lists say.
+        let f = fixture();
+        let conn = open(&f);
+        add_doc(
+            &f,
+            &conn,
+            "one.pdf.vision.txt",
+            "abc",
+            Some("Report"),
+            Some("Home"),
+        );
+        let plan = build_plan(&f.config, &conn).unwrap();
+        let entry = plan.entries.first().unwrap();
+        assert_eq!(
+            entry.rel,
+            PathBuf::from("Home/Shared/Report.pdf"),
+            "an ordinary original is planned",
+        );
+        let dataless_items = plan
+            .items
+            .iter()
+            .filter(|it| matches!(it.action, Action::Dataless))
+            .count();
+        assert_eq!(dataless_items, 0, "a local file is not the iCloud item");
+        assert!(
+            !leaves_for_icloud(read_flags(&entry.original)),
+            "a local file is not iCloud-only"
         );
     }
 

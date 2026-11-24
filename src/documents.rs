@@ -185,8 +185,9 @@ fn row_bytes(config: &Config, rel: &Path) -> Option<u64> {
 /// The macOS `SF_DATALESS` bit (`0x4000_0000`) set in `st_flags` when a file's contents
 /// live only in iCloud Drive. Pure so the rule is testable without an iCloud mount:
 /// the OS refuses to create a dataless file in a test, so `dataless_uses_metadata_only`
-/// below proves only the metadata-only half, and this bit logic is proven here.
-fn is_dataless(flags: u32) -> bool {
+/// below proves only the metadata-only half, and this bit logic is proven here. Shared with
+/// `organize` (crate-internal), which must leave such originals out of its dry-run.
+pub(crate) fn is_dataless(flags: u32) -> bool {
     flags & 0x4000_0000 != 0
 }
 
