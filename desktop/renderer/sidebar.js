@@ -1,7 +1,8 @@
 // The shared sidebar (design Sidebar.dc.html): one copy of the rows for every window, so no screen
 // keeps its own navigation markup. build() creates the four rows once from model.sidebarItems —
-// order overview, ask, filing, settings, `graph` absent until LET-139 lands — with createElement
-// and textContent only. paint() just moves the current row and the overview count pill.
+// order overview, ask, filing, settings; the design's fifth section (LET-139) is not in this app
+// yet — with createElement and textContent only. paint() just moves the current row and the
+// overview count pill.
 
 import * as m from './model.js';
 
