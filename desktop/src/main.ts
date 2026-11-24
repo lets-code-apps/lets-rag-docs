@@ -859,7 +859,7 @@ const SHOTS: Shot[] = [
 	{ name: 'settings-small', scenario: 'library', width: 360, height: 780, steps: OPEN_SETTINGS },
 	{ name: 'overview-busy', scenario: 'library', width: 1200, height: 820, steps: `${RENAME_AND_ADD} await d.click('[data-section="overview"]');`, model: 'down' },
 	{ name: 'overview-clear', scenario: 'clear', width: 1200, height: 820, steps: '' },
-	{ name: 'overview-small', scenario: 'library', width: 360, height: 780, steps: `${RENAME_AND_ADD} await d.click('[data-section="overview"]');`, model: 'down' },
+	{ name: 'overview-small', scenario: 'library', width: 360, height: 780, steps: `${RENAME_AND_ADD} await d.click('[data-section="overview"]');`, model: 'down', scrollTo: '#appBar' },
 ];
 
 async function runShots(): Promise<void> {
