@@ -61,10 +61,10 @@ test('child_process is only used by engine.ts', () => {
 test('preload exposes the ipc channels', () => {
 	const ipc = readFileSync(join(SRC, 'ipc.ts'), 'utf8');
 	const preload = readFileSync(join(SRC, 'preload.cjs'), 'utf8');
-	for (const name of ['ask', 'cancelAsk', 'documents', 'filingShow', 'filingSave', 'dryRun', 'resort', 'settings', 'setSetting']) {
+	for (const name of ['ask', 'cancelAsk', 'documents', 'status', 'filingShow', 'filingSave', 'dryRun', 'resort', 'settings', 'setSetting']) {
 		assert.ok(ipc.includes(`'rag.${name}'`), `ipc.ts missing ${name}`);
 	}
-	for (const fn of ['ask', 'cancelAsk', 'documents', 'filing', 'saveFiling', 'dryRun', 'resort', 'settings', 'setSetting']) {
+	for (const fn of ['ask', 'cancelAsk', 'documents', 'status', 'filing', 'saveFiling', 'dryRun', 'resort', 'settings', 'setSetting']) {
 		assert.ok(preload.includes(`${fn}:`), `preload missing ${fn}`);
 	}
 });
@@ -72,8 +72,9 @@ test('preload exposes the ipc channels', () => {
 test('every IPC handler checks senderFrame', () => {
 	const main = readFileSync(join(SRC, 'main.ts'), 'utf8');
 	const handles = main.split('ipcMain.handle(').slice(1);
-	// 9 read/edit channels plus step 3's five: search, pickFiles, addNext, cancelAdd, openDocument.
-	assert.equal(handles.length, 14, 'all declared channels need handlers');
+	// 9 read/edit channels plus step 3's five: search, pickFiles, addNext, cancelAdd,
+	// openDocument, plus #19's status.
+	assert.equal(handles.length, 15, 'all declared channels need handlers');
 	// The renderer reaches apply in one place only: the explicit "move N copies" button.
 	const page = readFileSync(join(RENDERER, 'app.js'), 'utf8');
 	assert.equal(page.split('api.resort(').length - 1, 1);

@@ -212,6 +212,11 @@ function registerIpc(): void {
 		return guard(async () => toIPC(await engine.documents()));
 	});
 
+	ipcMain.handle(IPC.status, async (event) => {
+		if (!fromUs(event.senderFrame)) return null;
+		return guard(async () => toIPC(await engine.status()));
+	});
+
 	ipcMain.handle(IPC.filingShow, async (event) => {
 		if (!fromUs(event.senderFrame)) return null;
 		return guard(async () => toIPC(await engine.filingShow()));

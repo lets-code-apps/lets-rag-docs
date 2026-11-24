@@ -16,6 +16,7 @@ import {
 	parseLocate,
 	parseOrganize,
 	parseSearch,
+	parseStatus,
 	type AddReport,
 	type AskReport,
 	type DocumentsReport,
@@ -25,6 +26,7 @@ import {
 	type OrganizeReport,
 	type Parse,
 	type SearchReport,
+	type StatusReport,
 } from './reports.ts';
 import { resolveEngine } from './engine-path.ts';
 
@@ -169,6 +171,13 @@ export class Engine {
 	async documents(): Promise<EngineResult<DocumentsReport>> {
 		const outcome = await this.collect(['documents', '--json']);
 		return this.finish(outcome, 'documents', this.readTimeoutMs, (o) => parseDocuments(o.stdout, o.stderrTail));
+	}
+
+	/** The overview's two facts: model reachability (the engine pings its own model, the
+	 * app never does) and the library's last sync. A read: fixed argv, read budget. */
+	async status(): Promise<EngineResult<StatusReport>> {
+		const outcome = await this.collect(['status', '--json']);
+		return this.finish(outcome, 'status', this.readTimeoutMs, (o) => parseStatus(o.stdout, o.stderrTail));
 	}
 
 	async filingShow(): Promise<EngineResult<FilingShowReport>> {
