@@ -4,6 +4,7 @@
 // with textContent only.
 
 import * as m from './model.js';
+import * as sidebar from './sidebar.js';
 
 const api = window.ragDocs;
 const $ = (id) => document.getElementById(id);
@@ -12,9 +13,11 @@ const PREVIEW_ROWS = 3;
 const ALL_ROWS = 200;
 
 const state = {
-  section: 'ask',
+  section: 'overview',
   docs: null,
   docsError: null,
+  libraryFilter: null, // 'not-indexed' while the overview's "show documents" route holds
+  overview: { status: null, statusError: null, how: 'closed' }, // 'closed' | 'open' | 'dismissed'
   ask: { question: '', busy: false, report: null, error: null, cancelled: false, copied: false },
   filing: {
     loaded: false,
@@ -112,11 +115,12 @@ function listRow(row, onPick) {
 // ---- navigation ----
 
 function render() {
-  for (const button of document.querySelectorAll('.nav button')) {
-    const on = button.dataset.section === state.section;
-    if (on) button.setAttribute('aria-current', 'page');
-    else button.removeAttribute('aria-current');
-  }
+  renderOverview();
+  // The sidebar is one shared component (design Sidebar.dc.html): paint moves the current row
+  // and shows the overview count. It counts what a render can currently see pending; the dry-run
+  // item appears when the memo lands, then a render raises the count.
+  sidebar.paint($('sidebar'), state.section, paintedItems.length);
+  $('overviewScreen').hidden = state.section !== 'overview';
   $('askScreen').hidden = state.section !== 'ask';
   $('filingScreen').hidden = state.section !== 'filing';
   $('settingsScreen').hidden = state.section !== 'settings';
@@ -128,8 +132,128 @@ function render() {
 function showSection(section) {
   state.section = section;
   render();
-  if (section === 'filing' && !state.filing.loaded) void loadFiling();
+  if (section === 'filing' && !state.filing.loaded) void loadFilingLists();
   if (section === 'settings') void loadSettings();
+}
+
+// ---- overview ----
+
+/** The needs-you items from the last render; the sidebar counts exactly these. */
+let paintedItems = [];
+
+async function loadOverview() {
+  const res = await track(api.status());
+  if (res && res.ok) {
+    state.overview.status = res.report;
+    state.overview.statusError = null;
+  } else {
+    // A failed call is `unknown`, never a claim the model is down: one honest error line, no item.
+    state.overview.status = null;
+    state.overview.statusError = res?.error ?? 'The engine did not answer about the model.';
+  }
+  render();
+}
+
+/** One row of the design's list: a StatusPill naming the kind, title, meta, one secondary button. */
+function needRow(item) {
+  const row = el('div', 'need-row');
+  const text = el('div', 'need-text');
+  text.append(pill(item.pill, item.tone));
+  text.append(el('span', 'need-title', item.title));
+  text.append(el('span', 'need-meta', item.meta));
+  row.append(text);
+  if (item.route === 'how' && state.overview.how === 'open') {
+    // The static "keep downloaded" steps, inline under the row; `got it` dismisses it for the session.
+    const howto = el('div', 'howto');
+    howto.append(el('p', 'howto-steps', '1. Open Finder. 2. Right-click your library folder. 3. Choose Keep Downloaded.'));
+    const got = el('button', 'btn secondary');
+    got.type = 'button';
+    got.append(el('span', '', 'got it'));
+    got.addEventListener('click', () => {
+      state.overview.how = 'dismissed';
+      render();
+    });
+    howto.append(got);
+    row.append(howto);
+  }
+  const button = el('button', 'btn secondary');
+  button.type = 'button';
+  button.append(icon(item.glyph, 18), el('span', '', item.action));
+  button.addEventListener('click', () => routeOverview(item.route));
+  row.append(button);
+  return row;
+}
+
+function renderOverview() {
+  const o = state.overview;
+  const docs = state.docs;
+  const dry = f().dry ?? (dryMemo && dryMemo.generation === saveGeneration ? dryMemo.report : null);
+  const items = m.overviewItems({ status: o.status, docs, saved: f().saved, dry });
+  paintedItems = items;
+
+  const figures = m.overviewFigures(docs, o.status);
+  $('figDocuments').textContent = figures[0].value;
+  $('figIndexed').textContent = figures[1].value;
+  $('figSync').textContent = figures[2].value;
+  setPill($('figModel'), figures[3].value, figures[3].tone);
+
+  const notice = docs ? m.libraryNotice(docs) : null;
+  $('overviewNotice').hidden = notice === null;
+  $('overviewNotice').textContent = notice ?? '';
+
+  const rows = $('needRows');
+  rows.replaceChildren();
+  for (const item of o.how === 'dismissed' ? items.filter((it) => it.route !== 'how') : items) {
+    rows.append(needRow(item));
+  }
+  const busy = items.length > 0;
+  $('needSection').hidden = !busy;
+  $('needCount').textContent = busy ? `${items.length} ${items.length === 1 ? 'item' : 'items'}` : '';
+  $('allClear').hidden = !(docs && o.status && notice === null && items.length === 0);
+  $('statusError').hidden = o.statusError === null;
+  $('statusError').textContent = o.statusError ?? '';
+}
+
+/** Each row's button is a route, not an action of its own: the overview only ever shows the
+ * person where to go. preview/review wait for the filing lists; nothing here moves a file. */
+function routeOverview(route) {
+  if (route === 'settings') showSection('settings');
+  else if (route === 'documents') {
+    state.libraryFilter = 'not-indexed';
+    showSection('ask');
+  } else if (route === 'how') {
+    state.overview.how = 'open';
+    render();
+  } else if (route === 'review') void routeReview();
+  else void routePreviewAndApply();
+}
+
+async function routeReview() {
+  if (!f().saved) await loadFilingLists();
+  if (!f().saved) return;
+  f().view = 'owners';
+  f().selected = { kind: 'shared' };
+  f().value = f().saved.shared_owner;
+  f().touched = true;
+  showSection('filing');
+}
+
+/** The design's "preview and apply": if the one shared dry-run is current, show its preview; no
+ * second hash pass. Only when the memo is missing or stale does this call resort(). */
+async function routePreviewAndApply() {
+  if (!f().saved) await loadFilingLists();
+  if (!f().saved) return;
+  const memo = await ensureDryRun();
+  const report = memo && memo.generation === saveGeneration ? memo.report : null;
+  if (report && m.dryRunProblem(report) === null && m.moveCount(report) > 0) {
+    f().dry = report;
+    f().notice = 'preview';
+    f().selected = null;
+    f().touched = true; // keeps applyPendingNotice from replacing this preview
+    showSection('filing');
+  } else {
+    void resort();
+  }
 }
 
 // ---- ask ----
@@ -152,12 +276,16 @@ function renderAsk() {
   // library
   const searching = state.search.query !== '' && state.search.hits !== null;
   const allDocs = state.docs?.documents ?? [];
-  const shown = searching ? allDocs.filter((doc) => m.isCited(doc, state.search.hits)) : allDocs;
-  if (searching) {
+  let shown = searching ? allDocs.filter((doc) => m.isCited(doc, state.search.hits)) : allDocs;
+  // The overview's "show documents" route filters the same library down to the unsearchable rows.
+  const filtered = state.libraryFilter === 'not-indexed';
+  if (filtered && !searching) shown = allDocs.filter((doc) => doc.skipped !== null);
+  if (searching || filtered) {
     $('libraryMeta').textContent = `${shown.length} of ${m.docsLabel(allDocs.length)}`;
   } else {
     $('libraryMeta').textContent = state.docs ? m.libraryMeta(state.docs) : '';
   }
+  $('libraryFilterClear').hidden = !filtered;
   const rows = $('libraryRows');
   rows.replaceChildren();
   if (state.docsError) {
@@ -264,6 +392,7 @@ function onSearchChange() {
   state.search.query = query;
   state.search.hits = null;
   state.search.error = null;
+  if (query !== '') state.libraryFilter = null; // typing in the box restores the full library
   if (query.length >= 2) {
     searchTimer = setTimeout(() => {
       void runSearch(query, state.search.seq);
@@ -355,7 +484,9 @@ function selectDefault() {
   f().fieldError = null;
 }
 
-async function loadFiling() {
+/** The filing lists, apart from the dry-run: the overview needs the lists (item 3 and the routes)
+ * without paying for a second hash pass, so this half loads on its own. */
+async function loadFilingLists() {
   f().loaded = true;
   const res = await track(api.filing());
   if (!res || !res.ok) {
@@ -367,17 +498,17 @@ async function loadFiling() {
   f().error = null;
   selectDefault();
   render();
-  // The current lists may already file some copies elsewhere (lists edited by hand, new documents):
-  // ask the engine, without moving anything, and say so if the user has not started editing.
-  const generation = saveGeneration;
-  const dry = await track(api.dryRun());
-  if (generation === saveGeneration && dry && dry.ok && dry.report.status === 'ok' && m.moveCount(dry.report) > 0 && f().changes.length === 0) {
-    f().pendingText = `${m.copiesLabel(m.moveCount(dry.report))} are not where the current lists put them.`;
-    if (!f().touched) {
-      f().selected = null;
-      f().notice = 'ask';
-      render();
-    }
+}
+
+/** The re-sort the engine reported on opening, before the user has started editing: now phrased
+ * from the one shared dry-run memo instead of a call of its own. */
+function applyPendingNotice(memo) {
+  const dry = memo?.report;
+  if (!dry || dry.status !== 'ok' || m.moveCount(dry) === 0 || f().changes.length > 0) return;
+  f().pendingText = `${m.copiesLabel(m.moveCount(dry))} are not where the current lists put them.`;
+  if (!f().touched) {
+    f().selected = null;
+    f().notice = 'ask';
   }
 }
 
@@ -450,6 +581,35 @@ async function check() {
 /** Bumped when a save starts: a dry-run that began earlier must not show its preview. */
 let saveGeneration = 0;
 
+/** The one dry-run both filing and overview share. It hashes every original (up to 10 min), so it
+ * is memoised per saveGeneration: a save or an apply drops the memo, and the next caller starts
+ * a fresh run. `jobs.recordDryRun` already arms apply for exactly this call. */
+let dryMemo = null; // {generation, promise, report}
+
+function ensureDryRun() {
+  if (dryMemo && dryMemo.generation === saveGeneration) return dryMemo.promise;
+  const generation = saveGeneration;
+  const memo = { generation, promise: null, report: null };
+  memo.promise = (async () => {
+    const dry = await track(api.dryRun());
+    if (generation !== saveGeneration) return null; // a save started while this ran
+    memo.report = dry && dry.ok ? dry.report : null;
+    return memo;
+  })();
+  dryMemo = memo;
+  return memo.promise;
+}
+
+/** Boot: the filing lists and the dry-run behind the overview's re-sort item. The count and item
+ * 2 appear when the dry-run lands, which is what `aria-live` announces. */
+async function bootFiling() {
+  await loadFilingLists();
+  if (!f().saved) return;
+  const memo = await ensureDryRun();
+  applyPendingNotice(memo);
+  render();
+}
+
 async function save(op) {
   if (!op || f().saving) return;
   clearTimeout(checkTimer);
@@ -477,6 +637,7 @@ async function save(op) {
     f().dry = null;
     f().showAll = false;
     f().notice = 'ask';
+    dryMemo = null; // the lists changed: the overview will need a fresh dry-run
     // A rename re-files the stored copies, so the row counts on the ask screen follow the save.
     void loadDocs();
   }
@@ -517,6 +678,7 @@ async function apply() {
     f().changes = [];
     f().pendingText = null;
     f().dry = null;
+    dryMemo = null; // the moves are done: the overview must not count them again
     f().notice = 'done';
     void loadDocs();
   }
@@ -679,7 +841,7 @@ function renderForm() {
     form.glyph = true;
   } else {
     const shared = s.saved.shared_owner;
-    const n = state.docs ? state.docs.documents.filter((doc) => doc.owner === null || doc.owner === shared || !s.saved.owners.includes(doc.owner)).length : 0;
+    const n = m.sharedOwnerCount(s.saved, state.docs?.documents ?? null);
     form.title = shared;
     form.meta = `${m.docsLabel(n)} filed here`;
     form.label = 'shared folder name';
@@ -749,6 +911,10 @@ function wire() {
     onSearchChange(); // empty box restores the full list
   });
   $('addDocsButton').addEventListener('click', () => void addDocs());
+  $('libraryFilterClear').addEventListener('click', () => {
+    state.libraryFilter = null;
+    render();
+  });
   $('addCancel').addEventListener('click', () => void cancelAdd());
   $('cancelAsk').addEventListener('click', () => void cancelAsk());
   $('copyAnswer').addEventListener('click', () => void copyAnswer());
@@ -804,12 +970,19 @@ function wire() {
   });
 
   // macOS lets the user change the login item in System Settings while the app is open; refocusing
-  // re-reads it, so the switch never shows a state the OS no longer has.
-  window.addEventListener('focus', () => void loadSettings());
+  // re-reads it, so the switch never shows a state the OS no longer has. The overview re-reads its
+  // two engine calls the same way: the window you look at is the window that is true.
+  window.addEventListener('focus', () => {
+    void loadSettings();
+    void loadOverview();
+  });
 }
 
 document.body.dataset.pending = '0';
+sidebar.build($('sidebar'));
 wire();
 render();
 void loadDocs();
+void loadOverview();
+void bootFiling();
 void loadSettings();
