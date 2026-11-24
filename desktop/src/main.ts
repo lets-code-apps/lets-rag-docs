@@ -508,6 +508,12 @@ type SmokeChecks = {
 	sharedShownHousehold: boolean;
 	sharedRenamedBack: boolean;
 	applied: string;
+	overviewFive: boolean;
+	previewRoute: boolean;
+	bootOverview: boolean;
+	clearRoutes: boolean;
+	clearOk: boolean;
+	keyboardOk: boolean;
 	persisted?: boolean;
 	raceSafe?: boolean;
 	titleWide?: boolean;
@@ -527,11 +533,15 @@ async function runSmoke(): Promise<void> {
 	}, 60000);
 	let code = 1;
 	try {
+		// Busy pass: the fake model answers "not reachable", so the overview opens with its
+		// danger item and every route below is the one a stuck person would take.
+		process.env.FAKE_MODEL = 'down';
 		const browser = makeWindow();
 		await loaded(browser);
 		const result = (await drive(browser, String.raw`
       // Sizes and the over-50 MB pill come straight from the report; the big original is listed
       // with its size and the reason it was never indexed.
+      await d.click('[data-section="ask"]');
       const big = d.row('#libraryRows', 'big-scan.pdf');
       const dangerPill = big.querySelector('.pill')?.textContent === 'not indexed: over 50 MB';
       const sizeShown = (big.querySelector('.row-preview')?.textContent ?? '').includes('64 MB');
@@ -571,6 +581,15 @@ async function runSmoke(): Promise<void> {
       const moves = document.querySelectorAll('#moveRows .row').length;
       const movesToVehicles = [...document.querySelectorAll('#moveRows .row-subject')].some((n) => n.textContent.includes('Vehicles'));
       const noUnsorted = ![...document.querySelectorAll('#moveRows .row-subject')].some((n) => n.textContent.includes('unsorted'));
+      // The overview mid-preview: five items (model, re-sort, owners, unindexed, iCloud) and
+      // its "preview and apply" button reopens the SAME preview without a second dry-run.
+      await d.click('[data-section="overview"]');
+      const pills = [...document.querySelectorAll('#needRows .need-row .pill')].map((x) => x.textContent);
+      const overviewFive = pills.length === 5 && d.find('.nav [data-section="overview"]').getAttribute('aria-label') === 'overview, 5 need you'
+        && pills.join('|') === 'model unreachable|re-sort waiting|no known owner|not indexed|only in iCloud';
+      [...document.querySelectorAll('#needRows .need-row button')].find((b) => b.textContent.includes('preview and apply')).click();
+      await d.settle();
+      const previewRoute = !d.find('#movesSection').hidden && d.find('.nav [data-section="filing"]').getAttribute('aria-current') === 'page';
       await d.click('#applyButton');
       const filed = d.find('#noticePill').textContent;
       // Shared owner: editable now; "Household" moves unlisted documents in the next preview.
@@ -592,10 +611,25 @@ async function runSmoke(): Promise<void> {
       await d.click('#resortButton');
       await d.click('#applyButton');
       const applied = d.find('#noticePill').textContent;
-      return { libraryRows, answered, folderRows, notice, moves, filed, dangerPill, sizeShown, searchRows, searchMeta, cleared, addDone, addAdded, addDuplicate, addFailed, grew, pageCited, openButtons, vehiclesCounts, movesToVehicles, noUnsorted, movesToHousehold, sharedShownHousehold, sharedRenamedBack, applied };
+      return { libraryRows, answered, folderRows, notice, moves, filed, dangerPill, sizeShown, searchRows, searchMeta, cleared, addDone, addAdded, addDuplicate, addFailed, grew, pageCited, openButtons, vehiclesCounts, movesToVehicles, noUnsorted, movesToHousehold, sharedShownHousehold, sharedRenamedBack, applied, overviewFive, previewRoute };
     `		)) as SmokeChecks;
 		// The open button ran in main: it resolved through the engine's locate and recorded the
 		// fake filed copy — the renderer never named a path.
+		// The window opened on overview: shared sidebar in the design's order, count 4 before any
+		// rename exists (no re-sort item yet), four figures, neutral one-button rows, model pill red.
+		result.bootOverview = (await drive(browser, String.raw`
+      const nav = [...document.querySelectorAll('.nav button')].map((b) => b.dataset.section).join(',');
+      const row = d.find('.nav [data-section="overview"]');
+      const pills = [...document.querySelectorAll('#needRows .need-row .pill')].map((x) => x.textContent);
+      const oneBtn = [...document.querySelectorAll('#needRows .need-row')].every((r) => r.querySelectorAll('.btn.secondary').length === 1);
+      const noPrimary = d.find('#needRows').querySelectorAll('.btn.primary').length === 0;
+      return nav === 'overview,ask,filing,settings' && !d.find('#overviewScreen').hidden && d.find('#askScreen').hidden
+        && row.getAttribute('aria-current') === 'page' && row.getAttribute('aria-label') === 'overview, 4 need you'
+        && row.querySelector('.count').textContent === '4'
+        && d.find('#figures').children.length === 4 && d.find('#figModel').textContent === 'unreachable'
+        && pills.join('|') === 'model unreachable|no known owner|not indexed|only in iCloud'
+        && oneBtn && noPrimary;
+    `)) as boolean;
 		result.openedPath = openLog[openLog.length - 1] === '/tmp/rag-docs-fake/library/Finance/Alex Example/2025/2025-03-14 Car loan - Repayment schedule.pdf';
 		// Edit -> save -> reload: the saved list comes back from the engine, not from page memory.
 		const reload = loaded(browser);
@@ -626,6 +660,53 @@ async function runSmoke(): Promise<void> {
     `)) as boolean;
 		delete process.env.FAKE_DRY_RUN_DELAY_MS;
 
+		// Every overview route, taken in order: settings, the filtered library, the iCloud steps with
+		// "got it", and review into filing's owners view with Shared picked. Then the all-clear pass on the
+		// tidy library with the model back: one line, no list, no count.
+		result.clearRoutes = (await drive(browser, String.raw`
+      const btn = (t) => [...document.querySelectorAll('#needRows .need-row button')].find((b) => b.textContent.includes(t));
+      await d.click('[data-section="overview"]');
+      btn('open settings').click();
+      const settingsOn = !d.find('#settingsScreen').hidden;
+      await d.click('[data-section="overview"]');
+      btn('show documents').click();
+      const onlySkipped = document.querySelectorAll('#libraryRows .row').length === 1
+        && /^1 of \d+ documents$/.test(d.find('#libraryMeta').textContent)
+        && !d.find('#libraryFilterClear').hidden;
+      d.find('#libraryFilterClear').click();
+      const restored = document.querySelectorAll('#libraryRows .row').length > 1 && d.find('#libraryFilterClear').hidden;
+      await d.click('[data-section="overview"]');
+      btn('show how').click();
+      const stepsShown = !!document.querySelector('.howto .howto-steps') && !!document.querySelector('.howto button');
+      document.querySelector('.howto button').click();
+      await d.settle();
+      const howGone = ![...document.querySelectorAll('#needRows .need-row button')].some((b) => b.textContent.includes('show how'));
+      await d.click('[data-section="overview"]');
+      btn('review').click();
+      const sharedSelected = d.find('.nav [data-section="filing"]').getAttribute('aria-current') === 'page'
+        && document.querySelector('#viewSwitch').querySelector('[data-view="owners"]')?.getAttribute('aria-checked') === 'true'
+        && [...document.querySelectorAll('#filingRows .row')].some((r) => r.getAttribute('aria-pressed') === 'true' && r.querySelector('.row-title')?.textContent === 'Shared');
+      const kb = [...document.querySelectorAll('.nav button'), ...document.querySelectorAll('#needRows .need-row button')];
+      return settingsOn && onlySkipped && restored && stepsShown && howGone && sharedSelected;
+    `)) as boolean;
+		result.keyboardOk = (await drive(browser, String.raw`
+      const kb = [...document.querySelectorAll('.nav button'), ...document.querySelectorAll('#needRows .need-row button')];
+      return kb.length > 4 && kb.every((b) => b.tagName === 'BUTTON' && !b.disabled && b.tabIndex >= 0);
+    `)) as boolean;
+		process.env.FAKE_SCENARIO = 'clear';
+		delete process.env.FAKE_MODEL;
+		const reloadClear = loaded(browser);
+		browser.reload();
+		await reloadClear;
+		result.clearOk = (await drive(browser, String.raw`
+      await d.settle();
+      const row = d.find('.nav [data-section="overview"]');
+      return !d.find('#allClear').hidden && d.find('#needSection').hidden
+        && d.find('#allClear').textContent.includes('nothing needs you')
+        && row.getAttribute('aria-label') === 'overview' && row.querySelector('.count').textContent === ''
+        && d.find('#figModel').textContent === 'connected';
+    `)) as boolean;
+		process.env.FAKE_SCENARIO = 'library';
 		// The app name lives in the shared bar, so it shows on every screen. Check it is centred,
 		// clear of the emblem and that nothing scrolls sideways, on ask/filing/settings at 1200px
 		// and at the 360px minimum.
@@ -700,7 +781,8 @@ async function runSmoke(): Promise<void> {
 		const title = browser.getTitle();
 		const own = isOwnFile(browser.webContents.getURL(), INDEX_URL);
 		const ok = own && title === PRODUCT_NAME && result.libraryRows > 0 && result.answered && result.folderRows > 0 && result.notice && result.moves > 0 && result.filed === 'filed' && result.persisted === true && result.raceSafe === true && result.titleWide === true && result.titleNarrow === true && result.appearanceLive === true && result.openAtLoginOk === true
-			&& result.dangerPill && result.sizeShown && result.searchRows === 2 && result.searchMeta && result.cleared === result.libraryRows && result.addDone && result.addAdded && result.addDuplicate && result.addFailed && result.grew && result.pageCited && result.openButtons === 2 && result.openedPath && result.vehiclesCounts && result.movesToVehicles && result.noUnsorted && result.movesToHousehold && result.sharedShownHousehold && result.sharedRenamedBack && result.applied === 'filed' && (result.geometry ?? []).length === 0;
+			&& result.dangerPill && result.sizeShown && result.searchRows === 2 && result.searchMeta && result.cleared === result.libraryRows && result.addDone && result.addAdded && result.addDuplicate && result.addFailed && result.grew && result.pageCited && result.openButtons === 2 && result.openedPath && result.vehiclesCounts && result.movesToVehicles && result.noUnsorted && result.movesToHousehold && result.sharedShownHousehold && result.sharedRenamedBack && result.applied === 'filed' && (result.geometry ?? []).length === 0
+			&& result.bootOverview && result.overviewFive && result.previewRoute && result.clearRoutes && result.keyboardOk && result.clearOk;
 		if (ok) {
 			console.error(`SMOKE OK: library ${result.libraryRows} rows (big-scan pill + MB sizes), search "loan" -> 2 rows -> cleared, add 3 files -> added/duplicate/failed + library grew, answer cites p. 4 and an open button handed the located path to main, rename Car->Vehicles counts 2 documents and previews moves to Vehicles (none to unsorted), shared owner "Household" re-files; stale dry-run after a save refused; app name centred on ask/filing/settings at 1200px and 360px; appearance live (dark/light/system); open-at-login reflects the real login item; layout checks clean (settings article, library search top, AppBar 132px clear, 44px targets) on ask/filing/settings at 1200px and 360px`);
 			code = 0;
