@@ -59,6 +59,10 @@ struct Row {
     /// `"over_limit"` when `bytes` exceeds `max_file_mb` MB: the document is listed but not
     /// indexed, and the app shows why.
     skipped: Option<String>,
+    /// `true` when the original's contents live only in iCloud Drive: the macOS
+    /// `SF_DATALESS` bit in `st_flags`, read from `symlink_metadata` - a `stat` never
+    /// downloads the file, so this stays cheap and safe on an iCloud library.
+    dataless: bool,
 }
 
 pub fn run(config: &Config, json: bool) -> anyhow::Result<()> {
@@ -96,6 +100,7 @@ fn collect(config: &Config) -> anyhow::Result<Report> {
                 } else {
                     None
                 };
+                let dataless: bool = row_dataless(config, &rel);
                 documents.push(Row {
                     path: doc.path,
                     title: doc.meta.title,
@@ -107,6 +112,7 @@ fn collect(config: &Config) -> anyhow::Result<Report> {
                     bytes,
                     pages,
                     skipped,
+                    dataless,
                 });
             }
 
@@ -137,6 +143,7 @@ fn collect(config: &Config) -> anyhow::Result<Report> {
                     bytes: size,
                     pages: None,
                     skipped: Some("over_limit".to_string()),
+                    dataless: row_dataless(config, &rel),
                 });
             }
             documents.sort_by(|a, b| a.path.cmp(&b.path));
@@ -172,6 +179,42 @@ fn row_bytes(config: &Config, rel: &Path) -> Option<u64> {
     match std::fs::symlink_metadata(config.paths.docs_dir.join(rel)) {
         Ok(meta) if meta.is_file() => Some(meta.size()),
         _ => None,
+    }
+}
+
+/// The macOS `SF_DATALESS` bit (`0x4000_0000`) set in `st_flags` when a file's contents
+/// live only in iCloud Drive. Pure so the rule is testable without an iCloud mount:
+/// the OS refuses to create a dataless file in a test, so `dataless_uses_metadata_only`
+/// below proves only the metadata-only half, and this bit logic is proven here.
+fn is_dataless(flags: u32) -> bool {
+    flags & 0x4000_0000 != 0
+}
+
+/// `st_flags` from a `symlink_metadata` result. `st_flags()` is a method of
+/// `std::os::macos::fs::MetadataExt`, so this is one body per OS: `#[cfg]` picks the
+/// body at compile time (an `if cfg!(...)` would still have to compile the macOS call
+/// on every platform). Off macOS there is no such flag: `false`, not a guess.
+#[cfg(target_os = "macos")]
+fn file_flags(meta: std::fs::Metadata) -> u32 {
+    use std::os::macos::fs::MetadataExt;
+    meta.st_flags()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn file_flags(_meta: std::fs::Metadata) -> u32 {
+    0
+}
+
+/// Whether one row's original is a dataless (iCloud-only) file. Same trust rule as `row_bytes`:
+/// only while the path is a plain name under `docs_dir`. `symlink_metadata` is a `stat`,
+/// so the contents are never downloaded - checking must never defeat the point of checking.
+fn row_dataless(config: &Config, rel: &Path) -> bool {
+    if !inside_library(&config.paths.docs_dir, rel) {
+        return false;
+    }
+    match std::fs::symlink_metadata(config.paths.docs_dir.join(rel)) {
+        Ok(meta) if meta.is_file() => is_dataless(file_flags(meta)),
+        _ => false,
     }
 }
 
@@ -378,6 +421,9 @@ mod tests {
             json.contains("\"big-scan.pdf\",\"title\":null,\"type\":\"unsorted\""),
             "{json}"
         );
+        // Every row carries the dataless bit; on a normal disk (and in the locked fixture)
+        // it is false.
+        assert!(json.contains("\"dataless\":false"), "{json}");
     }
 
     #[test]
@@ -412,6 +458,44 @@ mod tests {
             json.contains("\"bytes\":null"),
             "but it never becomes a size the app reads"
         );
+    }
+
+    #[test]
+    fn dataless_bit() {
+        // The SF_DATALESS bit alone, and mixed with other flags, is dataless; its neighbours
+        // are not. (A test cannot ask macOS to make a real dataless file - the OS refuses -
+        // so `documents --json` reporting iCloud-only originals is covered through this
+        // pure rule plus `dataless_uses_metadata_only` below.)
+        assert!(is_dataless(0x4000_0000));
+        assert!(is_dataless(0x4000_8000));
+        assert!(!is_dataless(0));
+        assert!(!is_dataless(0x8000));
+        assert!(!is_dataless(0x2000_0000));
+        assert!(!is_dataless(0x8000_0000));
+    }
+
+    #[test]
+    fn dataless_uses_metadata_only() {
+        // The check never opens the file: a path with no file at all gives `false`, not an
+        // error, and a tampered path never reaches the filesystem. `symlink_metadata` is a
+        // `stat`, so a real dataless file could never be downloaded by this code either.
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_in(dir.path());
+        fs::create_dir_all(&config.paths.docs_dir).unwrap();
+        let gone: PathBuf = PathBuf::from("gone.pdf");
+        assert!(
+            !row_dataless(&config, &gone),
+            "a missing original is just not dataless"
+        );
+        let tampered: PathBuf = PathBuf::from("../outside.pdf");
+        assert!(
+            !row_dataless(&config, &tampered),
+            "a tampered path is never statted"
+        );
+        // A real, ordinary file on this machine: metadata says not dataless.
+        fs::write(config.paths.docs_dir.join("scan.pdf"), "bytes").unwrap();
+        let real: PathBuf = PathBuf::from("scan.pdf");
+        assert!(!row_dataless(&config, &real), "an ordinary local file");
     }
 
     #[test]
