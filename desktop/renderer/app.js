@@ -638,6 +638,7 @@ async function save(op) {
     f().showAll = false;
     f().notice = 'ask';
     dryMemo = null; // the lists changed: the overview will need a fresh dry-run
+    void ensureDryRun().then(() => render()); // re-arms item 2 when it lands
     // A rename re-files the stored copies, so the row counts on the ask screen follow the save.
     void loadDocs();
   }
@@ -679,6 +680,7 @@ async function apply() {
     f().pendingText = null;
     f().dry = null;
     dryMemo = null; // the moves are done: the overview must not count them again
+    void ensureDryRun().then(() => render());
     f().notice = 'done';
     void loadDocs();
   }

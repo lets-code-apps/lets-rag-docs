@@ -470,7 +470,7 @@ async function measureGeometry(browser: BrowserWindow): Promise<string[]> {
 		const reload = loaded(browser);
 		browser.reload();
 		await reload;
-		for (const section of ['ask', 'filing', 'settings']) {
+		for (const section of ['overview', 'ask', 'filing', 'settings']) {
 			await drive(browser, `await d.click('[data-section="${section}"]');`);
 			// Rule 2 wants the search field measured with the add panel visible: run one add, at the wide
 			// size only, so the check costs one run and stays off the reload/queue race at 360px.
@@ -716,7 +716,7 @@ async function runSmoke(): Promise<void> {
 	app.exit(code);
 }
 
-type Shot = { name: string; scenario: 'library' | 'no-owners'; width: number; height: number; steps: string; scrollTo?: string; scrollToRow?: string; delayMs?: number };
+type Shot = { name: string; scenario: 'library' | 'no-owners' | 'clear'; width: number; height: number; steps: string; model?: 'down'; scrollTo?: string; scrollToRow?: string; delayMs?: number };
 
 const OPEN_FILING = `await d.click('[data-section="filing"]');`;
 const OPEN_OWNERS = `${OPEN_FILING} await d.click('[data-view="owners"]');`;
@@ -767,6 +767,9 @@ const SHOTS: Shot[] = [
 	{ name: 'ask-small', scenario: 'library', width: 360, height: 780, steps: ASK_STEPS, scrollTo: '#appBar' },
 	{ name: 'settings', scenario: 'library', width: 1200, height: 820, steps: OPEN_SETTINGS },
 	{ name: 'settings-small', scenario: 'library', width: 360, height: 780, steps: OPEN_SETTINGS },
+	{ name: 'overview-busy', scenario: 'library', width: 1200, height: 820, steps: `${RENAME_AND_ADD} await d.click('[data-section="overview"]');`, model: 'down' },
+	{ name: 'overview-clear', scenario: 'clear', width: 1200, height: 820, steps: '' },
+	{ name: 'overview-small', scenario: 'library', width: 360, height: 780, steps: `${RENAME_AND_ADD} await d.click('[data-section="overview"]');`, model: 'down' },
 ];
 
 async function runShots(): Promise<void> {
@@ -785,6 +788,7 @@ async function runShots(): Promise<void> {
 			for (const shot of SHOTS) {
 				const dir = freshFakeState();
 				process.env.FAKE_SCENARIO = shot.scenario;
+				if (shot.model === 'down') process.env.FAKE_MODEL = 'down'; else delete process.env.FAKE_MODEL;
 				if (shot.delayMs) process.env.FAKE_ADD_DELAY_MS = String(shot.delayMs); else delete process.env.FAKE_ADD_DELAY_MS;
 				browser.setSize(shot.width, shot.height);
 				const reload = loaded(browser);
