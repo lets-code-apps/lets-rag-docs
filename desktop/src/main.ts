@@ -3,7 +3,7 @@
 // window hides it; Quit/Cmd+Q ends the app. Smoke and screenshots drive the real page against the
 // fake engine (pinned by the npm scripts), never real documents or config.
 
-import { app, BrowserWindow, Menu, Tray, dialog, ipcMain, nativeImage, nativeTheme, shell } from 'electron';
+import { app, BrowserWindow, Menu, Tray, dialog, ipcMain, nativeImage, nativeTheme, screen, shell } from 'electron';
 import { basename, isAbsolute, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -15,6 +15,7 @@ import { IPC } from './ipc.ts';
 import { buildTrayMenu, PRODUCT_NAME } from './menu.ts';
 import { WindowController } from './window.ts';
 import { denyNavigation, isOwnFile, windowOpenHandler, windowOptions } from './window-policy.ts';
+import { SHOT_SIZES, pngSize, sizeMismatch, waitForSize } from './shot-size.ts';
 import { SettingsController, type SettingsHost } from './settings.ts';
 import { GEOMETRY } from './geometry.ts';
 
@@ -374,10 +375,14 @@ app.on('before-quit', (event) => {
 if (!app.requestSingleInstanceLock()) {
 	app.quit();
 } else {
-	// No device-scale switch: on a Retina Mac `capturePage` is already 2x, while the macOS GitHub runner
-	// is non-Retina and its window chrome differs (a 1200x820 window captures ~1200x677). Forcing a scale
-	// factor does not reconcile size AND height across the two, so it was dropped. The committed baseline is
-	// the CI render; desktop/README.md "CI and the screenshot baseline" says re-baseline from the CI artifact.
+	// Shots are sized by CONTENT, not by the outer window frame: runShots sets the content size to a fixed
+	// 1200x660 (wide) or 360x660 (narrow) — under the macOS runner's screen height, so it is never squeezed —
+	// waits for `getContentSize()` to match before driving and again right before capture, and fails a shot
+	// that never settles with expected vs actual (plus the display work area). The written PNG's own pixel
+	// size is checked against content size x the display's scale factor, so a Retina Mac gives exactly 2x
+	// (2400x1320) and the runner exactly 1x (1200x660). The committed baseline is the CI render; desktop/README.md
+	// "CI and the screenshot baseline" says to re-baseline from the CI artifact. The real tray window's
+	// `windowOptions()` (1200x820) is unchanged — only the throwaway shots window is sized.
 	app.on('second-instance', () => ctl.open());
 	void app.whenReady().then(boot);
 }
@@ -934,7 +939,7 @@ async function runSmoke(): Promise<void> {
 	app.exit(code);
 }
 
-type Shot = { name: string; scenario: 'library' | 'no-owners' | 'clear'; width: number; height: number; steps: string; model?: 'down'; scrollTo?: string; scrollToRow?: string; delayMs?: number };
+type Shot = { name: string; scenario: 'library' | 'no-owners' | 'clear'; size: 'wide' | 'narrow'; steps: string; model?: 'down'; scrollTo?: string; scrollToRow?: string; delayMs?: number };
 
 const OPEN_FILING = `await d.click('[data-section="filing"]');`;
 const OPEN_OWNERS = `${OPEN_FILING} await d.click('[data-view="owners"]');`;
@@ -971,28 +976,28 @@ const OVER_LIMIT = `${OPEN_ASK} const big = d.row('#libraryRows', 'big-scan.pdf'
   if (big.querySelector('.pill')?.textContent !== 'not indexed: over 50 MB') throw new Error('over-limit: the pill is missing');
   if (!(big.querySelector('.row-preview')?.textContent ?? '').includes(' MB')) throw new Error('over-limit: the size is missing'); ${ON_ASK}`;
 const SHOTS: Shot[] = [
-	{ name: 'ask', scenario: 'library', width: 1200, height: 820, steps: ASK_STEPS },
-	{ name: 'ask-search', scenario: 'library', width: 1200, height: 820, steps: SEARCH_LOAN },
-	{ name: 'add-running', scenario: 'library', width: 1200, height: 820, steps: ADD_RUNNING, delayMs: 1500 },
-	{ name: 'over-limit', scenario: 'library', width: 1200, height: 820, steps: OVER_LIMIT, scrollToRow: 'big-scan.pdf' },
-	{ name: 'add-done', scenario: 'library', width: 1200, height: 820, steps: ADD_DONE },
-	{ name: 'filing-folders', scenario: 'library', width: 1200, height: 820, steps: `${OPEN_FILING} await d.pick('Finance');` },
-	{ name: 'filing-editing', scenario: 'library', width: 1200, height: 820, steps: `${OPEN_FILING} await d.pick('Car'); await d.type('#nameInput', 'Vehicles');` },
-	{ name: 'filing-owners', scenario: 'library', width: 1200, height: 820, steps: `${OPEN_OWNERS} await d.pick('Alex Example');` },
-	{ name: 'filing-owners-empty', scenario: 'no-owners', width: 1200, height: 820, steps: OPEN_OWNERS },
-	{ name: 'filing-adding', scenario: 'library', width: 1200, height: 820, steps: `${OPEN_OWNERS} await d.click('#addButton'); await d.type('#nameInput', 'Example Studio');` },
-	{ name: 'filing-error', scenario: 'library', width: 1200, height: 820, steps: `${OPEN_OWNERS} await d.click('#addButton'); await d.type('#nameInput', 'Example/Studio');` },
-	{ name: 'filing-shared', scenario: 'library', width: 1200, height: 820, steps: `${OPEN_OWNERS} await d.pick('Shared'); await d.type('#nameInput', 'Household');` },
-	{ name: 'filing-changed', scenario: 'library', width: 1200, height: 820, steps: RENAME_AND_ADD },
-	{ name: 'filing-preview', scenario: 'library', width: 1200, height: 820, steps: `${RENAME_AND_ADD} await d.click('#resortButton');` },
-	{ name: 'filing-small', scenario: 'library', width: 360, height: 780, steps: `${OPEN_FILING} await d.pick('Finance');` },
-	{ name: 'filing-small-form', scenario: 'library', width: 360, height: 780, steps: `${OPEN_FILING} await d.pick('Finance');`, scrollTo: '#detailPane' },
-	{ name: 'ask-small', scenario: 'library', width: 360, height: 780, steps: ASK_STEPS, scrollTo: '#appBar' },
-	{ name: 'settings', scenario: 'library', width: 1200, height: 820, steps: OPEN_SETTINGS },
-	{ name: 'settings-small', scenario: 'library', width: 360, height: 780, steps: OPEN_SETTINGS },
-	{ name: 'overview-busy', scenario: 'library', width: 1200, height: 820, steps: `${RENAME_AND_ADD} await d.click('[data-section="overview"]');`, model: 'down' },
-	{ name: 'overview-clear', scenario: 'clear', width: 1200, height: 820, steps: '' },
-	{ name: 'overview-small', scenario: 'library', width: 360, height: 780, steps: `${RENAME_AND_ADD} await d.click('[data-section="overview"]');`, model: 'down', scrollTo: '#appBar' },
+	{ name: 'ask', scenario: 'library', size: 'wide', steps: ASK_STEPS },
+	{ name: 'ask-search', scenario: 'library', size: 'wide', steps: SEARCH_LOAN },
+	{ name: 'add-running', scenario: 'library', size: 'wide', steps: ADD_RUNNING, delayMs: 1500 },
+	{ name: 'over-limit', scenario: 'library', size: 'wide', steps: OVER_LIMIT, scrollToRow: 'big-scan.pdf' },
+	{ name: 'add-done', scenario: 'library', size: 'wide', steps: ADD_DONE },
+	{ name: 'filing-folders', scenario: 'library', size: 'wide', steps: `${OPEN_FILING} await d.pick('Finance');` },
+	{ name: 'filing-editing', scenario: 'library', size: 'wide', steps: `${OPEN_FILING} await d.pick('Car'); await d.type('#nameInput', 'Vehicles');` },
+	{ name: 'filing-owners', scenario: 'library', size: 'wide', steps: `${OPEN_OWNERS} await d.pick('Alex Example');` },
+	{ name: 'filing-owners-empty', scenario: 'no-owners', size: 'wide', steps: OPEN_OWNERS },
+	{ name: 'filing-adding', scenario: 'library', size: 'wide', steps: `${OPEN_OWNERS} await d.click('#addButton'); await d.type('#nameInput', 'Example Studio');` },
+	{ name: 'filing-error', scenario: 'library', size: 'wide', steps: `${OPEN_OWNERS} await d.click('#addButton'); await d.type('#nameInput', 'Example/Studio');` },
+	{ name: 'filing-shared', scenario: 'library', size: 'wide', steps: `${OPEN_OWNERS} await d.pick('Shared'); await d.type('#nameInput', 'Household');` },
+	{ name: 'filing-changed', scenario: 'library', size: 'wide', steps: RENAME_AND_ADD },
+	{ name: 'filing-preview', scenario: 'library', size: 'wide', steps: `${RENAME_AND_ADD} await d.click('#resortButton');` },
+	{ name: 'filing-small', scenario: 'library', size: 'narrow', steps: `${OPEN_FILING} await d.pick('Finance');` },
+	{ name: 'filing-small-form', scenario: 'library', size: 'narrow', steps: `${OPEN_FILING} await d.pick('Finance');`, scrollTo: '#detailPane' },
+	{ name: 'ask-small', scenario: 'library', size: 'narrow', steps: ASK_STEPS, scrollTo: '#appBar' },
+	{ name: 'settings', scenario: 'library', size: 'wide', steps: OPEN_SETTINGS },
+	{ name: 'settings-small', scenario: 'library', size: 'narrow', steps: OPEN_SETTINGS },
+	{ name: 'overview-busy', scenario: 'library', size: 'wide', steps: `${RENAME_AND_ADD} await d.click('[data-section="overview"]');`, model: 'down' },
+	{ name: 'overview-clear', scenario: 'clear', size: 'wide', steps: '' },
+	{ name: 'overview-small', scenario: 'library', size: 'narrow', steps: `${RENAME_AND_ADD} await d.click('[data-section="overview"]');`, model: 'down', scrollTo: '#appBar' },
 ];
 
 async function runShots(): Promise<void> {
@@ -1013,7 +1018,20 @@ async function runShots(): Promise<void> {
 				process.env.FAKE_SCENARIO = shot.scenario;
 				if (shot.model === 'down') process.env.FAKE_MODEL = 'down'; else delete process.env.FAKE_MODEL;
 				if (shot.delayMs) process.env.FAKE_ADD_DELAY_MS = String(shot.delayMs); else delete process.env.FAKE_ADD_DELAY_MS;
-				browser.setSize(shot.width, shot.height);
+				const want = SHOT_SIZES[shot.size];
+				browser.setContentSize(want.width, want.height);
+				// The runner squeezes a window taller than its screen, so wait for the content size we asked
+				// for before driving, and again right before capture. A size that never settles fails the shot
+				// with expected vs actual (plus the display work area), never a wrong-size capture.
+				const contentSize = () => {
+					const [width, height] = browser.getContentSize();
+					return { width, height };
+				};
+				const settled = await waitForSize(contentSize, want);
+				if (settled.width !== want.width || settled.height !== want.height) {
+					const area = screen.getPrimaryDisplay().workAreaSize;
+					throw new Error(`${sizeMismatch(`${shot.name}-${mode} content size`, want, settled)} (work area ${area.width}x${area.height})`);
+				}
 				const reload = loaded(browser);
 				browser.reload();
 				await reload;
@@ -1035,8 +1053,25 @@ async function runShots(): Promise<void> {
 					const visible = shot.delayMs ? await driveNow(browser, `${ADD_RUNNING_CHECK} ${check}`) : await drive(browser, check);
 					if (visible !== true) throw new Error(`${shot.name}-${mode}: the window title is not in view`);
 				}
+				// Re-check the content size immediately before capture: if the window moved during the steps,
+				// fail here rather than write a wrong-size PNG.
+				const beforeCapture = await waitForSize(contentSize, want);
+				if (beforeCapture.width !== want.width || beforeCapture.height !== want.height) {
+					const area = screen.getPrimaryDisplay().workAreaSize;
+					throw new Error(`${sizeMismatch(`${shot.name}-${mode} capture size`, want, beforeCapture)} (work area ${area.width}x${area.height})`);
+				}
 				const image = await browser.webContents.capturePage();
-				writeFileSync(join(out, `${shot.name}-${mode}.png`), image.toPNG());
+				const png = image.toPNG();
+				// The file that lands in git must be content size x the display's scale factor: a Retina Mac
+				// is exactly 2x (2400x1320), the runner exactly 1x (1200x660). Check the PNG's own header before
+				// writing, so a render at the wrong scale fails the shot instead of committing a bad baseline.
+				const scaleFactor = screen.getDisplayMatching(browser.getBounds()).scaleFactor;
+				const wantFile = { width: want.width * scaleFactor, height: want.height * scaleFactor };
+				const gotFile = pngSize(png);
+				if (gotFile.width !== wantFile.width || gotFile.height !== wantFile.height) {
+					throw new Error(sizeMismatch(`${shot.name}-${mode} capture`, wantFile, gotFile));
+				}
+				writeFileSync(join(out, `${shot.name}-${mode}.png`), png);
 				// Stop a queue that is still running so it can't touch the next shot.
 				if (shot.delayMs) await driveNow(browser, `d.find('#addCancel').click(); await d.settle();`);
 				rmSync(dir, { recursive: true, force: true });

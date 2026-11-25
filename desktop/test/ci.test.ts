@@ -56,3 +56,19 @@ test('the desktop README explains how to update the baseline', () => {
 	const readme = readFileSync(join(ROOT, 'desktop', 'README.md'), 'utf8');
 	assert.ok(readme.includes('CI and the screenshot baseline'));
 });
+
+test('the shot driver sizes by content and checks the size before capture', () => {
+	// Source-text guard (like the workflow tests): the real proof is a green shots run at 1200x660 / 360x660,
+	// but this keeps a future edit from putting the outer-size `browser.setSize` back or capturing before
+	// the size is checked. Slice the shots driver out of main.ts and assert on it.
+	const main = readFileSync(join(ROOT, 'desktop', 'src', 'main.ts'), 'utf8');
+	assert.ok(main.includes("from './shot-size.ts'"), 'main.ts must import the shot-size module');
+	assert.ok(main.includes('waitForSize'), 'main.ts must use waitForSize');
+	assert.ok(main.includes('browser.setContentSize('), 'runShots must set the CONTENT size');
+	assert.ok(main.includes('browser.getContentSize('), 'runShots must read the content size to check it');
+	const shots = main.slice(main.indexOf('async function runShots'));
+	assert.ok(shots.length > 0, 'runShots not found in main.ts');
+	assert.equal(shots.includes('browser.setSize(shot'), false, 'runShots must not size a shot with the outer browser.setSize');
+	assert.ok(shots.indexOf('waitForSize') !== -1 && shots.indexOf('waitForSize') < shots.indexOf('capturePage'),
+		'runShots must check the size with waitForSize before capturePage');
+});
