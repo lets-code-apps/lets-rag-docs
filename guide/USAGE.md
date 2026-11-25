@@ -31,7 +31,7 @@ Relative paths in the config (`data/ocr`, `evals/rag.jsonl`) resolve against the
 directory, so run the commands below from the repo root or make them absolute.
 
 Both Let's Code apps also read a shared `~/.config/lets-code/model.toml` for which model to use
-(see [guide/MODEL.md](guide/MODEL.md)). If you write `[llm] base_url` or `model` in your own
+(see [guide/MODEL.md](MODEL.md)). If you write `[llm] base_url` or `model` in your own
 `config.toml`, that wins and the shared file is ignored.
 
 ## Commands
