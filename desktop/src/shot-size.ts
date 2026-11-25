@@ -51,11 +51,11 @@ export function sizeMismatch(what: string, want: Size, got: Size): string {
 }
 
 // The pixel size the committed file will actually have. A PNG stores width and height in the IHDR chunk,
-// which is the first chunk: 8-byte signature, then a 4-byte chunk length, then the 4-byte type "IHDR",
-// then 4-byte big-endian width and 4-byte big-endian height. So the dimensions are at byte 16 and byte 20.
-// Reading the header avoids any DIP-vs-pixel guesswork from `nativeImage` — this is the size that lands in
-// git. It throws on anything that is not a PNG.
-const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x44, 0x0d, 0x0a, 0x1a, 0x0a];
+// which is the first chunk: 8-byte signature (the bytes `\x89PNG\r\n\x1a\n`), then a 4-byte chunk length,
+// then the 4-byte type "IHDR", then 4-byte big-endian width and 4-byte big-endian height. So the dimensions
+// are at byte 16 and byte 20. Reading the header avoids any DIP-vs-pixel guesswork from `nativeImage` — this
+// is the size that lands in git. It throws on anything that is not a PNG.
+const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]; // \x89 P N G \r \n \x1a \n
 
 export function pngSize(png: Buffer): Size {
 	if (png.length < 24) throw new Error('pngSize: not a PNG (too short to hold an IHDR)');

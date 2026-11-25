@@ -3,6 +3,7 @@
 // with no real sleeping and no browser.
 
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 
 import { SHOT_SIZES, pngSize, sizeMismatch, waitForSize } from '../src/shot-size.ts';
@@ -47,7 +48,8 @@ test('sizeMismatch formats expected vs actual in one line', () => {
 });
 
 test('pngSize reads the IHDR width and height from a PNG header', () => {
-	const sig = Buffer.from([0x89, 0x50, 0x4e, 0x44, 0x0d, 0x0a, 0x1a, 0x0a]);
+	// The canonical 8-byte PNG magic, spelled out so the test can never drift from the module's constant.
+	const sig = Buffer.from('\x89PNG\r\n\x1a\n', 'binary');
 	const len = Buffer.alloc(4);
 	len.writeUInt32BE(13);
 	const type = Buffer.from('IHDR', 'ascii');
@@ -56,6 +58,15 @@ test('pngSize reads the IHDR width and height from a PNG header', () => {
 	ihdr.writeUInt32BE(660, 4);
 	const png = Buffer.concat([sig, len, type, ihdr]);
 	assert.deepEqual(pngSize(png), { width: 1200, height: 660 });
+});
+
+test('pngSize accepts a real committed PNG (the signature matches reality, not just the constant)', () => {
+	// Guards against a wrong signature constant: a real PNG Electron committed must parse. Width is fixed
+	// at 1200 across baselines; height is asserted in range rather than pinned, so this survives a re-baseline.
+	const png = readFileSync(new URL('../screenshots/ask-light.png', import.meta.url));
+	const size = pngSize(png);
+	assert.equal(size.width, 1200);
+	assert.ok(size.height > 400 && size.height < 1000);
 });
 
 test('pngSize throws on a buffer that is not a PNG', () => {
