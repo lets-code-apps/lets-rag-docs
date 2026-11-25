@@ -31,6 +31,9 @@ library_dir = "library"
 
 [llm]
 # Used by `ask` and `classify`. Any OpenAI-compatible endpoint; Ollama by default.
+# `base_url` and `model` are here only if you wrote them: otherwise they come from the shared
+# file ~/.config/lets-code/model.toml (see guide/MODEL.md). Writing either key here makes this
+# config ignore the shared file completely, so an existing config keeps working unchanged.
 base_url = "http://127.0.0.1:11434/v1"
 model = "qwen3:30b-a3b"
 # The most tokens the model may write. Qwen3 thinks before it answers, so leave room.
