@@ -6,9 +6,13 @@
 //   fixtures   the committed `testdata/desktop` fixtures, byte for byte (the Rust tests lock them)
 //   library    (default) a small synthetic library whose lists can be edited
 //   no-owners  the same library, before any owner was added
+//   clear      the same library with every document owned, indexed and downloaded (all-clear screen)
 //   empty      no library database yet
+//   outdated   the library was written by an older version of the engine
 // FAKE_DRY_RUN_DELAY_MS: make `organize --dry-run` slow (it plans the lists read at its start).
 // FAKE_ADD_DELAY_MS: make `add` slow, so the add panel can be caught mid-run.
+// FAKE_MODEL=down: `status --json` answers that the model is not reachable (the overview shows
+// the danger item; screenshots use it for the busy pass).
 // FAKE_STATE_FILE: where `library`/`no-owners` keep the saved lists, filed copies and added files
 // between calls (default: a file in the OS temp folder). Delete it to start over.
 // The fake library root is /tmp/rag-docs-fake/library — what `locate` resolves paths to.
@@ -55,6 +59,7 @@ function readStdin() {
 
 async function fixtures() {
   if (args[0] === 'documents') print(fixture('documents.json'));
+  if (args[0] === 'status') print(fixture('status.json'));
   if (args[0] === 'ask') print(fixture('ask.json'));
   if (args[0] === 'search') print(fixture('search.json'));
   if (args[0] === 'add') {
@@ -75,25 +80,26 @@ const FOLDERS = ['Identity', 'Health', 'Finance', 'Taxes', 'Insurance', 'Home', 
 const OWNERS = ['Alex Example', 'Sam Example'];
 const MAX_FILE_MB = 50;
 
-// [path, title, type, date, folder, owner, bytes, pages, skipped]
+// [path, title, type, date, folder, owner, bytes, pages, skipped, dataless]
+// Two of these stand as iCloud-only files (the dataless bit), so the overview can show that item.
 const DOCUMENTS = [
-  ['scans/2025-03-14-car-loan.pdf', 'Car loan - Repayment schedule', 'contract', '2025-03-14', 'Finance', 'Alex Example', 214_000, 4, null],
-  ['scans/2025-03-20-loan-terms.pdf', 'Car loan - Terms and conditions', 'contract', '2025-03-20', 'Finance', 'Alex Example', 640_000, 12, null],
-  ['scans/2025-05-09-tyre-change.pdf', 'Tyre change - Invoice', 'invoice', '2025-05-09', 'Car', 'Alex Example', 96_000, 1, null],
-  ['scans/2024-11-12-inspection.pdf', 'Inspection - Certificate', 'certificate', '2024-11-12', 'Car', 'Sam Example', 1_400_000, 6, null],
-  ['scans/2025-02-03-electricity.pdf', 'Electricity - Annual statement', 'statement', '2025-02-03', 'Home', null, 2_300_000, 31, null],
-  ['scans/2025-01-15-rent.pdf', 'Rent - Contract', 'contract', '2025-01-15', 'Home', 'Sam Example', 188_000, 3, null],
-  ['scans/2025-04-30-accounting.pdf', 'Accounting - VAT invoice', 'invoice', '2025-04-30', 'Finance', null, 54_000, 1, null],
-  ['scans/2025-06-02-dentist.pdf', 'Dentist - Receipt', 'receipt', '2025-06-02', 'Health', 'Sam Example', 77_000, 1, null],
-  ['scans/2024-09-01-passport.pdf', 'Passport - Copy', 'identity', '2024-09-01', 'Identity', 'Alex Example', 322_000, 4, null],
-  ['scans/2025-04-10-tax-return.pdf', 'Tax return 2024', 'tax', '2025-04-10', 'Taxes', 'Alex Example', 120_000, 2, null],
-  ['notes/kickoff-notes.md', 'Project kickoff - Notes', 'notes', '2025-02-11', 'Work', 'Sam Example', 9_400, null, null],
-  ['scans/2025-07-21-laptop.pdf', 'Laptop - Receipt', 'receipt', '2025-07-21', 'Purchases', 'Sam Example', 104_000, 1, null],
-  ['scans/2025-08-05-letter.pdf', null, 'letter', '2025-08-05', null, null, 41_000, 2, null],
+  ['scans/2025-03-14-car-loan.pdf', 'Car loan - Repayment schedule', 'contract', '2025-03-14', 'Finance', 'Alex Example', 214_000, 4, null, false],
+  ['scans/2025-03-20-loan-terms.pdf', 'Car loan - Terms and conditions', 'contract', '2025-03-20', 'Finance', 'Alex Example', 640_000, 12, null, false],
+  ['scans/2025-05-09-tyre-change.pdf', 'Tyre change - Invoice', 'invoice', '2025-05-09', 'Car', 'Alex Example', 96_000, 1, null, false],
+  ['scans/2024-11-12-inspection.pdf', 'Inspection - Certificate', 'certificate', '2024-11-12', 'Car', 'Sam Example', 1_400_000, 6, null, false],
+  ['scans/2025-02-03-electricity.pdf', 'Electricity - Annual statement', 'statement', '2025-02-03', 'Home', null, 2_300_000, 31, null, true],
+  ['scans/2025-01-15-rent.pdf', 'Rent - Contract', 'contract', '2025-01-15', 'Home', 'Sam Example', 188_000, 3, null, false],
+  ['scans/2025-04-30-accounting.pdf', 'Accounting - VAT invoice', 'invoice', '2025-04-30', 'Finance', null, 54_000, 1, null, false],
+  ['scans/2025-06-02-dentist.pdf', 'Dentist - Receipt', 'receipt', '2025-06-02', 'Health', 'Sam Example', 77_000, 1, null, false],
+  ['scans/2024-09-01-passport.pdf', 'Passport - Copy', 'identity', '2024-09-01', 'Identity', 'Alex Example', 322_000, 4, null, false],
+  ['scans/2025-04-10-tax-return.pdf', 'Tax return 2024', 'tax', '2025-04-10', 'Taxes', 'Alex Example', 120_000, 2, null, false],
+  ['notes/kickoff-notes.md', 'Project kickoff - Notes', 'notes', '2025-02-11', 'Work', 'Sam Example', 9_400, null, null, false],
+  ['scans/2025-07-21-laptop.pdf', 'Laptop - Receipt', 'receipt', '2025-07-21', 'Purchases', 'Sam Example', 104_000, 1, null, false],
+  ['scans/2025-08-05-letter.pdf', null, 'letter', '2025-08-05', null, null, 41_000, 2, null, true],
 ];
 
 /** A scanned original past the size limit: it never reaches the index, and the pill says why. */
-const BIG_DOC = ['big-scan.pdf', null, 'unsorted', null, null, null, 64_000_000, null, 'over_limit'];
+const BIG_DOC = ['big-scan.pdf', null, 'unsorted', null, null, null, 64_000_000, null, 'over_limit', false];
 
 function initialState() {
   return { folders: [...FOLDERS], owners: scenario === 'no-owners' ? [] : [...OWNERS], filed: null, docs: null, added: [], shared: null };
@@ -108,10 +114,20 @@ function save(state) {
   writeFileSync(STATE, JSON.stringify(state));
 }
 
-/** The library's rows: the fixture set plus anything added through `add`, and the big scan. */
+/** The library's rows: the fixture set plus anything added through `add`, and the big scan.
+ * The `clear` scenario is the same library tidied for the all-clear screenshot: every document
+ * has a listed owner, nothing is iCloud-only, and the oversize scan is gone. */
 function docsOf(state) {
   const base = state.docs ?? DOCUMENTS;
-  const added = state.added.map((obj) => [obj.path, obj.title, obj.type, obj.date, obj.folder, obj.owner, obj.bytes, obj.pages, obj.skipped]);
+  const added = state.added.map((obj) => [obj.path, obj.title, obj.type, obj.date, obj.folder, obj.owner, obj.bytes, obj.pages, obj.skipped, false]);
+  if (scenario === 'clear') {
+    return [...base, ...added].map((doc) => {
+      const copy = [...doc];
+      if (copy[5] === null) copy[5] = OWNERS[0];
+      copy[9] = false;
+      return copy;
+    });
+  }
   return [...base, ...added, BIG_DOC];
 }
 
@@ -141,7 +157,8 @@ function filed(state) {
   // What the ORIGINAL lists filed against the ORIGINAL rows: edits since (a rename, a new shared
   // owner) show up as moves. Files added later have no copy on disk yet.
   const base = { folders: FOLDERS, owners: scenario === 'no-owners' ? [] : OWNERS, shared: SHARED, docs: null };
-  return Object.fromEntries(DOCUMENTS.map((doc) => [doc[0], target(doc, base)]));
+  const source = scenario === 'clear' ? docsOf(initialState()) : DOCUMENTS; // tidy rows file where the tidy rows put them
+  return Object.fromEntries(source.map((doc) => [doc[0], target(doc, base)]));
 }
 
 function documents(state) {
@@ -152,7 +169,7 @@ function documents(state) {
     status: 'ok',
     documents: docsOf(state).map((doc) => ({
       path: doc[0], title: doc[1], type: doc[2], date: doc[3], folder: doc[4], owner: doc[5],
-      filed_as: copies[doc[0]], bytes: doc[6], pages: doc[7], skipped: doc[8],
+      filed_as: copies[doc[0]], bytes: doc[6], pages: doc[7], skipped: doc[8], dataless: doc[9],
     })),
   };
 }
@@ -296,6 +313,11 @@ function locateReport() {
 async function library() {
   const state = load();
   if (args[0] === 'documents') print(documents(state));
+  if (args[0] === 'status') {
+    // Same shape as the Rust `status --json`. The timestamp is fixed so the overview figures
+    // and screenshots are byte-stable; smoke/shots run with TZ=UTC (package.json).
+    print({ version: 1, model: { reachable: process.env.FAKE_MODEL !== 'down' }, last_sync: '2025-03-09T09:24:00Z' });
+  }
   if (args[0] === 'search') {
     const limit = Number(args[args.indexOf('--limit') + 1] || 20);
     const query = args[args.indexOf('--') + 1] ?? '';
@@ -304,7 +326,11 @@ async function library() {
   if (args[0] === 'add') await addReport();
   if (args[0] === 'locate') locateReport();
   if (args[0] === 'ask') print(ANSWER);
-  if (args[0] === 'filing' && args[1] === 'show') print({ version: 1, folders: state.folders, owners: state.owners, shared_owner: state.shared ?? SHARED });
+  if (args[0] === 'filing' && args[1] === 'show') {
+    // FAKE_FILING_FAIL: the lists never load, so the overview must show an error and stay not-all-clear.
+    if (process.env.FAKE_FILING_FAIL === '1') fail('fake engine: filing show failed');
+    print({ version: 1, folders: state.folders, owners: state.owners, shared_owner: state.shared ?? SHARED });
+  }
   if (args[0] === 'filing' && args[1] === 'save') {
     let draft;
     try {
@@ -330,6 +356,9 @@ async function library() {
   }
   if (args[0] === 'organize') {
     const apply = args.includes('--apply');
+    // FAKE_ORGANIZE_FAIL: the dry-run fails, so the overview must show an error and stay not-all-clear
+    // until the next visit retries it (finding 5).
+    if (!apply && process.env.FAKE_ORGANIZE_FAIL === '1') fail('fake engine: organize dry-run failed');
     // FAKE_DRY_RUN_DELAY_MS: a slow dry-run of the lists as they were when it started (race tests).
     const delay = Number(process.env.FAKE_DRY_RUN_DELAY_MS || 0);
     if (!apply && delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
@@ -342,6 +371,13 @@ else if (scenario === 'empty') {
   if (args[0] === 'documents') print(fixture('documents-no-database.json'));
   if (args[0] === 'ask') print(fixture('ask-no-passages.json'));
   if (args[0] === 'organize') print(fixture('organize-no-database.json'));
+  await library();
+} else if (scenario === 'outdated') {
+  // Every report is valid JSON and says the library must be rebuilt before anything can use it.
+  if (args[0] === 'documents') print(fixture('documents-outdated.json'));
+  if (args[0] === 'ask') print(fixture('ask-no-passages.json'));
+  if (args[0] === 'organize' && !args.includes('--apply'))
+    print({ version: 1, mode: 'dry_run', status: 'outdated', items: [], counts: { would_copy: 0, would_reuse: 0, would_move: 0, copied: 0, already: 0, moved: 0, failed: 0, duplicate: 0, not_classified: 0, missing: 0 } });
   await library();
 } else await library();
 

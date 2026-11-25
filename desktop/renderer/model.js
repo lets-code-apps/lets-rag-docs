@@ -382,3 +382,198 @@ export function applySummary(report) {
   const head = done.length > 0 ? `Done: ${done.join(' and ')}.` : 'Nothing needed to move.';
   return c.failed ? `${head} ${copiesLabel(c.failed)} could not be filed; run “lets-rag-docs organize --dry-run” to see why.` : head;
 }
+
+// ---- overview and sidebar ----
+
+/** "1 file", "n files" for counts the sentence needs as a noun. */
+export function plural(n, one, many) {
+  return n === 1 ? one : many;
+}
+
+/** The Shared row's number: documents whose owner is null, the shared owner itself, or a name
+ * not on the owners list. `app.js`'s Shared form and the overview "no known owner" item both
+ * count with this one rule, so the two can never disagree. */
+export function sharedOwnerCount(saved, documents) {
+  if (!saved || !documents) return 0;
+  return documents.filter((doc) => doc.owner === null || doc.owner === saved.shared_owner || !saved.owners.includes(doc.owner)).length;
+}
+
+/** The design's `last sync` figure: "9 mar, 09:24" in the viewer's time zone; `never` for null
+ * (the library has not been ingested yet). The engine's value is RFC 3339 UTC. */
+export function syncLabel(lastSync) {
+  if (!lastSync) return 'never';
+  const date = new Date(lastSync);
+  if (Number.isNaN(date.getTime())) return 'never';
+  const hh = String(date.getHours()).padStart(2, '0');
+  const mm = String(date.getMinutes()).padStart(2, '0');
+  return `${date.getDate()} ${MONTHS[date.getMonth()]}, ${hh}:${mm}`;
+}
+
+/** The sidebar rows in the design's order, overview first. `graph` is deliberately absent (LET-139
+ * is not in this app yet). The count pill shows only on overview and only above 0; the aria label
+ * says what the number counts so a screen reader hears "overview, 5 need you". */
+export function sidebarItems(section, count) {
+  const rows = [
+    { section: 'overview', glyph: 'inbox', title: 'overview' },
+    { section: 'ask', glyph: 'search', title: 'ask' },
+    { section: 'filing', glyph: 'archive', title: 'filing' },
+    { section: 'settings', glyph: 'settings', title: 'settings' },
+  ];
+  const hasCount = section !== null && count > 0;
+  return rows.map((row) => ({
+    ...row,
+    current: row.section === section,
+    count: row.section === 'overview' && hasCount ? String(count) : '',
+    aria: row.section === 'overview' && hasCount ? `${row.title}, ${count} need you` : row.title,
+  }));
+}
+
+/** The four figures, as the design shows them: a plain value or a StatusPill for the model. A
+ * failed `status` call is honest `unknown`, never a fake `unreachable`. */
+export function overviewFigures(docs, status) {
+  const documents = docs?.documents ?? null;
+  const indexed = documents === null ? null : documents.filter((doc) => doc.skipped === null).length;
+  const modelValue = status === null ? 'unknown' : status.model.reachable ? 'connected' : 'unreachable';
+  const modelTone = status === null ? 'neutral' : status.model.reachable ? 'positive' : 'danger';
+  return [
+    { label: 'documents', value: documents === null ? 'unknown' : documents.length.toLocaleString('en-US'), isPill: false },
+    { label: 'indexed', value: indexed === null ? 'unknown' : indexed.toLocaleString('en-US'), isPill: false },
+    { label: 'last sync', value: syncLabel(status?.last_sync), isPill: false },
+    { label: 'model', value: modelValue, isPill: true, tone: modelTone },
+  ];
+}
+
+/** The "needs you" list, fixed order most blocking first, only kinds the app can actually see.
+ * `dry` is the one shared dry-run memo; while it has not landed, item 2 and the count are simply
+ * absent, not wrong. Titles and metas follow the design's sentences; only counts are data. */
+export function overviewItems(reports) {
+  const items = [];
+  const { status, docs, saved, dry } = reports;
+  if (status && status.model.reachable === false) {
+    items.push({
+      pill: 'model unreachable', tone: 'danger', glyph: 'settings',
+      title: 'The model on this Mac isn’t answering',
+      meta: 'Ask and re-sort wait until it’s back. New documents are queued, not lost.',
+      action: 'open settings', route: 'settings',
+    });
+  }
+  if (dry && dry.status === 'ok' && moveCount(dry) > 0) {
+    const n = moveCount(dry);
+    items.push({
+      pill: 're-sort waiting', tone: 'attention', glyph: 'arrow-right',
+      title: `${copiesLabel(n)} ${plural(n, 'is', 'are')} not where the lists put ${plural(n, 'it', 'them')}`,
+      meta: 'Nothing moves until you check the preview in filing.',
+      action: 'preview and apply', route: 'preview',
+    });
+  }
+  if (docs && saved) {
+    const n = sharedOwnerCount(saved, docs.documents);
+    if (n > 0) {
+      items.push({
+        pill: 'no known owner', tone: 'attention', glyph: 'arrow-right',
+        title: `${docsLabel(n)} filed under ${saved.shared_owner}`,
+        meta: `The model couldn’t tell whose they are. Pick an owner, or leave them in ${saved.shared_owner}.`,
+        action: 'review', route: 'review',
+      });
+    }
+  }
+  if (docs) {
+    const n = docs.documents.filter((doc) => doc.skipped !== null).length;
+    if (n > 0) {
+      const over = docs.max_file_mb === null ? 'Ask never uses them.' : `${n} over ${Math.round(docs.max_file_mb)} MB. Ask never uses them.`;
+      items.push({
+        pill: 'not indexed', tone: 'danger', glyph: 'arrow-right',
+        title: `${docsLabel(n)} can’t be searched`,
+        meta: over,
+        action: 'show documents', route: 'documents',
+      });
+    }
+  }
+  if (docs) {
+    const n = docs.documents.filter((doc) => doc.dataless).length;
+    if (n > 0) {
+      items.push({
+        pill: 'only in iCloud', tone: 'attention', glyph: 'arrow-up-right',
+        title: `${n} ${plural(n, 'file', 'files')} ${plural(n, 'isn’t', 'aren’t')} on this Mac`,
+        meta: 'Your library is in iCloud Drive and macOS removed local copies to save space. Set the library folder to keep downloaded in Finder.',
+        action: 'show how', route: 'how',
+      });
+    }
+  }
+  return items;
+}
+
+/** The move report the overview may count as *current*. The filing preview is tagged with the
+ * generation that produced it; a new document bumps the generation, so a stale zero-move preview
+ * can no longer hide the copy the new document still needs, and the fresh shared memo wins. */
+export function overviewDryReport({ preview, previewGeneration, memo, generation }) {
+  if (preview && previewGeneration === generation) return preview;
+  if (memo && memo.generation === generation) return memo.report ?? null;
+  return null;
+}
+
+/** "Nothing needs you": every read landed, no library notice is up, and the shared dry-run reported
+ * `ok` with nothing to move. A `no_database` or `outdated` report is a library that needs attention
+ * — the recovery notice already says what to run — so it is never a false all-clear. */
+export function allClear({ docs, docsError, status, saved, notice, dry, items }) {
+  if (!docs || docsError || !status || !saved) return false;
+  if (notice !== null) return false;
+  if (!dry || dry.status !== 'ok') return false;
+  return items.length === 0;
+}
+
+/** The dry-run memo filing and overview share. Two states the earlier code conflated: a run that is
+ * still *pending* must be joined by every caller (one hash pass per library state, however many
+ * visits land on the overview), while a run that has *settled as a failure* is not a result to keep,
+ * so the next visit retries it.
+ *
+ * `run` is the engine call and `currentGeneration` reads the app's library generation, which a save,
+ * an apply or a new document bumps. `ensure` returns the shared promise, which resolves to the memo —
+ * or `null` when the library changed while the pass was hashing. */
+export class DryRunMemo {
+  constructor(run, currentGeneration) {
+    this.run = run;
+    this.currentGeneration = currentGeneration;
+    this.memo = null; // {generation, pending, report, promise}
+    this.error = null;
+  }
+
+  /** Reuse while pending or current; start again only after a settled failure. */
+  ensure(generation) {
+    const memo = this.memo;
+    const settledFailure = memo !== null && !memo.pending && memo.report === null;
+    if (memo && memo.generation === generation && !settledFailure) return memo.promise;
+    const fresh = { generation, pending: true, report: null, promise: null };
+    fresh.promise = (async () => {
+      const res = await this.run();
+      fresh.pending = false;
+      if (generation !== this.currentGeneration()) return null; // saved or added while hashing
+      if (res && res.ok) {
+        fresh.report = res.report;
+        this.error = null;
+      } else {
+        fresh.report = null;
+        this.error = res?.error ?? 'The engine did not answer about the moves.';
+      }
+      return fresh;
+    })();
+    this.memo = fresh;
+    return fresh.promise;
+  }
+
+  /** Why the overview is not all-clear when the dry-run is the reason: a settled failure only. */
+  failure(generation) {
+    const memo = this.memo;
+    if (!memo || memo.generation !== generation || memo.pending || memo.report !== null) return null;
+    return this.error;
+  }
+
+  /** The lists changed (a save, an apply, a new document): the next caller hashes again. */
+  invalidate() {
+    this.memo = null;
+    this.error = null;
+  }
+}
+
+
+

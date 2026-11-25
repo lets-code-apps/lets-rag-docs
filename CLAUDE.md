@@ -84,8 +84,11 @@ Cite it as `..., p. N` when present, else `chunk N`.
 **CLI JSON (the desktop's contract; `testdata/desktop/*.json` locks every shape, the TS tests
 and the fake engine replay them byte for byte):** `search --json --limit N -- <q>` →
 `{version:1, passages:[{source, file, chunk, page?, score}]}` (citation keys only, never text);
-`documents --json` → `{version, max_file_mb, status, documents:[{...,bytes,pages,skipped}]}` where
-an over-limit original (`skipped:"over_limit"`, never indexed) still shows its size;
+`documents --json` → `{version, max_file_mb, status, documents:[{...,bytes,pages,skipped,dataless}]}` where
+an over-limit original (`skipped:"over_limit"`, never indexed) still shows its size and `dataless:true` marks an
+iCloud-only file (macOS `SF_DATALESS` in `st_flags`, read via `symlink_metadata`, never downloaded);
+`status --json` → `{version, model:{reachable}, last_sync:"<RFC3339 UTC>"|null}` — the engine probes `GET {base_url}/models`
+with a 3 s timeout (a dead model is data: `reachable:false`, not an error), and `last_sync` is the database file's mtime;
 `add --json -- <file>` → `{version, status, source, file, type, date, chunks, duplicate_of}` (an
 original over `[ocr] max_file_mb` (default 50) is refused before hashing/copy/OCR);
 `locate --json -- <path>` → `{version, status, kind, path}` with `status:"ok"` only for one
@@ -210,6 +213,13 @@ desktop/                 # Electron menu-bar app (Node/TS), ask, filing and sett
     metadata). `Config::load_with_shared` applies it at load; an app's own `[llm] base_url`/`model` wins
     entirely (never a per-key merge). `guide/MODEL.md` documents it (byte-identical to triage-mail's). No
     UI, no call to `write` yet (onboarding/settings, LET-136/137).
+    **Sidebar + overview (#19, 2026-11-25):** one shared sidebar (design Sidebar, order overview/ask/filing/settings)
+    with a neutral count pill only on the overview row (aria "overview, 5 need you"); the window opens on a new
+    overview screen: four figures (documents, indexed, last sync, model StatusPill) plus a "needs you" list (model
+    unreachable, re-sort waiting, no known owner, not indexed, only in iCloud) each routing to the existing screens;
+    the re-sort item shares ONE dry-run memo with filing (per save-generation, dropped on save/apply). Engine side:
+    `status --json` (new `src/status.rs`, reqwest 3 s probe, db-mtime text) and `dataless` in `documents --json`;
+    fake engine speaks both (FAKE_MODEL=down, scenario `clear`); 44 screenshots.
 10. Later: synthetic sample docs + public eval set, reranking (bge-reranker-v2-m3). (Page markers landed with #15: `ocr.py` emits `\f`, `chunk::paged_chunks` tracks the page, `chunk_cases.json` still locks the old chunk text and byte counts.)
 
 ## Environment

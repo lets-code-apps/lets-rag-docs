@@ -201,3 +201,48 @@ test('add parses JSON that reaches stdout asynchronously', async () => {
   assert.equal(result.value.file, 'lamp.pdf');
   assert.equal(seen.killed, false);
 });
+
+test('status argv is exactly status --json', async () => {
+	const recorded: string[][] = [];
+	const spawn = {
+		call(file: string, args: string[]) {
+			void file;
+			recorded.push(args);
+			const child = new FakeChild();
+			queueMicrotask(() => child.emit('close'));
+			return child as unknown as EngineProcess;
+		},
+	};
+	const engine = new Engine({ RAG_DOCS_ENGINE_PATH: 'fake' }, '/repo', spawn, 0, 100);
+	await engine.status();
+	assert.deepEqual(recorded, [['status', '--json']]);
+});
+
+test('a status call is a read: its own budget kills the child, and no parse of half a report', async () => {
+	const children: FakeChild[] = [];
+	const spawn = {
+		call(file: string, args: string[]) {
+			void file;
+			void args;
+			const child = new FakeChild();
+			children.push(child);
+			return child as unknown as EngineProcess;
+		},
+	};
+	// read budget 5 ms: the child never speaks, so the call must die at the budget.
+	const engine = new Engine({ RAG_DOCS_ENGINE_PATH: 'fake' }, '/repo', spawn, 5, 100);
+	const result = await engine.status();
+	assert.ok(!result.ok);
+	assert.match(result.error, /timed out/);
+	assert.equal(children[0]?.killed, true);
+});
+
+test('status parses the engine report through the real collect path', async () => {
+	const seen = { args: [] as string[][], stdin: [] as string[] };
+	const spawn = slowSpawn(0, JSON.stringify({ version: 1, model: { reachable: false }, last_sync: null }), seen);
+	const engine = new Engine({ RAG_DOCS_ENGINE_PATH: 'fake' }, '/repo', spawn, 0, 100);
+	const result = await engine.status();
+	assert.ok(result.ok);
+	assert.equal(result.value.model.reachable, false);
+	assert.equal(result.value.last_sync, null);
+});

@@ -1,8 +1,8 @@
 # Let's RAG Docs — desktop
 
 A macOS menu-bar Electron companion for the `lets-rag-docs` Rust engine. It lives in the menu bar
-(click the icon to show or focus the window, right-click for Open/Quit), shows the **ask**, **filing**
-and **settings** screens from the approved RagAsk/RagFiling/RagSettings designs, and calls the engine
+(click the icon to show or focus the window, right-click for Open/Quit), shows the **overview**, **ask**, **filing**
+and **settings** screens from the approved RagOverview/RagAsk/RagFiling/RagSettings designs, and calls the engine
 one-shot over its command line. It never
 reads the repository's local model, database, config file or document folders itself, and it never
 points the app at real data: `npm run smoke` and `npm run shots` hard-set `test/fixtures/fake-engine.mjs`.
@@ -25,7 +25,7 @@ Run from this `desktop/` directory.
 | Build | `npm run build` | `tsc -p tsconfig.build.json` into `dist/` and copy `preload.cjs` |
 | Dev launch | `npm start` | build, then open a visible window (`RAG_DOCS_START_WINDOW=1 electron .`) |
 | Smoke | `npm run smoke` | build, then hidden Electron with the fake engine; exits `SMOKE OK` / `SMOKE FAIL` |
-| Screenshots | `npm run shots` | build, then drive the real page against the fake engine (type, click, save, re-sort) and `capturePage` ask, the 10 RagFiling states and settings (and the 360px views), in light and dark: 38 PNGs under `screenshots/` |
+| Screenshots | `npm run shots` | build, then drive the real page against the fake engine (type, click, save, re-sort) and `capturePage` overview (busy and clear), ask, the 10 RagFiling states and settings (and the 360px views), in light and dark: 44 PNGs under `screenshots/` |
 | Compare | `npm run compare -- <baseline> <shots> [out]` | diff `<shots>` against `<baseline>` PNGs with Electron's `nativeImage` (no image library): writes `out/compare-report.md`, `out/compare-report.json` and `out/diff/<name>.png` for changed shots, exits non-zero if anything changed |
 | Icons | `npm run icons` | re-render `assets/*.png` from SVG (see below) |
 
@@ -36,7 +36,8 @@ data; real failures exit non-zero with empty stdout and a reason on stderr.
 
 | Call | Desktop API | Shape |
 |---|---|---|
-| `documents --json` | `rag.documents()` | `{version, max_file_mb, status, documents:[{path,title,type,date,folder,owner,filed_as,bytes,pages,skipped}]}` |
+| `documents --json` | `rag.documents()` | `{version, max_file_mb, status, documents:[{path,title,type,date,folder,owner,filed_as,bytes,pages,skipped,dataless}]}` — `dataless:true` marks an iCloud-only file (macOS `SF_DATALESS` bit, read from metadata only, never downloaded) |
+| `status --json` | `rag.status()` | `{version, model:{reachable}, last_sync:RFC3339|null}` — the engine probes `GET {base_url}/models` with its own 3 s timeout; `last_sync` is the library database file's mtime |
 | `search --json --limit 20 -- <query>` | `rag.search()` | `{version, passages:[{source,file,chunk,page?,score}]}` — citation keys only, never text |
 | `ask --json -- <question>` | `rag.ask()` | `{version, answer:string|null, sources:[{source,file,chunk,page?,score}]}` |
 | `filing show --json` | `rag.filing()` | `{version, folders, owners, shared_owner}` |
@@ -59,7 +60,7 @@ Binary lookup: `RAG_DOCS_ENGINE_PATH`, then `<resources>/engine/lets-rag-docs`, 
 
 None. Every value on screen comes from an engine report or from what the user typed; the page has no
 demo or sample mode (a test checks). Designed details the engine cannot supply yet are left out and
-listed as follow-ups in the PR: page counts and sizes in the library, "not indexed" pills, page numbers
+listed as follow-ups in the PR: page counts and sizes in the library, "not indexed" pills (the design's "unreadable" and "password-protected" reasons need engine data we do not emit yet), page numbers
 in citations, "open" for a cited document, the AppBar search and "add documents", editing the shared
 owner's name, and a rename that also re-files documents (today they go to unsorted until
 `lets-rag-docs classify --force`).
@@ -102,7 +103,7 @@ line. Two controls are drawn under 44px today and are allow-listed in `KNOWN_SHO
 
 **Reading the PR comment.** After `shots`, CI copies the committed PNGs to a temp baseline, takes fresh
 shots, and runs `npm run compare`. If shots match, one comment (marked `<!-- desktop-shots -->`, updated on
-each push, not stacked) says all 38 match. If not, it lists the changed shots and links the run artifact
+each push, not stacked) says all 44 match. If not, it lists the changed shots and links the run artifact
 (`desktop-ci-<run id>`) that holds the new `screenshots/*.png`, `smoke.txt`, `shots.txt`, `compare-report.md|json`,
 `compare-measured.json`
 and `diff/<name>.png` (red where pixels differ). The same markdown also lands in the step summary; on fork PRs
@@ -124,7 +125,7 @@ CI render is the baseline**, not your laptop.
 a shot is **changed** when over `MAX_RATIO = 0.002` (0.2%) of its pixels differ, on a size mismatch, or when a
 pair is missing (`new`/`removed`). These are a starting point: run the CI job twice on an unchanged tree, record
 the largest ratio you saw, keep `MAX_RATIO` at least 3× that and at most 0.5%, and write the measured noise here.
-Every run also uploads `compare-measured.json` (the ratio of all 38 shots, green or red), which is where these
+Every run also uploads `compare-measured.json` (the ratio of all 44 shots, green or red), which is where these
 numbers come from. Measured on the fixed workflow, two runs against a CI-rendered baseline: run 44420909156 had
 6 of 38 shots with any differing pixels, run 44421965171 had 5, and the largest ratio in either run was **0.0000258
 (0.0026%)**. `MAX_RATIO = 0.002` is therefore ~77× the observed noise and still under the 0.5% ceiling — keep it
@@ -146,6 +147,8 @@ re-baseline from the artifact. Baseline updates add ~6.7 MB of PNG history each 
 never document text.
 
 ## Boundary rules
+
+- The model probe lives in the engine: `status --json` is how the app learns whether the model answers and when the library was last synced. The app itself makes no network calls and reads no config or database: Electron only spawns the engine.
 
 - No network calls from the app: no Node HTTP/TLS/socket/dgram, no `fetch`, no Electron network/session fetch.
 - Only `engine.ts` imports `child_process`; it spawns the engine one-shot.

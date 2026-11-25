@@ -17,6 +17,7 @@ mod mcp;
 mod organize;
 mod search;
 mod shared_model;
+mod status;
 
 use std::path::{Path, PathBuf};
 
@@ -130,6 +131,12 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Is the model answering, and when was the library last synced (read-only): `status --json`
+    Status {
+        /// Machine-readable output; required, there is no text mode for this command
+        #[arg(long)]
+        json: bool,
+    },
     /// Show or change `[classify] folders` and `owners` through the engine
     Filing {
         #[command(subcommand)]
@@ -172,6 +179,7 @@ async fn main() -> anyhow::Result<()> {
             organize::run(&config, mode.dry_run, mode.apply, json).await
         }
         Command::Documents { json } => documents::run(&config, json),
+        Command::Status { json } => status::run(&config, json).await,
         Command::Filing { command } => match command {
             Filing::Show { json } => filing::show(&config, json),
             Filing::Save { check } => filing::save(&config, &path, check),
@@ -299,6 +307,30 @@ mod tests {
 
     use super::Cli;
     use super::skips_over_limit;
+    use crate::config::Config;
+
+    // `status --json` is the desktop overview's contract: the subcommand parses, but the
+    // command itself refuses without `--json` (same rule as `documents`: machine output only).
+    #[tokio::test]
+    async fn status_requires_json_flag() {
+        assert!(
+            Cli::try_parse_from(vec![
+                "lets-rag-docs".to_string(),
+                "status".to_string(),
+                "--json".to_string()
+            ])
+            .is_ok(),
+            "`status --json` parses"
+        );
+        // Without --json the clap side still parses (the flag is optional there); the command
+        // refuses at run time, before touching config, with a non-zero exit.
+        let config = Config::default();
+        let result = super::status::run(&config, false).await;
+        assert!(
+            result.is_err(),
+            "status without --json is refused, not printed by hand"
+        );
+    }
 
     // The clap contract the desktop shell and the acceptance tests rely on: `organize --json`
     // alone is not a mode, and adding --json must not have widened the exactly-one group.

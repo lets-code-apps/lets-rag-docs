@@ -212,6 +212,11 @@ function registerIpc(): void {
 		return guard(async () => toIPC(await engine.documents()));
 	});
 
+	ipcMain.handle(IPC.status, async (event) => {
+		if (!fromUs(event.senderFrame)) return null;
+		return guard(async () => toIPC(await engine.status()));
+	});
+
 	ipcMain.handle(IPC.filingShow, async (event) => {
 		if (!fromUs(event.senderFrame)) return null;
 		return guard(async () => toIPC(await engine.filingShow()));
@@ -465,7 +470,7 @@ async function measureGeometry(browser: BrowserWindow): Promise<string[]> {
 		const reload = loaded(browser);
 		browser.reload();
 		await reload;
-		for (const section of ['ask', 'filing', 'settings']) {
+		for (const section of ['overview', 'ask', 'filing', 'settings']) {
 			await drive(browser, `await d.click('[data-section="${section}"]');`);
 			// Rule 2 wants the search field measured with the add panel visible: run one add, at the wide
 			// size only, so the check costs one run and stays off the reload/queue race at 360px.
@@ -503,6 +508,22 @@ type SmokeChecks = {
 	sharedShownHousehold: boolean;
 	sharedRenamedBack: boolean;
 	applied: string;
+	overviewFive: boolean;
+	previewRoute: boolean;
+	bootOverview: boolean;
+	clearRoutes: boolean;
+	clearOk: boolean;
+	addRefreshOk: boolean;
+	dryRunFailOk: boolean;
+	dryRunRetryOk: boolean;
+	filingFailOk: boolean;
+	filingRetryOk: boolean;
+	// Round 3: an unusable library never claims all-clear, and a filing
+	// preview cannot outlive an add.
+	noDatabaseOk: boolean;
+	outdatedOk: boolean;
+	stalePreviewOk: boolean;
+	keyboardOk: boolean;
 	persisted?: boolean;
 	raceSafe?: boolean;
 	titleWide?: boolean;
@@ -517,16 +538,34 @@ type SmokeChecks = {
 async function runSmoke(): Promise<void> {
 	const dir = freshFakeState();
 	const deadline = setTimeout(() => {
-		console.error('SMOKE FAIL: timed out after 60s');
+		console.error('SMOKE FAIL: timed out after 150s');
 		app.exit(1);
-	}, 60000);
+	}, 150000);
 	let code = 1;
 	try {
+		// Busy pass: the fake model answers "not reachable", so the overview opens with its
+		// danger item and every route below is the one a stuck person would take.
+		process.env.FAKE_MODEL = 'down';
 		const browser = makeWindow();
 		await loaded(browser);
-		const result = (await drive(browser, String.raw`
+		const bootOverview = (await drive(browser, String.raw`
+      const nav = [...document.querySelectorAll('.nav button')].map((b) => b.dataset.section).join(',');
+      const row = d.find('.nav [data-section="overview"]');
+      const pills = [...document.querySelectorAll('#needRows .need-row .pill')].map((x) => x.textContent);
+      const oneBtn = [...document.querySelectorAll('#needRows .need-row')].every((r) => r.querySelectorAll('.btn.secondary').length === 1);
+      const noPrimary = d.find('#needRows').querySelectorAll('.btn.primary').length === 0;
+      return nav === 'overview,ask,filing,settings' && !d.find('#overviewScreen').hidden && d.find('#askScreen').hidden
+        && row.getAttribute('aria-current') === 'page' && row.getAttribute('aria-label') === 'overview, 4 need you'
+        && row.querySelector('.count').textContent === '4'
+        && d.find('#figures').children.length === 4 && d.find('#figModel').textContent === 'unreachable'
+        && pills.join('|') === 'model unreachable|no known owner|not indexed|only in iCloud'
+        && oneBtn && noPrimary;
+    `)) as boolean;
+    const result = (await drive(browser, String.raw`
+      await d.click('[data-section="ask"]');
       // Sizes and the over-50 MB pill come straight from the report; the big original is listed
       // with its size and the reason it was never indexed.
+      await d.click('[data-section="ask"]');
       const big = d.row('#libraryRows', 'big-scan.pdf');
       const dangerPill = big.querySelector('.pill')?.textContent === 'not indexed: over 50 MB';
       const sizeShown = (big.querySelector('.row-preview')?.textContent ?? '').includes('64 MB');
@@ -566,6 +605,16 @@ async function runSmoke(): Promise<void> {
       const moves = document.querySelectorAll('#moveRows .row').length;
       const movesToVehicles = [...document.querySelectorAll('#moveRows .row-subject')].some((n) => n.textContent.includes('Vehicles'));
       const noUnsorted = ![...document.querySelectorAll('#moveRows .row-subject')].some((n) => n.textContent.includes('unsorted'));
+      // The overview mid-preview: five items (model, re-sort, owners, unindexed, iCloud) and
+      // its "preview and apply" button reopens the SAME preview without a second dry-run.
+      await d.click('[data-section="overview"]');
+      await d.settle();
+      const pills = [...document.querySelectorAll('#needRows .need-row .pill')].map((x) => x.textContent);
+      const overviewFive = pills.length === 5 && d.find('.nav [data-section="overview"]').getAttribute('aria-label') === 'overview, 5 need you'
+        && pills.join('|') === 'model unreachable|re-sort waiting|no known owner|not indexed|only in iCloud';
+      [...document.querySelectorAll('#needRows .need-row button')].find((b) => b.textContent.includes('preview and apply')).click();
+      await d.settle();
+      const previewRoute = !d.find('#movesSection').hidden && d.find('.nav [data-section="filing"]').getAttribute('aria-current') === 'page';
       await d.click('#applyButton');
       const filed = d.find('#noticePill').textContent;
       // Shared owner: editable now; "Household" moves unlisted documents in the next preview.
@@ -587,10 +636,13 @@ async function runSmoke(): Promise<void> {
       await d.click('#resortButton');
       await d.click('#applyButton');
       const applied = d.find('#noticePill').textContent;
-      return { libraryRows, answered, folderRows, notice, moves, filed, dangerPill, sizeShown, searchRows, searchMeta, cleared, addDone, addAdded, addDuplicate, addFailed, grew, pageCited, openButtons, vehiclesCounts, movesToVehicles, noUnsorted, movesToHousehold, sharedShownHousehold, sharedRenamedBack, applied };
+      return { libraryRows, answered, folderRows, notice, moves, filed, dangerPill, sizeShown, searchRows, searchMeta, cleared, addDone, addAdded, addDuplicate, addFailed, grew, pageCited, openButtons, vehiclesCounts, movesToVehicles, noUnsorted, movesToHousehold, sharedShownHousehold, sharedRenamedBack, applied, overviewFive, previewRoute };
     `		)) as SmokeChecks;
 		// The open button ran in main: it resolved through the engine's locate and recorded the
 		// fake filed copy — the renderer never named a path.
+		// The window opened on overview: shared sidebar in the design's order, count 4 before any
+		// rename exists (no re-sort item yet), four figures, neutral one-button rows, model pill red.
+		result.bootOverview = bootOverview;
 		result.openedPath = openLog[openLog.length - 1] === '/tmp/rag-docs-fake/library/Finance/Alex Example/2025/2025-03-14 Car loan - Repayment schedule.pdf';
 		// Edit -> save -> reload: the saved list comes back from the engine, not from page memory.
 		const reload = loaded(browser);
@@ -605,6 +657,7 @@ async function runSmoke(): Promise<void> {
 		// and main must refuse apply.
 		process.env.FAKE_DRY_RUN_DELAY_MS = '1500';
 		result.raceSafe = (await drive(browser, String.raw`
+      await d.click('[data-section="filing"]');
       await d.pick('Finance');
       await d.type('#nameInput', 'Money');
       await d.click('#saveButton');
@@ -621,6 +674,174 @@ async function runSmoke(): Promise<void> {
     `)) as boolean;
 		delete process.env.FAKE_DRY_RUN_DELAY_MS;
 
+		// Every overview route, taken in order: settings, the filtered library, the iCloud steps with
+		// "got it", and review into filing's owners view with Shared picked. Then the all-clear pass on the
+		// tidy library with the model back: one line, no list, no count.
+		const clearFlags = (await drive(browser, String.raw`
+      const btn = (t) => [...document.querySelectorAll('#needRows .need-row button')].find((b) => b.textContent.trim() === t);
+      const libraryCount = () => document.querySelectorAll('#libraryRows .row').length;
+      await d.click('[data-section="overview"]');
+      btn('open settings').click();
+      const settingsOn = !d.find('#settingsScreen').hidden;
+      await d.click('[data-section="overview"]');
+      // Finding 2: a COMPLETED search first (indexed loan hits), then "show documents" must still filter
+      // down to the single skipped row — no indexed hits survive the route.
+      await d.type('#librarySearch', 'loan');
+      const searched = libraryCount() > 0; // the loan documents were found
+      btn('show documents').click();
+      const onlySkipped = libraryCount() === 1
+        && /^1 of \d+ documents$/.test(d.find('#libraryMeta').textContent)
+        && !d.find('#libraryFilterClear').hidden
+        && ![...document.querySelectorAll('#libraryRows .row .pill')].some((p) => p.textContent === 'cited');
+      d.find('#libraryFilterClear').click();
+      const restored = libraryCount() > 1 && d.find('#libraryFilterClear').hidden;
+      await d.click('[data-section="overview"]');
+      // Finding 2 (in-flight): type a search but do not settle, then route — cancelSearch drops the
+      // pending reply and empties the box, so the skipped filter runs.
+      const box = d.find('#librarySearch');
+      box.value = 'loan';
+      box.dispatchEvent(new Event('input', { bubbles: true }));
+      btn('show documents').click();
+      const midSearchSkipped = libraryCount() === 1 && !d.find('#libraryFilterClear').hidden && d.find('#librarySearch').value === '';
+      await d.click('[data-section="overview"]');
+      btn('show how').click();
+      const stepsShown = !!document.querySelector('.howto .howto-steps') && !!document.querySelector('.howto button');
+      // Finding 3: "got it" collapses the steps but keeps the unresolved iCloud row (and its count);
+      // clicking "show how" again reopens the steps.
+      document.querySelector('.howto button').click();
+      await d.settle();
+      const stepsCollapsed = !document.querySelector('.howto .howto-steps');
+      const howRowStays = [...document.querySelectorAll('#needRows .need-row button')].some((b) => b.textContent.trim() === 'show how');
+      btn('show how').click();
+      const stepsReopened = !!document.querySelector('.howto .howto-steps');
+      await d.click('[data-section="overview"]');
+      btn('review').click();
+      await new Promise((r) => setTimeout(r, 50));
+      const sharedSelected = d.find('.nav [data-section="filing"]').getAttribute('aria-current') === 'page'
+        && document.querySelector('#viewSwitch').querySelector('[data-view="owners"]')?.getAttribute('aria-checked') === 'true'
+        && [...document.querySelectorAll('#filingRows .row')].some((r) => r.getAttribute('aria-pressed') === 'true' && r.querySelector('.row-title')?.textContent === 'Shared');
+      return { settingsOn, searched, onlySkipped, restored, midSearchSkipped, stepsShown, stepsCollapsed, howRowStays, stepsReopened, sharedSelected };
+    `)) as Record<string, boolean>;
+		result.clearRoutes = Object.values(clearFlags).every(Boolean);
+		result.keyboardOk = (await drive(browser, String.raw`
+      const kb = [...document.querySelectorAll('.nav button'), ...document.querySelectorAll('#needRows .need-row button')];
+      return kb.length > 4 && kb.every((b) => b.tagName === 'BUTTON' && !b.disabled && b.tabIndex >= 0);
+    `)) as boolean;
+		// All-clear pass on a clean state: lists saved by the race pass would otherwise
+		// leave a re-sort pending, which is not what this pass is about.
+		process.env.FAKE_STATE_FILE = join(freshFakeState(), 'state.json');
+		process.env.FAKE_SCENARIO = 'clear';
+		delete process.env.FAKE_MODEL;
+		const reloadClear = loaded(browser);
+		browser.reload();
+		await reloadClear;
+		result.clearOk = (await drive(browser, String.raw`
+      await d.settle();
+      const row = d.find('.nav [data-section="overview"]');
+      return !d.find('#allClear').hidden && d.find('#needSection').hidden
+        && d.find('#allClear').textContent.includes('nothing needs you')
+        && row.getAttribute('aria-label') === 'overview' && row.querySelector('.count').textContent === ''
+        && row.querySelector('.count').hidden === true // Finding 7: a zero count hides the pill outright
+        && d.find('#figModel').textContent === 'connected';
+    `)) as boolean;
+    // Each of these needs a clean all-clear library, so each starts from its own fresh fake state.
+    // Finding 6: all-clear -> add a document -> overview. A new unfiled add must not reuse the cached
+    // zero-move report: the re-sort item returns instead of a stale all-clear.
+    process.env.FAKE_STATE_FILE = join(freshFakeState(), 'state.json');
+    const reloadAdd = loaded(browser);
+    browser.reload();
+    await reloadAdd;
+    result.addRefreshOk = (await drive(browser, String.raw`
+      await d.settle();
+      await d.click('[data-section="ask"]');
+      d.find('#addDocsButton').click();
+      await d.settle();
+      await d.click('[data-section="overview"]');
+      await d.settle();
+      const pills = [...document.querySelectorAll('#needRows .need-row .pill')].map((x) => x.textContent);
+      return pills.includes('re-sort waiting') && d.find('#allClear').hidden;
+    `)) as boolean;
+    // Finding 5: a failed dry-run and a failed filing load are surfaced, not hidden behind all-clear,
+    // and each is retried on the next overview visit.
+    process.env.FAKE_ORGANIZE_FAIL = '1';
+    process.env.FAKE_STATE_FILE = join(freshFakeState(), 'state.json');
+    const reloadDryFail = loaded(browser);
+    browser.reload();
+    await reloadDryFail;
+    result.dryRunFailOk = (await drive(browser, String.raw`
+      await d.settle();
+      return d.find('#allClear').hidden && !d.find('#statusError').hidden && d.find('#needSection').hidden;
+    `)) as boolean;
+    delete process.env.FAKE_ORGANIZE_FAIL;
+    result.dryRunRetryOk = (await drive(browser, String.raw`
+      await d.click('[data-section="overview"]');
+      await d.settle();
+      return !d.find('#allClear').hidden && d.find('#statusError').hidden;
+    `)) as boolean;
+    process.env.FAKE_FILING_FAIL = '1';
+    process.env.FAKE_STATE_FILE = join(freshFakeState(), 'state.json');
+    const reloadFilingFail = loaded(browser);
+    browser.reload();
+    await reloadFilingFail;
+    result.filingFailOk = (await drive(browser, String.raw`
+      await d.settle();
+      return d.find('#allClear').hidden && !d.find('#statusError').hidden;
+    `)) as boolean;
+    delete process.env.FAKE_FILING_FAIL;
+    result.filingRetryOk = (await drive(browser, String.raw`
+      await d.click('[data-section="overview"]');
+      await d.settle();
+      return !d.find('#allClear').hidden;
+    `)) as boolean;
+    // Round-3 finding 2: a missing or an outdated database answers in valid JSON, but it is a library
+    // that needs attention. The overview may show only its recovery notice, never "nothing needs you".
+    process.env.FAKE_SCENARIO = 'empty';
+    process.env.FAKE_STATE_FILE = join(freshFakeState(), 'state.json');
+    const reloadNoDatabase = loaded(browser);
+    browser.reload();
+    await reloadNoDatabase;
+    result.noDatabaseOk = (await drive(browser, String.raw`
+      await d.settle();
+      return !d.find('#overviewNotice').hidden && d.find('#overviewNotice').textContent.includes('No library yet')
+        && d.find('#allClear').hidden && d.find('#statusError').hidden;
+    `)) as boolean;
+    process.env.FAKE_SCENARIO = 'outdated';
+    process.env.FAKE_STATE_FILE = join(freshFakeState(), 'state.json');
+    const reloadOutdated = loaded(browser);
+    browser.reload();
+    await reloadOutdated;
+    result.outdatedOk = (await drive(browser, String.raw`
+      await d.settle();
+      return !d.find('#overviewNotice').hidden && d.find('#overviewNotice').textContent.includes('older version')
+        && d.find('#allClear').hidden && d.find('#statusError').hidden;
+    `)) as boolean;
+    // Round-3 finding 3: a zero-move preview opened in filing used to override the plan after an add,
+    // so the overview claimed all-clear while the new document still needed a copy. The preview is
+    // tagged with the generation that produced it; an add makes it stale.
+    process.env.FAKE_SCENARIO = 'clear';
+    process.env.FAKE_STATE_FILE = join(freshFakeState(), 'state.json');
+    const reloadStalePreview = loaded(browser);
+    browser.reload();
+    await reloadStalePreview;
+    result.stalePreviewOk = (await drive(browser, String.raw`
+      await d.settle();
+      await d.click('[data-section="filing"]');
+      await d.settle();
+      d.find('#resortButton').click(); // the dry-run finds nothing to move: a zero-move preview
+      await d.settle();
+      await d.click('[data-section="overview"]');
+      await d.settle();
+      const clearedNow = !d.find('#allClear').hidden;
+      await d.click('[data-section="ask"]');
+      await d.settle();
+      d.find('#addDocsButton').click();
+      await d.settle();
+      await d.click('[data-section="overview"]');
+      await d.settle();
+      const pills = [...document.querySelectorAll('#needRows .need-row .pill')].map((x) => x.textContent);
+      return clearedNow && pills.includes('re-sort waiting') && d.find('#allClear').hidden;
+    `)) as boolean;
+    process.env.FAKE_SCENARIO = 'library';
 		// The app name lives in the shared bar, so it shows on every screen. Check it is centred,
 		// clear of the emblem and that nothing scrolls sideways, on ask/filing/settings at 1200px
 		// and at the 360px minimum.
@@ -695,7 +916,9 @@ async function runSmoke(): Promise<void> {
 		const title = browser.getTitle();
 		const own = isOwnFile(browser.webContents.getURL(), INDEX_URL);
 		const ok = own && title === PRODUCT_NAME && result.libraryRows > 0 && result.answered && result.folderRows > 0 && result.notice && result.moves > 0 && result.filed === 'filed' && result.persisted === true && result.raceSafe === true && result.titleWide === true && result.titleNarrow === true && result.appearanceLive === true && result.openAtLoginOk === true
-			&& result.dangerPill && result.sizeShown && result.searchRows === 2 && result.searchMeta && result.cleared === result.libraryRows && result.addDone && result.addAdded && result.addDuplicate && result.addFailed && result.grew && result.pageCited && result.openButtons === 2 && result.openedPath && result.vehiclesCounts && result.movesToVehicles && result.noUnsorted && result.movesToHousehold && result.sharedShownHousehold && result.sharedRenamedBack && result.applied === 'filed' && (result.geometry ?? []).length === 0;
+			&& result.dangerPill && result.sizeShown && result.searchRows === 2 && result.searchMeta && result.cleared === result.libraryRows && result.addDone && result.addAdded && result.addDuplicate && result.addFailed && result.grew && result.pageCited && result.openButtons === 2 && result.openedPath && result.vehiclesCounts && result.movesToVehicles && result.noUnsorted && result.movesToHousehold && result.sharedShownHousehold && result.sharedRenamedBack && result.applied === 'filed' && (result.geometry ?? []).length === 0
+			&& result.bootOverview && result.overviewFive && result.previewRoute && result.clearRoutes && result.keyboardOk && result.clearOk
+			&& result.addRefreshOk && result.dryRunFailOk && result.dryRunRetryOk && result.filingFailOk && result.filingRetryOk && result.noDatabaseOk && result.outdatedOk && result.stalePreviewOk;
 		if (ok) {
 			console.error(`SMOKE OK: library ${result.libraryRows} rows (big-scan pill + MB sizes), search "loan" -> 2 rows -> cleared, add 3 files -> added/duplicate/failed + library grew, answer cites p. 4 and an open button handed the located path to main, rename Car->Vehicles counts 2 documents and previews moves to Vehicles (none to unsorted), shared owner "Household" re-files; stale dry-run after a save refused; app name centred on ask/filing/settings at 1200px and 360px; appearance live (dark/light/system); open-at-login reflects the real login item; layout checks clean (settings article, library search top, AppBar 132px clear, 44px targets) on ask/filing/settings at 1200px and 360px`);
 			code = 0;
@@ -711,37 +934,42 @@ async function runSmoke(): Promise<void> {
 	app.exit(code);
 }
 
-type Shot = { name: string; scenario: 'library' | 'no-owners'; width: number; height: number; steps: string; scrollTo?: string; scrollToRow?: string; delayMs?: number };
+type Shot = { name: string; scenario: 'library' | 'no-owners' | 'clear'; width: number; height: number; steps: string; model?: 'down'; scrollTo?: string; scrollToRow?: string; delayMs?: number };
 
 const OPEN_FILING = `await d.click('[data-section="filing"]');`;
 const OPEN_OWNERS = `${OPEN_FILING} await d.click('[data-view="owners"]');`;
 const OPEN_SETTINGS = `await d.click('[data-section="settings"]');`;
-const ASK_STEPS = `await d.type('#askInput', 'When is the car loan paid off?'); await d.click('#askButton'); document.activeElement.blur();`;
+// Finding 4: every shot now opens on the overview, so the ask scenarios must navigate to ask first
+// and prove the ask screen is the visible one before capture — otherwise the driver edits hidden
+// controls and the screenshot silently shows the overview.
+const OPEN_ASK = `await d.click('[data-section="ask"]');`;
+const ON_ASK = `if (d.find('#askScreen').hidden) throw new Error('the ask screen is not visible at capture time');`;
+const ASK_STEPS = `${OPEN_ASK} await d.type('#askInput', 'When is the car loan paid off?'); await d.click('#askButton'); document.activeElement.blur(); ${ON_ASK}`;
 const RENAME_AND_ADD = `${OPEN_FILING} await d.pick('Car'); await d.type('#nameInput', 'Vehicles'); await d.click('#saveButton');
   await d.click('[data-view="owners"]'); await d.click('#addButton'); await d.type('#nameInput', 'Example Studio'); await d.click('#saveButton');
   await d.click('[data-view="folders"]');`;
 
 /** Ask with sizes and the pill, the add queue mid-run and done, then RagFiling's states, each
  * reached by using the app the way a person would. */
-const SEARCH_LOAN = `await d.type('#librarySearch', 'loan');`;
-const ADD_DONE = `await d.click('#addDocsButton');`;
+const SEARCH_LOAN = `${OPEN_ASK} await d.type('#librarySearch', 'loan'); ${ON_ASK}`;
+const ADD_DONE = `${OPEN_ASK} await d.click('#addDocsButton'); ${ON_ASK}`;
 /** Capture the queue WHILE it runs: one row must say adding… and cancel must be offered.
  * A settle would wait for the last file and show a finished queue, so the steps poll
  * instead, and throw rather than shoot an empty or finished panel. */
 const ADD_RUNNING_CHECK = `const addPanel = document.querySelector('#addPanel');
   if (!addPanel || addPanel.hidden || !addPanel.textContent.includes('adding…')) throw new Error('add-running: no row is adding… at capture time');
   if (!document.querySelector('#addCancel') || document.querySelector('#addCancel')?.hidden) throw new Error('add-running: the cancel button is not visible');`;
-const ADD_RUNNING = `d.find('#addDocsButton').click();
+const ADD_RUNNING = `${OPEN_ASK} d.find('#addDocsButton').click();
   for (let i = 0; i < 60; i += 1) {
     const panel = document.querySelector('#addPanel');
     if (panel && !panel.hidden && panel.textContent.includes('adding…') && !document.querySelector('#addCancel')?.hidden) break;
     await new Promise((r) => setTimeout(r, 50));
   }
-  ${ADD_RUNNING_CHECK}`;
+  ${ADD_RUNNING_CHECK} ${ON_ASK}`;
 /** The over-limit original: pill and size must be on the row, and the row in view. */
-const OVER_LIMIT = `const big = d.row('#libraryRows', 'big-scan.pdf');
+const OVER_LIMIT = `${OPEN_ASK} const big = d.row('#libraryRows', 'big-scan.pdf');
   if (big.querySelector('.pill')?.textContent !== 'not indexed: over 50 MB') throw new Error('over-limit: the pill is missing');
-  if (!(big.querySelector('.row-preview')?.textContent ?? '').includes(' MB')) throw new Error('over-limit: the size is missing');`;
+  if (!(big.querySelector('.row-preview')?.textContent ?? '').includes(' MB')) throw new Error('over-limit: the size is missing'); ${ON_ASK}`;
 const SHOTS: Shot[] = [
 	{ name: 'ask', scenario: 'library', width: 1200, height: 820, steps: ASK_STEPS },
 	{ name: 'ask-search', scenario: 'library', width: 1200, height: 820, steps: SEARCH_LOAN },
@@ -762,6 +990,9 @@ const SHOTS: Shot[] = [
 	{ name: 'ask-small', scenario: 'library', width: 360, height: 780, steps: ASK_STEPS, scrollTo: '#appBar' },
 	{ name: 'settings', scenario: 'library', width: 1200, height: 820, steps: OPEN_SETTINGS },
 	{ name: 'settings-small', scenario: 'library', width: 360, height: 780, steps: OPEN_SETTINGS },
+	{ name: 'overview-busy', scenario: 'library', width: 1200, height: 820, steps: `${RENAME_AND_ADD} await d.click('[data-section="overview"]');`, model: 'down' },
+	{ name: 'overview-clear', scenario: 'clear', width: 1200, height: 820, steps: '' },
+	{ name: 'overview-small', scenario: 'library', width: 360, height: 780, steps: `${RENAME_AND_ADD} await d.click('[data-section="overview"]');`, model: 'down', scrollTo: '#appBar' },
 ];
 
 async function runShots(): Promise<void> {
@@ -780,6 +1011,7 @@ async function runShots(): Promise<void> {
 			for (const shot of SHOTS) {
 				const dir = freshFakeState();
 				process.env.FAKE_SCENARIO = shot.scenario;
+				if (shot.model === 'down') process.env.FAKE_MODEL = 'down'; else delete process.env.FAKE_MODEL;
 				if (shot.delayMs) process.env.FAKE_ADD_DELAY_MS = String(shot.delayMs); else delete process.env.FAKE_ADD_DELAY_MS;
 				browser.setSize(shot.width, shot.height);
 				const reload = loaded(browser);
