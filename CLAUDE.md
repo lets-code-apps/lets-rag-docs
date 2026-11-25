@@ -108,7 +108,9 @@ expected `source` is among the first 5 distinct sources. **Baseline 2026-10-26: 
 `~/.config/lets-rag-docs/config.toml`, with a commented `config.example.toml` in the repo:
 `[qdrant] url, collection`, `[embed] url`, `[paths] ocr_dir, evals`, `[llm] base_url, model,
 max_tokens, timeout_seconds, allow_remote` (default model `qwen3:30b-a3b`, which is already
-installed in Ollama; strip Qwen3 `<think>` blocks from answers).
+installed in Ollama; strip Qwen3 `<think>` blocks from answers). Both Let's Code apps also read a shared
+`~/.config/lets-code/model.toml` for the model (`guide/MODEL.md`); an app's own `[llm] base_url` or
+`model` beats that file for that app, entirely.
 
 ### Planned layout
 
@@ -206,6 +208,11 @@ desktop/                 # Electron menu-bar app (Node/TS), ask, filing and sett
     **CI (#17, 2026-11-18):** `.github/workflows/desktop.yml` — a `rust` job (fmt/clippy `-D warnings`/test)
     and a `desktop` job (typecheck/test/smoke/shots), a screenshot-baseline diff with a PR comment, and layout
     checks in smoke (`src/geometry.ts`). TypeScript/YAML only; the only Rust step is CI running `cargo`.
+    **Shared model setting, engine only (2026-11-24, #21):** `src/shared_model.rs` reads and atomically
+    writes `~/.config/lets-code/model.toml` (`url`/`model` only; `runtime`/`set_by`/`updated` are display
+    metadata). `Config::load_with_shared` applies it at load; an app's own `[llm] base_url`/`model` wins
+    entirely (never a per-key merge). `guide/MODEL.md` documents it (byte-identical to triage-mail's). No
+    UI, no call to `write` yet (onboarding/settings, LET-136/137).
     **Sidebar + overview (#19, 2026-11-25):** one shared sidebar (design Sidebar, order overview/ask/filing/settings)
     with a neutral count pill only on the overview row (aria "overview, 5 need you"); the window opens on a new
     overview screen: four figures (documents, indexed, last sync, model StatusPill) plus a "needs you" list (model

@@ -72,6 +72,7 @@ treated as data, never as instructions.
 |---|---|
 | [guide/USAGE.md](guide/USAGE.md) | setup, every command, the library, the MCP server, evals, roadmap |
 | [config.example.toml](config.example.toml) | every setting, with its default |
+| [guide/MODEL.md](guide/MODEL.md) | the model both Let's Code apps share, and which one each app uses |
 
 ## contributing and licence
 

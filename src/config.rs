@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 use serde::Deserialize;
 
+use crate::shared_model::SharedModel;
+
 /// Where the config lives when `--config` is not given.
 pub const DEFAULT_CONFIG_PATH: &str = "~/.config/lets-rag-docs/config.toml";
 
@@ -189,11 +191,20 @@ impl Default for OcrConfig {
 }
 
 impl Config {
-    /// Reads the config at `path`; a missing file means all defaults, so the tool runs without setup.
+    /// Reads the config at `path`; a missing file means all defaults, so the tool runs without
+    /// setup. Stays pure: it never looks at the shared model file (see `load_with_shared`).
+    #[allow(dead_code)] // the pure loader used by the tests; the CLI passes the shared setting
     pub fn load(path: &Path) -> anyhow::Result<Config> {
+        Config::load_with_shared(path, &SharedModel::default())
+    }
+
+    /// Reads the config at `path`, then applies `shared` (see guide/MODEL.md): when the user
+    /// wrote neither `[llm] base_url` nor `model`, each key comes from the shared setting,
+    /// else from the built-in default. A missing config file is still all defaults.
+    pub fn load_with_shared(path: &Path, shared: &SharedModel) -> anyhow::Result<Config> {
         let text = match std::fs::read_to_string(path) {
             Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Config::default()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
             Err(e) => return Err(e).with_context(|| format!("cannot read {}", path.display())),
         };
         let mut config: Config = toml::from_str(&text)
@@ -205,8 +216,40 @@ impl Config {
         config.paths.library_dir = expand_home(&config.paths.library_dir);
         config.ocr.python = expand_home(&config.ocr.python);
         config.ocr.script = expand_home(&config.ocr.script);
+        config.apply_shared(&text, shared);
         Ok(config)
     }
+
+    /// All-or-nothing: an app that wrote either `[llm]` key keeps its own LLM setup completely
+    /// (never one server's URL with another's model name). `Config` itself cannot tell a set
+    /// key from a defaulted one (serde fills defaults in), so the same text is parsed again
+    /// into just these two optional keys.
+    fn apply_shared(&mut self, text: &str, shared: &SharedModel) {
+        let written: Written = toml::from_str(text).unwrap_or_default();
+        if written.llm.base_url.is_some() || written.llm.model.is_some() {
+            return;
+        }
+        if let Some(url) = shared.chat_base_url() {
+            self.llm.base_url = url;
+        }
+        if let Some(model) = shared.chat_model() {
+            self.llm.model = model.to_string();
+        }
+    }
+}
+
+/// What the user wrote under `[llm]`; `Config` cannot say (serde fills in defaults). Unknown
+/// keys stay allowed here: this is the user's own config, already validated by `Config`.
+#[derive(Deserialize, Default)]
+struct Written {
+    #[serde(default)]
+    llm: WrittenLlm,
+}
+
+#[derive(Deserialize, Default)]
+struct WrittenLlm {
+    base_url: Option<String>,
+    model: Option<String>,
 }
 
 /// Replaces a leading `~` with `$HOME`. The shell does this for arguments, not for paths in a file.
@@ -220,6 +263,20 @@ pub fn expand_home(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::fs;
+
+    use tempfile::tempdir;
+
+    fn shared_with(url: Option<String>, model: Option<String>) -> SharedModel {
+        SharedModel {
+            runtime: None,
+            url,
+            model,
+            set_by: None,
+            updated: None,
+        }
+    }
 
     #[test]
     fn example_config_matches_the_defaults() {
@@ -237,5 +294,116 @@ mod tests {
     fn missing_file_gives_defaults() {
         let config = Config::load(Path::new("/nonexistent/lets-rag-docs.toml")).unwrap();
         assert_eq!(config.qdrant.collection, "documents");
+    }
+
+    #[test]
+    fn shared_model_replaces_the_llm_defaults() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        fs::write(&config_path, "").unwrap();
+        let shared = shared_with(
+            Some("http://localhost:11434".to_string()),
+            Some("qwen3:8b".to_string()),
+        );
+        let config = Config::load_with_shared(&config_path, &shared).unwrap();
+        assert_eq!(config.llm.base_url, "http://localhost:11434/v1");
+        assert_eq!(config.llm.model, "qwen3:8b");
+    }
+
+    #[test]
+    fn no_shared_file_keeps_the_defaults() {
+        // The case that matters most: a user without a shared model.toml sees no change.
+        let config = Config::load_with_shared(
+            Path::new("/nonexistent/lets-rag-docs.toml"),
+            &SharedModel::default(),
+        )
+        .unwrap();
+        assert_eq!(config.llm.base_url, "http://127.0.0.1:11434/v1");
+        assert_eq!(config.llm.model, "qwen3:30b-a3b");
+    }
+
+    #[test]
+    fn shared_file_with_only_a_model_keeps_the_default_url() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        fs::write(&config_path, "").unwrap();
+        let shared = shared_with(None, Some("qwen3:8b".to_string()));
+        let config = Config::load_with_shared(&config_path, &shared).unwrap();
+        assert_eq!(config.llm.base_url, "http://127.0.0.1:11434/v1");
+        assert_eq!(config.llm.model, "qwen3:8b");
+    }
+
+    #[test]
+    fn unknown_key_in_the_shared_file_changes_nothing() {
+        let dir = tempdir().unwrap();
+        let shared_path = dir.path().join("model.toml");
+        fs::write(
+            &shared_path,
+            "model = \"qwen3:8b\"\nfuture_key = 1\n\n[extra]\nanything = true\n",
+        )
+        .unwrap();
+        let shared = crate::shared_model::read(&shared_path);
+        let config_path = dir.path().join("config.toml");
+        fs::write(&config_path, "").unwrap();
+        let config = Config::load_with_shared(&config_path, &shared).unwrap();
+        assert_eq!(config.llm.model, "qwen3:8b");
+        assert_eq!(config.llm.base_url, "http://127.0.0.1:11434/v1");
+    }
+
+    #[test]
+    fn app_config_model_wins_over_the_shared_file() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        fs::write(&config_path, "[llm]\nmodel = \"x\"\n").unwrap();
+        let shared = shared_with(
+            Some("http://localhost:11434".to_string()),
+            Some("qwen3:8b".to_string()),
+        );
+        let config = Config::load_with_shared(&config_path, &shared).unwrap();
+        assert_eq!(config.llm.model, "x");
+        assert_eq!(config.llm.base_url, "http://127.0.0.1:11434/v1");
+    }
+
+    #[test]
+    fn app_config_base_url_wins_over_the_shared_file() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        fs::write(
+            &config_path,
+            "[llm]\nbase_url = \"http://127.0.0.1:9999/v1\"\n",
+        )
+        .unwrap();
+        let shared = shared_with(
+            Some("http://localhost:11434".to_string()),
+            Some("qwen3:8b".to_string()),
+        );
+        let config = Config::load_with_shared(&config_path, &shared).unwrap();
+        assert_eq!(config.llm.base_url, "http://127.0.0.1:9999/v1");
+        assert_eq!(config.llm.model, "qwen3:30b-a3b");
+    }
+
+    #[test]
+    fn shared_non_local_url_is_still_refused() {
+        use crate::ask::check_base_url;
+
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        fs::write(&config_path, "").unwrap();
+        let shared = shared_with(
+            Some("http://example.com".to_string()),
+            Some("qwen3:8b".to_string()),
+        );
+        let config = Config::load_with_shared(&config_path, &shared).unwrap();
+        assert!(
+            check_base_url(&config.llm).is_err(),
+            "the shared file cannot switch privacy off"
+        );
+
+        // Only the app's own config may allow it (and allow_remote is not an [llm] LLM key,
+        // so it does not count as "written" for the win-over rule).
+        let other_path = dir.path().join("other.toml");
+        fs::write(&other_path, "[llm]\nallow_remote = true\n").unwrap();
+        let allowed = Config::load_with_shared(&other_path, &shared).unwrap();
+        assert!(check_base_url(&allowed.llm).is_ok());
     }
 }
