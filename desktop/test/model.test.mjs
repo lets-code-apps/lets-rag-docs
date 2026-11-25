@@ -202,3 +202,160 @@ test('change summary and the dry-run as "what will move" rows', () => {
   assert.match(m.dryRunProblem({ ...report, status: 'outdated' }), /ingest/);
   assert.match(m.applySummary({ ...report, mode: 'apply', counts: { moved: 1, copied: 1, failed: 0 } }), /moved 1 copy and made 1 copy/);
 });
+
+// ---- overview ----
+
+test('sidebar: order overview, ask, filing, settings; count pill and aria label only above 0', () => {
+  const rows = m.sidebarItems('overview', 5);
+  assert.deepEqual(rows.map((r) => r.section), ['overview', 'ask', 'filing', 'settings']);
+  assert.equal(rows[0].current, true);
+  assert.equal(rows[0].count, '5');
+  assert.equal(rows[0].aria, 'overview, 5 need you');
+  assert.equal(rows[1].current, false);
+  const zero = m.sidebarItems('overview', 0);
+  assert.equal(zero[0].count, '');
+  assert.equal(zero[0].aria, 'overview');
+});
+
+test('sharedOwnerCount matches the Shared row: null owner, shared owner, unlisted owner', () => {
+  const five = [
+    { owner: null }, { owner: 'Shared' }, { owner: 'Nobody' }, { owner: 'Alex Example' }, { owner: 'Sam Example' },
+  ];
+  assert.equal(m.sharedOwnerCount(saved, five), 3);
+  assert.equal(m.sharedOwnerCount(saved, null), 0);
+});
+
+test('overview figures: toLocaleString counts, indexed excludes skipped, sync label, model pill', () => {
+  const [documents, indexed, sync, model] = m.overviewFigures({ max_file_mb: 50, documents: docs.concat(big) }, { model: { reachable: true }, last_sync: '2025-03-09T05:24:00Z' });
+  assert.equal(documents.label, 'documents');
+  assert.equal(documents.value, '4');
+  assert.equal(documents.isPill, false);
+  assert.equal(indexed.value, '3'); // the over_limit scan is not indexed
+  assert.match(sync.value, /^[0-9]+ \w{3}, \d{2}:\d{2}$/);
+  assert.deepEqual([model.value, model.tone, model.isPill], ['connected', 'positive', true]);
+
+  const down = m.overviewFigures(null, { model: { reachable: false }, last_sync: null });
+  assert.equal(down[0].value, 'unknown');
+  assert.equal(down[2].value, 'never');
+  assert.deepEqual([down[3].value, down[3].tone], ['unreachable', 'danger']);
+
+  const failed = m.overviewFigures(null, null);
+  assert.deepEqual([failed[3].value, failed[3].tone], ['unknown', 'neutral']);
+});
+
+test('overview items: fixed order, each kind appears and disappears on its data', () => {
+  const none = m.overviewItems({ status: null, docs: null, saved: null, dry: null });
+  assert.deepEqual(none, []);
+
+  const fiveDocs = [
+    { path: 'a.pdf', owner: 'Alex Example', skipped: null, dataless: false },
+    { path: 'b.pdf', owner: null, skipped: null, dataless: true },
+    { path: 'c.pdf', owner: 'Alex Example', skipped: 'over_limit', dataless: false },
+  ];
+  const all = m.overviewItems({
+    status: { model: { reachable: false }, last_sync: null },
+    docs: { max_file_mb: 50, documents: fiveDocs },
+    saved,
+    dry: { status: 'ok', items: [], counts: { would_copy: 2, would_move: 1 } },
+  });
+  assert.deepEqual(all.map((i) => i.pill), ['model unreachable', 're-sort waiting', 'no known owner', 'not indexed', 'only in iCloud']);
+  assert.equal(all[1].title, '3 copies are not where the lists put them');
+  assert.equal(all[1].action, 'preview and apply');
+  assert.equal(all[2].title, '1 document filed under Shared');
+  assert.equal(all[3].title, '1 document can’t be searched');
+  assert.equal(all[3].meta, '1 over 50 MB. Ask never uses them.');
+  assert.equal(all[4].title, '1 file isn’t on this Mac');
+
+  const up = m.overviewItems({
+    status: { model: { reachable: true }, last_sync: null },
+    docs: { max_file_mb: 50, documents: fiveDocs },
+    saved,
+    dry: null,
+  });
+  assert.deepEqual(up.map((i) => i.pill), ['no known owner', 'not indexed', 'only in iCloud']);
+
+  // The one-copy singular and the clear case: all-clear gives [].
+  assert.deepEqual(m.overviewItems({
+    status: { model: { reachable: true }, last_sync: '2025-03-09T05:24:00Z' },
+    docs: { max_file_mb: 50, documents: [fiveDocs[0]] },
+    saved,
+    dry: { status: 'ok', items: [], counts: { would_copy: 0, would_move: 0 } },
+  }), []);
+});
+
+test('syncLabel is month-line or never; plural switches at one', () => {
+  assert.equal(m.syncLabel(null), 'never');
+  assert.match(m.syncLabel('2025-03-09T05:24:00Z'), /^[0-9]+ \w{3}, \d{2}:\d{2}$/);
+  assert.equal(m.plural(1, 'copy', 'copies'), 'copy');
+  assert.equal(m.plural(3, 'copy', 'copies'), 'copies');
+});
+
+test('all-clear needs a usable library and an ok dry-run, not a present report', () => {
+  const saved = { folders: [], owners: ['Piotr'], shared_owner: 'shared' };
+  const status = { model: { reachable: true }, last_sync: null };
+  const docs = { status: 'ok', max_file_mb: 50, documents: [{ owner: 'Piotr', skipped: null, dataless: false }] };
+  const dry = { status: 'ok', items: [], counts: { would_copy: 0, would_move: 0 } };
+  const clear = { docs, docsError: null, status, saved, notice: m.libraryNotice(docs), dry, items: [] };
+  assert.equal(m.allClear(clear), true);
+
+  // A report can be valid JSON and still describe a library that needs attention: both the recovery
+  // notice and a dry-run that cannot answer must keep "nothing needs you" hidden.
+  for (const unusable of ['no_database', 'outdated']) {
+    const brokenDocs = { status: unusable, max_file_mb: 50, documents: [] };
+    assert.equal(m.allClear({ ...clear, docs: brokenDocs, notice: m.libraryNotice(brokenDocs), dry: { status: unusable, items: [], counts: {} } }), false, unusable);
+    assert.equal(m.allClear({ ...clear, dry: { status: unusable, items: [], counts: {} } }), false, `${unusable} dry-run`);
+  }
+  assert.equal(m.allClear({ ...clear, dry: null }), false, 'a dry-run that has not landed or failed');
+  assert.equal(m.allClear({ ...clear, notice: 'The library is empty. Add documents and run "lets-rag-docs ingest".' }), false, 'a library notice wins over the clear state');
+});
+
+test('a filing preview counts only while its generation is current', () => {
+  const saved = { folders: [], owners: ['Piotr'], shared_owner: 'shared' };
+  const status = { model: { reachable: true }, last_sync: null };
+  const docs = { status: 'ok', max_file_mb: 50, documents: [{ owner: 'Piotr', skipped: null, dataless: false }] };
+  const stalePreview = { status: 'ok', items: [], counts: { would_copy: 0, would_move: 0 } };
+  const freshMemo = { generation: 4, report: { status: 'ok', items: [], counts: { would_copy: 1, would_move: 0 } } };
+
+  // A zero-move preview taken at generation 3 must not hide the copy the document added at 4 needs.
+  const current = m.overviewDryReport({ preview: stalePreview, previewGeneration: 3, memo: freshMemo, generation: 4 });
+  assert.equal(current, freshMemo.report);
+  assert.deepEqual(m.overviewItems({ status, docs, saved, dry: current }).map((item) => item.pill), ['re-sort waiting']);
+  assert.equal(m.overviewDryReport({ preview: stalePreview, previewGeneration: 4, memo: freshMemo, generation: 4 }), stalePreview, 'a current preview is the same pass');
+  assert.equal(m.overviewDryReport({ preview: null, previewGeneration: -1, memo: null, generation: 4 }), null, 'nothing current to show');
+});
+
+test('callers join a pending dry-run; only a settled failure is retried', async () => {
+  let calls = 0;
+  let resolveRun;
+  const engine = () => {
+    calls += 1;
+    return new Promise((resolve) => {
+      resolveRun = resolve;
+    });
+  };
+  const memo = new m.DryRunMemo(engine, () => 1);
+  const first = memo.ensure(1);
+  const second = memo.ensure(1);
+  assert.equal(second, first, 'the second caller joins the pass already hashing');
+  assert.equal(calls, 1, 'one hash pass per library state');
+  resolveRun({ ok: true, report: { status: 'ok', items: [], counts: {} } });
+  const landed = await first;
+  assert.equal(landed.report.status, 'ok');
+  assert.equal(memo.ensure(1), first, 'a current pass is reused by later visits');
+  assert.equal(calls, 1);
+
+  // A run that settled as a failure is not a result to keep.
+  let brokenCalls = 0;
+  const broken = new m.DryRunMemo(() => {
+    brokenCalls += 1;
+    return Promise.resolve({ ok: false, error: 'engine hung up' });
+  }, () => 1);
+  assert.equal((await broken.ensure(1)).report, null);
+  assert.equal(broken.failure(1), 'engine hung up');
+  await broken.ensure(1);
+  assert.equal(brokenCalls, 2, 'the next visit retries a settled failure');
+
+  // A save while hashing discards that pass rather than caching a report about the old lists.
+  const moved = new m.DryRunMemo(() => Promise.resolve({ ok: true, report: { status: 'ok', items: [], counts: {} } }), () => 2);
+  assert.equal(await moved.ensure(1), null);
+});

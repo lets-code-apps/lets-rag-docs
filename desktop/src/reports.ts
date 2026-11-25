@@ -21,6 +21,17 @@ export type DocumentRow = {
 	bytes: number | null;
 	pages: number | null;
 	skipped: string | null;
+	dataless: boolean;
+};
+
+export type StatusReport = {
+	version: number;
+	model: ModelStatus;
+	last_sync: string | null;
+};
+
+export type ModelStatus = {
+	reachable: boolean;
 };
 
 export type SearchReport = {
@@ -180,7 +191,7 @@ export function parseDocuments(stdout: string, stderrTail: string[]): Parse<Docu
 	const docs: DocumentRow[] = [];
 	for (const row of rowObj.documents) {
 		if (typeof row !== 'object' || row === null) return err('documents row is not an object');
-		const obj = row as { path: unknown; title: unknown; type: unknown; date: unknown; folder: unknown; owner: unknown; filed_as: unknown; bytes?: unknown; pages?: unknown; skipped?: unknown };
+		const obj = row as { path: unknown; title: unknown; type: unknown; date: unknown; folder: unknown; owner: unknown; filed_as: unknown; bytes?: unknown; pages?: unknown; skipped?: unknown; dataless?: unknown };
 		const path = stringOrNull(obj.path);
 		const type = stringOrNull(obj.type);
 		if (path === null || type === null) return err('documents row has a missing text field');
@@ -200,9 +211,28 @@ export function parseDocuments(stdout: string, stderrTail: string[]): Parse<Docu
 			bytes: numberOrNull(obj.bytes),
 			pages: numberOrNull(obj.pages),
 			skipped: stringOrNull(obj.skipped),
+			// The dataless (iCloud-only) bit arrives with the new engine; an older engine
+			// simply omits it, which reads as false: nothing is only in iCloud as far as we know.
+			dataless: obj.dataless === true,
 		});
 	}
 	return { ok: true, value: { version: 1, max_file_mb: maxFileMb, status: rowObj.status, documents: docs } };
+}
+
+/** `status --json`: is the model answering, and when the library was last synced. Both
+ * fields are data: `reachable:false` and `last_sync:null` are states, not failures. */
+export function parseStatus(stdout: string, stderrTail: string[]): Parse<StatusReport> {
+	const parsed = parseJson(stdout, stderrTail);
+	if (!parsed.ok) return { ok: false, error: parsed.error };
+	if (!requireVersion(parsed.value) || typeof parsed.value !== 'object') return err('status report version is not 1');
+	const obj = parsed.value as { model?: unknown; last_sync?: unknown };
+	if (typeof obj.model !== 'object' || obj.model === null || typeof (obj.model as { reachable?: unknown }).reachable !== 'boolean') {
+		return err('status report is missing model.reachable');
+	}
+	const reachable = (obj.model as { reachable: unknown }).reachable === true;
+	// A database that does not exist yet reports null; an older engine may omit the key.
+	const lastSync = obj.last_sync === null || obj.last_sync === undefined ? null : stringOrNull(obj.last_sync);
+	return { ok: true, value: { version: 1, model: { reachable }, last_sync: lastSync } };
 }
 
 export function parseSearch(stdout: string, stderrTail: string[]): Parse<SearchReport> {

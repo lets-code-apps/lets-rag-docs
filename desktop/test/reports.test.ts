@@ -13,6 +13,7 @@ import {
 	parseLocate,
 	parseOrganize,
 	parseSearch,
+	parseStatus,
 } from '../src/reports.ts';
 
 const FIXTURES = join(import.meta.dirname, '..', '..', 'testdata', 'desktop');
@@ -156,4 +157,39 @@ test('an untitled document keeps the whole library readable', () => {
 	assert.equal(parsed.value.documents[0].title, null);
 	report.documents[0].title = 42;
 	assert.equal(parseDocuments(JSON.stringify(report), []).ok, false);
+});
+
+test('status report parses; reachable:false and last_sync:null are data, not failures', () => {
+	const status = parseStatus(read('status.json'), []);
+	assert.ok(status.ok);
+	assert.equal(status.value.model.reachable, true);
+	assert.equal(status.value.last_sync, '2024-02-29T00:00:00Z');
+	const down = parseStatus('{"version":1,"model":{"reachable":false},"last_sync":null}', []);
+	assert.ok(down.ok);
+	assert.equal(down.value.model.reachable, false);
+	assert.equal(down.value.last_sync, null);
+});
+
+test('status: wrong version, missing model, and empty stdout are refused', () => {
+	const badVersion = parseStatus('{"version":2,"model":{"reachable":true}}', []);
+	assert.ok(!badVersion.ok);
+	assert.match(badVersion.error, /version/);
+	const noModel = parseStatus('{"version":1,"last_sync":null}', []);
+	assert.ok(!noModel.ok);
+	assert.match(noModel.error, /model/);
+	const empty = parseStatus('', ['status: cannot read config']);
+	assert.ok(!empty.ok);
+	assert.equal(empty.error, 'status: cannot read config');
+});
+
+test('documents: the dataless bit parses; an older engine reads as false', () => {
+	const docs = parseDocuments(read('documents.json'), []);
+	assert.ok(docs.ok);
+	assert.equal(docs.value.documents[0].dataless, false, 'the locked fixture is a normal disk');
+	const marked = parseDocuments(read('documents.json').replace('"skipped":null,"dataless":false}', '"skipped":null,"dataless":true}'), []);
+	assert.ok(marked.ok);
+	assert.equal(marked.value.documents[1].dataless, true, 'an iCloud-only original');
+	const old = parseDocuments('{"version":1,"status":"ok","documents":[{"path":"a.pdf","type":"invoice","title":null,"date":null,"folder":null,"owner":null,"filed_as":null}]}', []);
+	assert.ok(old.ok);
+	assert.equal(old.value.documents[0].dataless, false, 'absent means "not known to be dataless", not unknown');
 });

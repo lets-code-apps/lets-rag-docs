@@ -5,14 +5,27 @@ import { test } from 'node:test';
 
 const RENDERER = join(import.meta.dirname, '..', 'renderer');
 
-test('renderer has exactly the ask, filing and settings nav entries', () => {
+test('the sidebar is one shared component: overview, ask, filing, settings in that order', () => {
 	const html = readFileSync(join(RENDERER, 'index.html'), 'utf8');
-	const sections = [...html.matchAll(/data-section="([a-z]+)"/g)].map((match) => match[1]);
-	assert.deepEqual(sections, ['ask', 'filing', 'settings']);
-	// Each entry has its 18px design glyph left of the label: search, archive, settings (last).
-	assert.ok(html.includes('<use href="#i-search"></use></svg><span>ask</span></button>'));
-	assert.ok(html.includes('<use href="#i-archive"></use></svg><span>filing</span></button>'));
-	assert.ok(html.includes('<use href="#i-settings"></use></svg><span>settings</span></button>'));
+	assert.ok(html.includes('<nav id="sidebar" class="nav" aria-label="sections">'), 'no #sidebar nav');
+	assert.ok(html.includes('id="overviewScreen"'), 'no overview screen');
+	assert.ok(html.includes('<symbol id="i-inbox"'), 'no inbox glyph');
+	// The rows are built by renderer/sidebar.js, so the HTML carries no per-screen nav copy.
+	const js = readFileSync(join(RENDERER, 'sidebar.js'), 'utf8');
+	const order = /\['overview', 'ask', 'filing', 'settings'\]/.exec(js);
+	assert.ok(order, 'sidebar.js missing the section order');
+	assert.equal(js.includes('graph'), false, 'graph is LET-139, not this app');
+	// The count pill: neutral tokens only, never a tone colour.
+	const css = readFileSync(join(RENDERER, 'app.css'), 'utf8');
+	const countRules = [...css.matchAll(/\.nav[^{]*\.count[^{]*\{[^}]*\}/g)].map((match) => match[0]);
+	assert.ok(countRules.length >= 2, 'no .nav .count rules');
+	assert.ok(countRules.some((rule) => rule.includes('--raised')) && countRules.some((rule) => rule.includes('--surface')));
+	assert.equal(/danger|attention|positive/.test(countRules.join(' ')), false, 'the count must never be coloured');
+	// A zero count must hide the pill outright (sidebar.js sets `hidden`; the `.count` class sets
+	// display, so a `[hidden]` rule is needed to beat it). Finding 7: no empty badge on all-clear.
+	assert.ok(/\.nav[^{]*\.count\[hidden\][^{]*\{[^}]*display:\s*none/.test(css), 'the zero count pill must be hidden');
+	// Keyboard users still get the design's focus ring.
+	assert.ok(/:focus-visible/.test(css), ':focus-visible rule lost');
 });
 
 test('every inline glyph has an explicit size', () => {

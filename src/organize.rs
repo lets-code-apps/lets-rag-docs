@@ -27,6 +27,7 @@ use crate::chunk;
 use crate::classify;
 use crate::config::Config;
 use crate::db;
+use crate::documents;
 use crate::embed::EmbedClient;
 use crate::index;
 use qdrant_client::Qdrant;
@@ -102,6 +103,7 @@ enum Action {
     AlreadyThere,
     Duplicate,
     MissingOriginal,
+    Dataless,
 }
 
 /// `organize --json`: one JSON object. `items` is the plan, `counts` the outcome (dry-run fills
@@ -299,6 +301,35 @@ pub fn parse_mode(dry_run: bool, apply: bool) -> Option<Mode> {
     }
 }
 
+/// Whether an original is left out of the plan before any open: its contents live only in iCloud
+/// (`SF_DATALESS`), so hashing it would make macOS download it, and `documents --json` already
+/// flags the same file for the overview's iCloud item. Pure over the flag value — macOS refuses
+/// to create a real dataless file, so the tests feed the flag directly and check a real ordinary
+/// file reads as not dataless (the metadata-only half).
+fn leaves_for_icloud(flags: u32) -> bool {
+    documents::is_dataless(flags)
+}
+
+#[cfg(target_os = "macos")]
+fn read_flags(path: &Path) -> u32 {
+    use std::os::macos::fs::MetadataExt;
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_file() => meta.st_flags(),
+        _ => 0,
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn read_flags(_path: &Path) -> u32 {
+    0
+}
+
+/// The flag lookup the organize flow consults before reading a file's contents. Production passes
+/// `read_flags` (a `stat`, never a download); a test passes a stand-in, because macOS refuses to
+/// create a real dataless file. Planning takes it as a parameter so the "never open a dataless
+/// file" guarantee is proven end-to-end through the real `build_plan`, not only in a helper.
+type ContentFlags = fn(&Path) -> u32;
+
 /// The library must be a place of its own: if it is inside (or contains) `docs_dir` or `ocr_dir`, a
 /// filed copy could later be OCR'd or classified as a new original. Refuse rather than risk that.
 fn check_library_separation(config: &Config) -> anyhow::Result<()> {
@@ -319,9 +350,17 @@ fn check_library_separation(config: &Config) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn build_plan(config: &Config, conn: &Connection) -> anyhow::Result<Built> {
+    build_plan_with(config, conn, read_flags)
+}
+
 /// Walks the OCR files exactly as `classify::run` does and turns each classified, non-duplicate
 /// document into an entry with a collision-resolved target.
-fn build_plan(config: &Config, conn: &Connection) -> anyhow::Result<Built> {
+fn build_plan_with(
+    config: &Config,
+    conn: &Connection,
+    flags: ContentFlags,
+) -> anyhow::Result<Built> {
     let ocr_dir = &config.paths.ocr_dir;
     let docs_dir = &config.paths.docs_dir;
     let library = &config.paths.library_dir;
@@ -359,6 +398,19 @@ fn build_plan(config: &Config, conn: &Connection) -> anyhow::Result<Built> {
         let rel: String = path.strip_prefix(ocr_dir)?.to_string_lossy().to_string();
         let original = classify::original_path(docs_dir, &rel);
         let orel = classify::original_rel(&rel);
+        // An iCloud-only (dataless) original is left for the overview's iCloud item: hashing it
+        // below would open the file and ask macOS to download it, which this command must never
+        // do. The check is a `stat` (`st_flags`), so even deciding stays cheap and safe. The flag
+        // lookup is the injected `flags` so a test can drive real planning with a dataless stand-in.
+        if leaves_for_icloud(flags(&original)) {
+            lines.push(format!("only in iCloud  {rel}"));
+            items.push(PlanItem {
+                action: Action::Dataless,
+                from: rel.to_string(),
+                to: None,
+            });
+            continue;
+        }
         if classify::over_limit(&original, max_bytes) {
             tracing::warn!("{} is over the [ocr] max_file_mb limit", rel);
             lines.push(format!(
@@ -424,8 +476,20 @@ fn build_plan(config: &Config, conn: &Connection) -> anyhow::Result<Built> {
             None => String::new(),
         };
 
-        let (stem, already, ok) =
-            resolve_target(library, &dir, &name, &ext_suffix, &hash, &claimed);
+        let (stem, already, ok, dataless_target) =
+            resolve_target(library, &dir, &name, &ext_suffix, &hash, &claimed, flags);
+        if dataless_target {
+            // The copy already filed at the destination is itself iCloud-only: reading it to check
+            // the bytes would download it, so the document is blocked without opening anything.
+            lines.push(format!("only in iCloud (filed copy)  {orel}"));
+            items.push(PlanItem {
+                action: Action::Dataless,
+                from: rel.to_string(),
+                to: None,
+            });
+            counts.failed += 1;
+            continue;
+        }
         if !ok {
             counts.failed += 1;
             continue;
@@ -487,7 +551,8 @@ fn build_plan(config: &Config, conn: &Connection) -> anyhow::Result<Built> {
 
 /// Picks a free name for one document. An earlier entry with the same key, or a different file at
 /// the path, forces the next suffix; a file with the *same* hash means "already there" (idempotent).
-/// The last member of the tuple is false when no name within `COLLISION_CAP` was free.
+/// The last member of the tuple is false when no name within `COLLISION_CAP` was free; the fourth is
+/// true when a candidate already filed is iCloud-only and must not be opened.
 fn resolve_target(
     library: &Path,
     folder: &str,
@@ -495,7 +560,8 @@ fn resolve_target(
     ext_suffix: &str,
     hash: &str,
     claimed: &HashSet<String>,
-) -> (String, bool, bool) {
+    flags: ContentFlags,
+) -> (String, bool, bool, bool) {
     for n in 1..=COLLISION_CAP {
         let stem: String = stem_for(name, n);
         let key: String = target_key(folder, &stem).to_lowercase();
@@ -503,17 +569,22 @@ fn resolve_target(
             continue;
         }
         let candidate: PathBuf = candidate_path(library, folder, &stem, ext_suffix);
+        // A filed copy evicted to iCloud is a content read waiting: hashing the candidate below
+        // would open (download) it, so stop with `dataless` before any open.
+        if leaves_for_icloud(flags(&candidate)) {
+            return (stem, false, false, true);
+        }
         match classify::hash_file(&candidate) {
             // A file is there: same bytes => reuse it; different bytes => this name is taken.
-            Ok(seen) if seen == hash => return (stem, true, true),
+            Ok(seen) if seen == hash => return (stem, true, true, false),
             Ok(_) => continue,
             // Nothing there (NotFound or the folder missing) => copy here.
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return (stem, false, true),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return (stem, false, true, false),
             Err(_) => continue,
         }
     }
     // No free name within the cap: give up on this document rather than write somewhere else.
-    (String::new(), false, false)
+    (String::new(), false, false, false)
 }
 
 fn target_key(folder: &str, stem: &str) -> String {
@@ -624,6 +695,15 @@ fn remove_old_copy(library: &Path, old: &Path, hash: &str) -> bool {
         return false;
     }
     let path: PathBuf = library.join(old);
+    // An evicted copy must not be opened to verify it: leaving it is correct (a later apply
+    // with the file back local cleans it up).
+    if leaves_for_icloud(read_flags(&path)) {
+        tracing::warn!(
+            "left {} in place: its bytes are only in iCloud",
+            old.display()
+        );
+        return false;
+    }
     match classify::hash_file(&path) {
         Ok(seen) if seen == hash => {}
         Ok(_) => {
@@ -762,7 +842,12 @@ fn copy_attempt(entry: &Entry, target: &Path) -> Attempt {
         .mode(0o600)
         .open(target);
     if opened.is_err() {
-        // Something is already at this path: reuse it only when the bytes already match.
+        // Something is already at this path: reuse it only when the bytes already match. If it is
+        // an iCloud-only copy, comparing bytes would download it, so treat the name as taken and
+        // try the next suffix rather than open it.
+        if leaves_for_icloud(read_flags(target)) {
+            return Attempt::Taken;
+        }
         return match classify::hash_file(target) {
             Ok(seen) if seen == entry.hash => Attempt::Reused,
             Ok(_) => Attempt::Taken,
@@ -985,6 +1070,7 @@ pub(crate) fn inside_library(library: &Path, rel: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::sync::Mutex;
 
     use serde_json::json;
     use wiremock::matchers::{method, path};
@@ -1160,6 +1246,131 @@ mod tests {
         assert_eq!(
             plan_line(&plan.counts),
             "planned 1: 1 to copy, 0 to move, 0 already there, 0 failed, 0 duplicate, 0 not classified, 0 missing original",
+        );
+    }
+
+    // macOS refuses to create a real dataless file, so the flag lookup is stood in by a list of
+    // paths the test declares iCloud-only. The seam is a `fn` pointer, which cannot capture, hence
+    // a process static; every fixture gets a fresh `tempdir`, so paths are unique per test and the
+    // parallel test threads cannot collide.
+    static EVICTED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+    // Declares one path iCloud-only for the stand-in below.
+    fn evict(path: &Path) {
+        EVICTED.lock().unwrap().push(path.to_path_buf());
+    }
+
+    // The stand-in flag lookup handed to `build_plan_with`. Any path that was not evicted reads as
+    // an ordinary local file, so a test that expects planning to proceed proves the guard fires only
+    // for the evicted file.
+    fn standin_flags(path: &Path) -> u32 {
+        if EVICTED.lock().unwrap().iter().any(|p| p.as_path() == path) {
+            0x4000_0000
+        } else {
+            0
+        }
+    }
+
+    #[test]
+    fn planning_never_opens_an_evicted_original() {
+        let f = fixture();
+        let conn = open(&f);
+        add_doc(
+            &f,
+            &conn,
+            "one.pdf.vision.txt",
+            "abc",
+            Some("Report"),
+            Some("Home"),
+        );
+        let original: PathBuf = f
+            .config
+            .paths
+            .docs_dir
+            .join(classify::original_rel("one.pdf.vision.txt"));
+        evict(&original);
+        let plan = build_plan_with(&f.config, &conn, standin_flags).unwrap();
+        assert!(
+            plan.entries.is_empty(),
+            "the evicted original never reaches the copy path",
+        );
+        assert!(
+            plan.items
+                .iter()
+                .any(|it| matches!(it.action, Action::Dataless)),
+            "the evicted original is the iCloud item",
+        );
+        // The guard runs before the hash, so the original is not even treated as missing.
+        assert_eq!(
+            plan.counts.missing, 0,
+            "the dataless check comes before the hash"
+        );
+        assert_eq!(
+            plan.counts.would_copy, 0,
+            "nothing is filed from an evicted original"
+        );
+
+        // Production still plans an ordinary original: `build_plan` passes the real `read_flags`,
+        // which reads `st_flags` from a `stat` and never opens the file.
+        let ordinary: Fixture = fixture();
+        let conn2: Connection = open(&ordinary);
+        add_doc(
+            &ordinary,
+            &conn2,
+            "two.pdf.vision.txt",
+            "abc",
+            Some("Report"),
+            Some("Home"),
+        );
+        let plan2 = build_plan(&ordinary.config, &conn2).unwrap();
+        assert_eq!(
+            plan2.entries.len(),
+            1,
+            "an ordinary original is still planned"
+        );
+        assert_eq!(
+            plan2.entries.first().unwrap().rel,
+            PathBuf::from("Home/Shared/Report.pdf"),
+        );
+    }
+
+    #[test]
+    fn planning_never_opens_an_evicted_filed_copy() {
+        let f = fixture();
+        let conn = open(&f);
+        add_doc(
+            &f,
+            &conn,
+            "one.pdf.vision.txt",
+            "abc",
+            Some("Report"),
+            Some("Home"),
+        );
+
+        // A copy already sits at the destination, holding different bytes: the naive path would
+        // hash (and on macOS download) it to decide between "already there" and a suffix.
+        let filed: PathBuf = f.config.paths.library_dir.join("Home/Shared/Report.pdf");
+        fs::create_dir_all(filed.parent().unwrap()).unwrap();
+        fs::write(&filed, "different bytes").unwrap();
+        evict(&filed);
+
+        let plan = build_plan_with(&f.config, &conn, standin_flags).unwrap();
+        assert!(
+            plan.entries.is_empty(),
+            "the document is blocked instead of resolved past the evicted copy",
+        );
+        assert!(
+            plan.items
+                .iter()
+                .any(|it| matches!(it.action, Action::Dataless)),
+            "the evicted filed copy is reported as the iCloud item",
+        );
+        assert_eq!(plan.counts.failed, 1, "blocked without opening anything");
+        assert_eq!(plan.counts.would_copy, 0, "no second copy is filed");
+        assert_eq!(
+            fs::read(&filed).unwrap(),
+            "different bytes".as_bytes().to_vec(),
+            "the evicted copy was not downloaded",
         );
     }
 

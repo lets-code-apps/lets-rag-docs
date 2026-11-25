@@ -1,13 +1,14 @@
 // The one place that names the messages crossing the main <-> renderer boundary. Main, preload
 // and the tests all agree through these constants. No `electron` import: pure data.
 
-import type { AddReport, AskReport, DocumentsReport, FilingSaveReport, FilingShowReport, LocateReport, OrganizeReport, SearchReport } from './reports.ts';
+import type { AddReport, AskReport, DocumentsReport, FilingSaveReport, FilingShowReport, LocateReport, OrganizeReport, SearchReport, StatusReport } from './reports.ts';
 import type { Appearance } from './settings.ts';
 
 export const IPC = {
 	ask: 'rag.ask',
 	cancelAsk: 'rag.cancelAsk',
 	documents: 'rag.documents',
+	status: 'rag.status',
 	search: 'rag.search',
 	filingShow: 'rag.filingShow',
 	filingSave: 'rag.filingSave',
@@ -23,6 +24,7 @@ export const IPC = {
 
 export type AskResult = { ok: boolean; error?: string; report?: AskReport };
 export type DocumentsResult = { ok: boolean; error?: string; report?: DocumentsReport };
+export type StatusResult = { ok: boolean; error?: string; report?: StatusReport };
 export type SearchResult = { ok: boolean; error?: string; report?: SearchReport };
 export type FilingShowResult = { ok: boolean; error?: string; report?: FilingShowReport };
 export type FilingSaveResult = { ok: boolean; error?: string; report?: FilingSaveReport };
@@ -56,6 +58,7 @@ export type IPCFunctionName =
 	| 'ask'
 	| 'cancelAsk'
 	| 'documents'
+	| 'status'
 	| 'search'
 	| 'filing'
 	| 'saveFiling'

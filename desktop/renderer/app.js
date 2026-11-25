@@ -4,6 +4,7 @@
 // with textContent only.
 
 import * as m from './model.js';
+import * as sidebar from './sidebar.js';
 
 const api = window.ragDocs;
 const $ = (id) => document.getElementById(id);
@@ -12,9 +13,11 @@ const PREVIEW_ROWS = 3;
 const ALL_ROWS = 200;
 
 const state = {
-  section: 'ask',
+  section: 'overview',
   docs: null,
   docsError: null,
+  libraryFilter: null, // 'not-indexed' while the overview's "show documents" route holds
+  overview: { status: null, statusError: null, how: 'closed' }, // 'closed' | 'open' | 'dismissed'
   ask: { question: '', busy: false, report: null, error: null, cancelled: false, copied: false },
   filing: {
     loaded: false,
@@ -30,6 +33,7 @@ const state = {
     notice: null, // null | 'ask' | 'running' | 'preview' | 'applying' | 'done'
     pendingText: null, // a re-sort the engine reported on opening, before any change here
     dry: null,
+    dryGeneration: -1, // which saveGeneration produced the preview: an add makes it stale
     showAll: false,
     applied: null,
   },
@@ -112,11 +116,12 @@ function listRow(row, onPick) {
 // ---- navigation ----
 
 function render() {
-  for (const button of document.querySelectorAll('.nav button')) {
-    const on = button.dataset.section === state.section;
-    if (on) button.setAttribute('aria-current', 'page');
-    else button.removeAttribute('aria-current');
-  }
+  renderOverview();
+  // The sidebar is one shared component (design Sidebar.dc.html): paint moves the current row
+  // and shows the overview count. It counts what a render can currently see pending; the dry-run
+  // item appears when the memo lands, then a render raises the count.
+  sidebar.paint($('sidebar'), state.section, paintedItems.length);
+  $('overviewScreen').hidden = state.section !== 'overview';
   $('askScreen').hidden = state.section !== 'ask';
   $('filingScreen').hidden = state.section !== 'filing';
   $('settingsScreen').hidden = state.section !== 'settings';
@@ -128,8 +133,149 @@ function render() {
 function showSection(section) {
   state.section = section;
   render();
-  if (section === 'filing' && !state.filing.loaded) void loadFiling();
+  if (section === 'overview') {
+    // The overview owns the checks behind its rows and its all-clear: re-arm the shared dry-run, and
+    // retry the filing lists if their first load failed, so all-clear only appears once every read
+    // has succeeded for the current data.
+    if (!f().loaded || !f().saved) void loadFilingLists();
+    void ensureDryRun().then(() => render());
+  }
+  if (section === 'filing' && !state.filing.loaded) void loadFilingLists();
   if (section === 'settings') void loadSettings();
+}
+
+// ---- overview ----
+
+/** The needs-you items from the last render; the sidebar counts exactly these. */
+let paintedItems = [];
+
+async function loadOverview() {
+  const res = await track(api.status());
+  if (res && res.ok) {
+    state.overview.status = res.report;
+    state.overview.statusError = null;
+  } else {
+    // A failed call is `unknown`, never a claim the model is down: one honest error line, no item.
+    state.overview.status = null;
+    state.overview.statusError = res?.error ?? 'The engine did not answer about the model.';
+  }
+  render();
+}
+
+/** One row of the design's list: a StatusPill naming the kind, title, meta, one secondary button. */
+function needRow(item) {
+  const row = el('div', 'need-row');
+  const text = el('div', 'need-text');
+  text.append(pill(item.pill, item.tone));
+  text.append(el('span', 'need-title', item.title));
+  text.append(el('span', 'need-meta', item.meta));
+  row.append(text);
+  if (item.route === 'how' && state.overview.how === 'open') {
+    // The static "keep downloaded" steps, inline under the row; `got it` dismisses it for the session.
+    const howto = el('div', 'howto');
+    howto.append(el('p', 'howto-steps', '1. Open Finder. 2. Right-click your library folder. 3. Choose Keep Downloaded.'));
+    const got = el('button', 'btn secondary');
+    got.type = 'button';
+    got.append(el('span', '', 'got it'));
+    got.addEventListener('click', () => {
+      // `closed` collapses the steps but keeps the row: an unresolved iCloud item is still
+      // unresolved, so it stays counted until fresh metadata says the files were downloaded. Clicking
+      // "show how" again reopens the steps (dismissed would hide a real problem and desync the count).
+      state.overview.how = 'closed';
+      render();
+    });
+    howto.append(got);
+    row.append(howto);
+  }
+  const button = el('button', 'btn secondary');
+  button.type = 'button';
+  button.append(icon(item.glyph, 18), el('span', '', item.action));
+  button.addEventListener('click', () => routeOverview(item.route));
+  row.append(button);
+  return row;
+}
+
+function renderOverview() {
+  const o = state.overview;
+  const docs = state.docs;
+  const dry = m.overviewDryReport({ preview: f().dry, previewGeneration: f().dryGeneration, memo: dryRuns.memo, generation: saveGeneration });
+  const items = m.overviewItems({ status: o.status, docs, saved: f().saved, dry });
+  paintedItems = items;
+
+  const figures = m.overviewFigures(docs, o.status);
+  $('figDocuments').textContent = figures[0].value;
+  $('figIndexed').textContent = figures[1].value;
+  $('figSync').textContent = figures[2].value;
+  setPill($('figModel'), figures[3].value, figures[3].tone);
+
+  const notice = docs ? m.libraryNotice(docs) : null;
+  $('overviewNotice').hidden = notice === null;
+  $('overviewNotice').textContent = notice ?? '';
+
+  const rows = $('needRows');
+  rows.replaceChildren();
+  for (const item of items) {
+    rows.append(needRow(item));
+  }
+  const busy = items.length > 0;
+  $('needSection').hidden = !busy;
+  $('needCount').textContent = busy ? `${items.length} ${items.length === 1 ? 'item' : 'items'}` : '';
+  // All-clear means every needs-you read landed for the current data AND the shared dry-run reported
+  // `ok` with nothing to move. A read that has not run (or failed) never claims the library is tidy,
+  // and `m.allClear` keeps the library notice ahead of it, so a missing or outdated database shows
+  // only its recovery notice — never a false "nothing needs you".
+  $('allClear').hidden = !m.allClear({ docs, docsError: state.docsError, status: o.status, saved: f().saved, notice, dry, items });
+  // One honest overview error line for why the clear state is not shown: the model status first,
+  // then a failed dry-run, then a failed filing load. Each is retried on the next overview visit.
+  const overviewError = o.statusError ?? dryRuns.failure(saveGeneration) ?? (f().loaded && !f().saved ? f().error : null);
+  $('statusError').hidden = overviewError === null;
+  $('statusError').textContent = overviewError ?? '';
+}
+
+/** Each row's button is a route, not an action of its own: the overview only ever shows the
+ * person where to go. preview/review wait for the filing lists; nothing here moves a file. */
+function routeOverview(route) {
+  if (route === 'settings') showSection('settings');
+  else if (route === 'documents') {
+    // Cancel any search (done or mid-flight) first, so the not-indexed filter is what runs: an
+    // old query would otherwise win and show indexed hits instead of the skipped originals.
+    cancelSearch();
+    state.libraryFilter = 'not-indexed';
+    showSection('ask');
+  } else if (route === 'how') {
+    state.overview.how = 'open';
+    render();
+  } else if (route === 'review') void routeReview();
+  else void routePreviewAndApply();
+}
+
+async function routeReview() {
+  if (!f().saved) await loadFilingLists();
+  if (!f().saved) return;
+  f().view = 'owners';
+  f().selected = { kind: 'shared' };
+  f().value = f().saved.shared_owner;
+  f().touched = true;
+  showSection('filing');
+}
+
+/** The design's "preview and apply": if the one shared dry-run is current, show its preview; no
+ * second hash pass. Only when the memo is missing or stale does this call resort(). */
+async function routePreviewAndApply() {
+  if (!f().saved) await loadFilingLists();
+  if (!f().saved) return;
+  const memo = await ensureDryRun();
+  const report = memo && memo.generation === saveGeneration ? memo.report : null;
+  if (report && m.dryRunProblem(report) === null && m.moveCount(report) > 0) {
+    f().dry = report;
+    f().dryGeneration = saveGeneration;
+    f().notice = 'preview';
+    f().selected = null;
+    f().touched = true; // keeps applyPendingNotice from replacing this preview
+    showSection('filing');
+  } else {
+    void resort();
+  }
 }
 
 // ---- ask ----
@@ -152,12 +298,16 @@ function renderAsk() {
   // library
   const searching = state.search.query !== '' && state.search.hits !== null;
   const allDocs = state.docs?.documents ?? [];
-  const shown = searching ? allDocs.filter((doc) => m.isCited(doc, state.search.hits)) : allDocs;
-  if (searching) {
+  let shown = searching ? allDocs.filter((doc) => m.isCited(doc, state.search.hits)) : allDocs;
+  // The overview's "show documents" route filters the same library down to the unsearchable rows.
+  const filtered = state.libraryFilter === 'not-indexed';
+  if (filtered && !searching) shown = allDocs.filter((doc) => doc.skipped !== null);
+  if (searching || filtered) {
     $('libraryMeta').textContent = `${shown.length} of ${m.docsLabel(allDocs.length)}`;
   } else {
     $('libraryMeta').textContent = state.docs ? m.libraryMeta(state.docs) : '';
   }
+  $('libraryFilterClear').hidden = !filtered;
   const rows = $('libraryRows');
   rows.replaceChildren();
   if (state.docsError) {
@@ -264,6 +414,7 @@ function onSearchChange() {
   state.search.query = query;
   state.search.hits = null;
   state.search.error = null;
+  if (query !== '') state.libraryFilter = null; // typing in the box restores the full library
   if (query.length >= 2) {
     searchTimer = setTimeout(() => {
       void runSearch(query, state.search.seq);
@@ -283,6 +434,18 @@ async function runSearch(query, seq) {
     state.search.error = res?.error ?? 'Search failed: the engine did not answer.';
   }
   render();
+}
+
+/** Cancel an in-flight or completed search so the box is empty and no stale hits survive: bump the
+ * sequence (a reply arriving later is dropped), clear query/hits/error, and empty the field. The
+ * overview's "show documents" route uses this before applying its not-indexed filter. */
+function cancelSearch() {
+  clearTimeout(searchTimer);
+  state.search.seq += 1;
+  state.search.query = '';
+  state.search.hits = null;
+  state.search.error = null;
+  $('librarySearch').value = '';
 }
 
 async function cancelAsk() {
@@ -309,6 +472,13 @@ async function addDocs() {
     else if (res.outcome === 'failed') state.add.results[index] = { state: 'failed', error: res.error ?? 'the engine failed' };
     else {
       state.add.results[index] = { state: 'added', type: res.report?.type ?? 'document' };
+      // A new document can change where the filed copies belong: drop the cached move report *and*
+      // the filing's preview of it, so the next overview re-checks instead of showing an all-clear
+      // (or a stale zero-move preview) that predates this add.
+      dryRuns.invalidate();
+      f().dry = null;
+      f().dryGeneration = -1;
+      f().notice = 'ask';
       void loadDocs();
     }
     if (ok && res.done) break;
@@ -355,7 +525,9 @@ function selectDefault() {
   f().fieldError = null;
 }
 
-async function loadFiling() {
+/** The filing lists, apart from the dry-run: the overview needs the lists (item 3 and the routes)
+ * without paying for a second hash pass, so this half loads on its own. */
+async function loadFilingLists() {
   f().loaded = true;
   const res = await track(api.filing());
   if (!res || !res.ok) {
@@ -367,17 +539,17 @@ async function loadFiling() {
   f().error = null;
   selectDefault();
   render();
-  // The current lists may already file some copies elsewhere (lists edited by hand, new documents):
-  // ask the engine, without moving anything, and say so if the user has not started editing.
-  const generation = saveGeneration;
-  const dry = await track(api.dryRun());
-  if (generation === saveGeneration && dry && dry.ok && dry.report.status === 'ok' && m.moveCount(dry.report) > 0 && f().changes.length === 0) {
-    f().pendingText = `${m.copiesLabel(m.moveCount(dry.report))} are not where the current lists put them.`;
-    if (!f().touched) {
-      f().selected = null;
-      f().notice = 'ask';
-      render();
-    }
+}
+
+/** The re-sort the engine reported on opening, before the user has started editing: now phrased
+ * from the one shared dry-run memo instead of a call of its own. */
+function applyPendingNotice(memo) {
+  const dry = memo?.report;
+  if (!dry || dry.status !== 'ok' || m.moveCount(dry) === 0 || f().changes.length > 0) return;
+  f().pendingText = `${m.copiesLabel(m.moveCount(dry))} are not where the current lists put them.`;
+  if (!f().touched) {
+    f().selected = null;
+    f().notice = 'ask';
   }
 }
 
@@ -450,6 +622,27 @@ async function check() {
 /** Bumped when a save starts: a dry-run that began earlier must not show its preview. */
 let saveGeneration = 0;
 
+/** The one dry-run both filing and overview share. It hashes every original (up to 10 min), so it
+ * is memoised per saveGeneration: a save, an apply or a new add drops the memo, and the next caller
+ * starts a fresh run. `jobs.recordDryRun` already arms apply for exactly this call. `DryRunMemo`
+ * (model.js) keeps pending and settled-failure apart, so concurrent callers join one pass instead
+ * of starting several. */
+const dryRuns = new m.DryRunMemo(() => track(api.dryRun()), () => saveGeneration);
+
+function ensureDryRun() {
+  return dryRuns.ensure(saveGeneration);
+}
+
+/** Boot: the filing lists and the dry-run behind the overview's re-sort item. The count and item
+ * 2 appear when the dry-run lands, which is what `aria-live` announces. */
+async function bootFiling() {
+  await loadFilingLists();
+  if (!f().saved) return;
+  const memo = await ensureDryRun();
+  applyPendingNotice(memo);
+  render();
+}
+
 async function save(op) {
   if (!op || f().saving) return;
   clearTimeout(checkTimer);
@@ -475,8 +668,10 @@ async function save(op) {
     f().selected = null;
     f().value = '';
     f().dry = null;
+    f().dryGeneration = -1;
     f().showAll = false;
     f().notice = 'ask';
+    dryRuns.invalidate(); // the lists changed: the overview will need a fresh dry-run
     // A rename re-files the stored copies, so the row counts on the ask screen follow the save.
     void loadDocs();
   }
@@ -498,6 +693,7 @@ async function resort() {
     f().notice = 'ask';
   } else {
     f().dry = res.report;
+    f().dryGeneration = saveGeneration; // tag the preview: an add later makes it stale
     f().showAll = false;
     f().notice = 'preview';
   }
@@ -517,6 +713,8 @@ async function apply() {
     f().changes = [];
     f().pendingText = null;
     f().dry = null;
+    f().dryGeneration = -1;
+    dryRuns.invalidate(); // the moves are done: the overview must not count them again
     f().notice = 'done';
     void loadDocs();
   }
@@ -679,7 +877,7 @@ function renderForm() {
     form.glyph = true;
   } else {
     const shared = s.saved.shared_owner;
-    const n = state.docs ? state.docs.documents.filter((doc) => doc.owner === null || doc.owner === shared || !s.saved.owners.includes(doc.owner)).length : 0;
+    const n = m.sharedOwnerCount(s.saved, state.docs?.documents ?? null);
     form.title = shared;
     form.meta = `${m.docsLabel(n)} filed here`;
     form.label = 'shared folder name';
@@ -749,6 +947,10 @@ function wire() {
     onSearchChange(); // empty box restores the full list
   });
   $('addDocsButton').addEventListener('click', () => void addDocs());
+  $('libraryFilterClear').addEventListener('click', () => {
+    state.libraryFilter = null;
+    render();
+  });
   $('addCancel').addEventListener('click', () => void cancelAdd());
   $('cancelAsk').addEventListener('click', () => void cancelAsk());
   $('copyAnswer').addEventListener('click', () => void copyAnswer());
@@ -804,12 +1006,19 @@ function wire() {
   });
 
   // macOS lets the user change the login item in System Settings while the app is open; refocusing
-  // re-reads it, so the switch never shows a state the OS no longer has.
-  window.addEventListener('focus', () => void loadSettings());
+  // re-reads it, so the switch never shows a state the OS no longer has. The overview re-reads its
+  // two engine calls the same way: the window you look at is the window that is true.
+  window.addEventListener('focus', () => {
+    void loadSettings();
+    void loadOverview();
+  });
 }
 
 document.body.dataset.pending = '0';
+sidebar.build($('sidebar'));
 wire();
 render();
 void loadDocs();
+void loadOverview();
+void bootFiling();
 void loadSettings();
