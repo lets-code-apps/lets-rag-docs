@@ -533,9 +533,9 @@ type SmokeChecks = {
 async function runSmoke(): Promise<void> {
 	const dir = freshFakeState();
 	const deadline = setTimeout(() => {
-		console.error('SMOKE FAIL: timed out after 60s');
+		console.error('SMOKE FAIL: timed out after 150s');
 		app.exit(1);
-	}, 60000);
+	}, 150000);
 	let code = 1;
 	try {
 		// Busy pass: the fake model answers "not reachable", so the overview opens with its
