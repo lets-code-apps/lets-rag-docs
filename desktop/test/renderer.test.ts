@@ -21,6 +21,9 @@ test('the sidebar is one shared component: overview, ask, filing, settings in th
 	assert.ok(countRules.length >= 2, 'no .nav .count rules');
 	assert.ok(countRules.some((rule) => rule.includes('--raised')) && countRules.some((rule) => rule.includes('--surface')));
 	assert.equal(/danger|attention|positive/.test(countRules.join(' ')), false, 'the count must never be coloured');
+	// A zero count must hide the pill outright (sidebar.js sets `hidden`; the `.count` class sets
+	// display, so a `[hidden]` rule is needed to beat it). Finding 7: no empty badge on all-clear.
+	assert.ok(/\.nav[^{]*\.count\[hidden\][^{]*\{[^}]*display:\s*none/.test(css), 'the zero count pill must be hidden');
 	// Keyboard users still get the design's focus ring.
 	assert.ok(/:focus-visible/.test(css), ':focus-visible rule lost');
 });

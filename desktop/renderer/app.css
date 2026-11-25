@@ -948,6 +948,12 @@ the 100%-wide wrap, so the narrow (360px) pane never grows a sideways scrollbar.
   font-weight: 500;
 }
 
+/* A count of zero hides the pill: the row's `.count` class sets `display`, so it would otherwise
+   out-rank the browser's `[hidden]` and leave an empty 20px badge beside overview. */
+.nav .count[hidden] {
+  display: none;
+}
+
 .nav button[aria-current='page'] .count {
   background: var(--surface);
 }

@@ -54,6 +54,10 @@ export function paint(nav, section, count) {
     else button.removeAttribute('aria-current');
     button.setAttribute('aria-label', row.aria);
     const pill = button.querySelector('.count');
-    if (pill) pill.textContent = row.count;
+    if (pill) {
+      pill.textContent = row.count;
+      // Zero leaves no number, and an empty 20px fill would read as a stray badge: hide the pill.
+      pill.hidden = row.count === '';
+    }
   }
 }

@@ -132,7 +132,13 @@ function render() {
 function showSection(section) {
   state.section = section;
   render();
-  if (section === 'overview') void ensureDryRun().then(() => render()); // the count follows the same one dry-run
+  if (section === 'overview') {
+    // The overview owns the checks behind its rows and its all-clear: re-arm the shared dry-run, and
+    // retry the filing lists if their first load failed, so all-clear only appears once every read
+    // has succeeded for the current data.
+    if (!f().loaded || !f().saved) void loadFilingLists();
+    void ensureDryRun().then(() => render());
+  }
   if (section === 'filing' && !state.filing.loaded) void loadFilingLists();
   if (section === 'settings') void loadSettings();
 }
@@ -171,7 +177,10 @@ function needRow(item) {
     got.type = 'button';
     got.append(el('span', '', 'got it'));
     got.addEventListener('click', () => {
-      state.overview.how = 'dismissed';
+      // `closed` collapses the steps but keeps the row: an unresolved iCloud item is still
+      // unresolved, so it stays counted until fresh metadata says the files were downloaded. Clicking
+      // "show how" again reopens the steps (dismissed would hide a real problem and desync the count).
+      state.overview.how = 'closed';
       render();
     });
     howto.append(got);
@@ -204,15 +213,24 @@ function renderOverview() {
 
   const rows = $('needRows');
   rows.replaceChildren();
-  for (const item of o.how === 'dismissed' ? items.filter((it) => it.route !== 'how') : items) {
+  for (const item of items) {
     rows.append(needRow(item));
   }
   const busy = items.length > 0;
   $('needSection').hidden = !busy;
   $('needCount').textContent = busy ? `${items.length} ${items.length === 1 ? 'item' : 'items'}` : '';
-  $('allClear').hidden = !(docs && o.status && notice === null && items.length === 0);
-  $('statusError').hidden = o.statusError === null;
-  $('statusError').textContent = o.statusError ?? '';
+  // All-clear means every needs-you read landed for the current data AND the shared dry-run reported
+  // no moves. A read that has not run (or failed) never claims the library is tidy.
+  const dryChecked = dryMemo && dryMemo.generation === saveGeneration && dryMemo.report !== null;
+  const readsOk = state.docs && !state.docsError && o.status && f().saved;
+  $('allClear').hidden = !(readsOk && dryChecked && items.length === 0);
+  // One honest overview error line for why the clear state is not shown: the model status first,
+  // then a failed dry-run, then a failed filing load. Each is retried on the next overview visit.
+  const overviewError = o.statusError
+    ?? (dryMemo && dryMemo.generation === saveGeneration && dryMemo.report === null ? dryError : null)
+    ?? (f().loaded && !f().saved ? f().error : null);
+  $('statusError').hidden = overviewError === null;
+  $('statusError').textContent = overviewError ?? '';
 }
 
 /** Each row's button is a route, not an action of its own: the overview only ever shows the
@@ -220,6 +238,9 @@ function renderOverview() {
 function routeOverview(route) {
   if (route === 'settings') showSection('settings');
   else if (route === 'documents') {
+    // Cancel any search (done or mid-flight) first, so the not-indexed filter is what runs: an
+    // old query would otherwise win and show indexed hits instead of the skipped originals.
+    cancelSearch();
     state.libraryFilter = 'not-indexed';
     showSection('ask');
   } else if (route === 'how') {
@@ -415,6 +436,18 @@ async function runSearch(query, seq) {
   render();
 }
 
+/** Cancel an in-flight or completed search so the box is empty and no stale hits survive: bump the
+ * sequence (a reply arriving later is dropped), clear query/hits/error, and empty the field. The
+ * overview's "show documents" route uses this before applying its not-indexed filter. */
+function cancelSearch() {
+  clearTimeout(searchTimer);
+  state.search.seq += 1;
+  state.search.query = '';
+  state.search.hits = null;
+  state.search.error = null;
+  $('librarySearch').value = '';
+}
+
 async function cancelAsk() {
   state.ask.cancelled = true;
   await track(api.cancelAsk());
@@ -439,6 +472,10 @@ async function addDocs() {
     else if (res.outcome === 'failed') state.add.results[index] = { state: 'failed', error: res.error ?? 'the engine failed' };
     else {
       state.add.results[index] = { state: 'added', type: res.report?.type ?? 'document' };
+      // A new document can change where the filed copies belong: drop the cached move report so the
+      // next overview re-checks instead of showing an all-clear that predates this add.
+      dryMemo = null;
+      dryError = null;
       void loadDocs();
     }
     if (ok && res.done) break;
@@ -583,18 +620,28 @@ async function check() {
 let saveGeneration = 0;
 
 /** The one dry-run both filing and overview share. It hashes every original (up to 10 min), so it
- * is memoised per saveGeneration: a save or an apply drops the memo, and the next caller starts
- * a fresh run. `jobs.recordDryRun` already arms apply for exactly this call. */
+ * is memoised per saveGeneration: a save, an apply or a new add drops the memo, and the next caller
+ * starts a fresh run. `jobs.recordDryRun` already arms apply for exactly this call. */
 let dryMemo = null; // {generation, promise, report}
+/** The one dry-run's failure, so the overview can say why it is not all-clear and try again. */
+let dryError = null;
 
 function ensureDryRun() {
-  if (dryMemo && dryMemo.generation === saveGeneration) return dryMemo.promise;
+  // A failed dry-run is not a result to keep: the overview re-runs it on its next visit. Only a
+  // current, successful memo is reused (the shared hash pass filing and overview both use).
+  if (dryMemo && dryMemo.generation === saveGeneration && dryMemo.report !== null) return dryMemo.promise;
   const generation = saveGeneration;
   const memo = { generation, promise: null, report: null };
   memo.promise = (async () => {
     const dry = await track(api.dryRun());
     if (generation !== saveGeneration) return null; // a save started while this ran
-    memo.report = dry && dry.ok ? dry.report : null;
+    if (dry && dry.ok) {
+      memo.report = dry.report;
+      dryError = null;
+    } else {
+      memo.report = null;
+      dryError = dry?.error ?? 'The engine did not answer about the moves.';
+    }
     return memo;
   })();
   dryMemo = memo;

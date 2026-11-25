@@ -325,7 +325,11 @@ async function library() {
   if (args[0] === 'add') await addReport();
   if (args[0] === 'locate') locateReport();
   if (args[0] === 'ask') print(ANSWER);
-  if (args[0] === 'filing' && args[1] === 'show') print({ version: 1, folders: state.folders, owners: state.owners, shared_owner: state.shared ?? SHARED });
+  if (args[0] === 'filing' && args[1] === 'show') {
+    // FAKE_FILING_FAIL: the lists never load, so the overview must show an error and stay not-all-clear.
+    if (process.env.FAKE_FILING_FAIL === '1') fail('fake engine: filing show failed');
+    print({ version: 1, folders: state.folders, owners: state.owners, shared_owner: state.shared ?? SHARED });
+  }
   if (args[0] === 'filing' && args[1] === 'save') {
     let draft;
     try {
@@ -351,6 +355,9 @@ async function library() {
   }
   if (args[0] === 'organize') {
     const apply = args.includes('--apply');
+    // FAKE_ORGANIZE_FAIL: the dry-run fails, so the overview must show an error and stay not-all-clear
+    // until the next visit retries it (finding 5).
+    if (!apply && process.env.FAKE_ORGANIZE_FAIL === '1') fail('fake engine: organize dry-run failed');
     // FAKE_DRY_RUN_DELAY_MS: a slow dry-run of the lists as they were when it started (race tests).
     const delay = Number(process.env.FAKE_DRY_RUN_DELAY_MS || 0);
     if (!apply && delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
