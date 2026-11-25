@@ -130,17 +130,24 @@ numbers come from. Measured on the fixed workflow, two runs against a CI-rendere
 6 of 38 shots with any differing pixels, run 44421965171 had 5, and the largest ratio in either run was **0.0000258
 (0.0026%)**. `MAX_RATIO = 0.002` is therefore ~77× the observed noise and still under the 0.5% ceiling — keep it
 unless a real render change pushes the numbers up (the sizes already agree, so this is antialiasing noise only).
+For #23 the baseline is regenerated at a fixed content size (1200×660 / 360×660); the two green runs of that
+re-baseline (linked in the PR) re-measured this as antialiasing noise only — the per-shot numbers are in those
+runs' `compare-measured.json` — so `PIXEL_DELTA = 12` and `MAX_RATIO = 0.002` are left unchanged.
 
-**Known local-vs-CI differences.** The committed baseline is the **CI render**, not a Retina laptop. The macOS
-GitHub Actions runner is non-Retina and its window chrome is taller, so a `setSize(1200, 820)` / `setSize(360,
-780)` window captures **1200×677** and **360×677** there, while a Retina Mac's `npm run shots` captures 2× (2400×
-1640) at a different height. A device-scale switch cannot reconcile size *and* height across the two, so it is
-not used. Consequence: `npm run shots` + `npm run compare` on your laptop will report every shot as changed — that
-is expected, because your laptop is not the reference. Regenerate the baseline by taking the PNGs from a
-`desktop-ci-<run id>` artifact (they are the runner's render) and committing those; the runner re-renders them
-identically, so CI goes green. Fonts are bundled (Poppins woff2) and controls use `font: inherit`, so within
-the CI render text is stable; a runner macOS image bump can still shift antialiased pixels and force a
-re-baseline from the artifact. Baseline updates add ~6.7 MB of PNG history each time, so keep them rare.
+**Known local-vs-CI differences.** The committed baseline is the **CI render**, not a Retina laptop. Shots are
+sized by **content** (`setContentSize`), not by the outer window frame: **1200×660** (wide) and **360×660** (narrow),
+under the macOS runner's visible screen height, so a window taller than the screen is never squeezed (a `setSize`
+frame that was too tall used to be squeezed to ~677, which is what made the old captures disagree). `runShots`
+waits for `getContentSize()` to match before driving and again right before capture, and fails a shot that never
+settles with **expected vs actual** (plus the display's work area) in `shots.txt`. The written PNG's own pixel
+size is checked against content size × the display's scale factor before it is written, so the CI render is
+**1200×660 / 360×660 at 1×** and a Retina Mac's `npm run shots` captures exactly **2400×1320 / 720×1320 (2×)**.
+A laptop still differs from the baseline in pixel size, so `npm run shots` + `npm run compare` there reports every
+shot as changed — expected, because your laptop is not the reference. Regenerate the baseline by taking the PNGs
+from a `desktop-ci-<run id>` artifact (they are the runner's render) and committing those; the runner re-renders
+them identically, so CI goes green. Fonts are bundled (Poppins woff2) and controls use `font: inherit`, so within
+the CI render text is stable; a runner macOS image bump can still shift antialiased pixels and force a re-baseline
+from the artifact. Baseline updates add ~6.7 MB of PNG history each time, so keep them rare.
 
 **Privacy.** CI adds no third-party service, cookie or personal data to the app. Smoke and shots hard-set
 `test/fixtures/fake-engine.mjs` (a test checks this), so the artifacts and logs hold only synthetic output —

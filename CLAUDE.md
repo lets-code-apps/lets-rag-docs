@@ -220,7 +220,12 @@ desktop/                 # Electron menu-bar app (Node/TS), ask, filing and sett
     the re-sort item shares ONE dry-run memo with filing (per save-generation, dropped on save/apply). Engine side:
     `status --json` (new `src/status.rs`, reqwest 3 s probe, db-mtime text) and `dataless` in `documents --json`;
     fake engine speaks both (FAKE_MODEL=down, scenario `clear`); 44 screenshots.
-10. Later: synthetic sample docs + public eval set, reranking (bge-reranker-v2-m3). (Page markers landed with #15: `ocr.py` emits `\f`, `chunk::paged_chunks` tracks the page, `chunk_cases.json` still locks the old chunk text and byte counts.)
+    **Fixed screenshot capture size (#23, 2026-11-26):** shots are sized by content (`setContentSize`, 1200x660 /
+    360x660 in a new Electron-free `desktop/src/shot-size.ts`); `runShots` waits for `getContentSize()` to match
+    before driving and again before capture, checks the written PNG's header against content size x the display
+    scale factor, and fails a shot with expected vs actual on a mismatch; baseline regenerated from the CI artifact.
+    `windowOptions()` (the real 1200x820 tray window), `compare-shots.mjs` and the thresholds are unchanged. TS/Markdown only.
+  10. Later: synthetic sample docs + public eval set, reranking (bge-reranker-v2-m3). (Page markers landed with #15: `ocr.py` emits `\f`, `chunk::paged_chunks` tracks the page, `chunk_cases.json` still locks the old chunk text and byte counts.)
 
 ## Environment
 
