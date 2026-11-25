@@ -289,3 +289,73 @@ test('syncLabel is month-line or never; plural switches at one', () => {
   assert.equal(m.plural(1, 'copy', 'copies'), 'copy');
   assert.equal(m.plural(3, 'copy', 'copies'), 'copies');
 });
+
+test('all-clear needs a usable library and an ok dry-run, not a present report', () => {
+  const saved = { folders: [], owners: ['Piotr'], shared_owner: 'shared' };
+  const status = { model: { reachable: true }, last_sync: null };
+  const docs = { status: 'ok', max_file_mb: 50, documents: [{ owner: 'Piotr', skipped: null, dataless: false }] };
+  const dry = { status: 'ok', items: [], counts: { would_copy: 0, would_move: 0 } };
+  const clear = { docs, docsError: null, status, saved, notice: m.libraryNotice(docs), dry, items: [] };
+  assert.equal(m.allClear(clear), true);
+
+  // A report can be valid JSON and still describe a library that needs attention: both the recovery
+  // notice and a dry-run that cannot answer must keep "nothing needs you" hidden.
+  for (const unusable of ['no_database', 'outdated']) {
+    const brokenDocs = { status: unusable, max_file_mb: 50, documents: [] };
+    assert.equal(m.allClear({ ...clear, docs: brokenDocs, notice: m.libraryNotice(brokenDocs), dry: { status: unusable, items: [], counts: {} } }), false, unusable);
+    assert.equal(m.allClear({ ...clear, dry: { status: unusable, items: [], counts: {} } }), false, `${unusable} dry-run`);
+  }
+  assert.equal(m.allClear({ ...clear, dry: null }), false, 'a dry-run that has not landed or failed');
+  assert.equal(m.allClear({ ...clear, notice: 'The library is empty. Add documents and run "lets-rag-docs ingest".' }), false, 'a library notice wins over the clear state');
+});
+
+test('a filing preview counts only while its generation is current', () => {
+  const saved = { folders: [], owners: ['Piotr'], shared_owner: 'shared' };
+  const status = { model: { reachable: true }, last_sync: null };
+  const docs = { status: 'ok', max_file_mb: 50, documents: [{ owner: 'Piotr', skipped: null, dataless: false }] };
+  const stalePreview = { status: 'ok', items: [], counts: { would_copy: 0, would_move: 0 } };
+  const freshMemo = { generation: 4, report: { status: 'ok', items: [], counts: { would_copy: 1, would_move: 0 } } };
+
+  // A zero-move preview taken at generation 3 must not hide the copy the document added at 4 needs.
+  const current = m.overviewDryReport({ preview: stalePreview, previewGeneration: 3, memo: freshMemo, generation: 4 });
+  assert.equal(current, freshMemo.report);
+  assert.deepEqual(m.overviewItems({ status, docs, saved, dry: current }).map((item) => item.pill), ['re-sort waiting']);
+  assert.equal(m.overviewDryReport({ preview: stalePreview, previewGeneration: 4, memo: freshMemo, generation: 4 }), stalePreview, 'a current preview is the same pass');
+  assert.equal(m.overviewDryReport({ preview: null, previewGeneration: -1, memo: null, generation: 4 }), null, 'nothing current to show');
+});
+
+test('callers join a pending dry-run; only a settled failure is retried', async () => {
+  let calls = 0;
+  let resolveRun;
+  const engine = () => {
+    calls += 1;
+    return new Promise((resolve) => {
+      resolveRun = resolve;
+    });
+  };
+  const memo = new m.DryRunMemo(engine, () => 1);
+  const first = memo.ensure(1);
+  const second = memo.ensure(1);
+  assert.equal(second, first, 'the second caller joins the pass already hashing');
+  assert.equal(calls, 1, 'one hash pass per library state');
+  resolveRun({ ok: true, report: { status: 'ok', items: [], counts: {} } });
+  const landed = await first;
+  assert.equal(landed.report.status, 'ok');
+  assert.equal(memo.ensure(1), first, 'a current pass is reused by later visits');
+  assert.equal(calls, 1);
+
+  // A run that settled as a failure is not a result to keep.
+  let brokenCalls = 0;
+  const broken = new m.DryRunMemo(() => {
+    brokenCalls += 1;
+    return Promise.resolve({ ok: false, error: 'engine hung up' });
+  }, () => 1);
+  assert.equal((await broken.ensure(1)).report, null);
+  assert.equal(broken.failure(1), 'engine hung up');
+  await broken.ensure(1);
+  assert.equal(brokenCalls, 2, 'the next visit retries a settled failure');
+
+  // A save while hashing discards that pass rather than caching a report about the old lists.
+  const moved = new m.DryRunMemo(() => Promise.resolve({ ok: true, report: { status: 'ok', items: [], counts: {} } }), () => 2);
+  assert.equal(await moved.ensure(1), null);
+});

@@ -33,6 +33,7 @@ const state = {
     notice: null, // null | 'ask' | 'running' | 'preview' | 'applying' | 'done'
     pendingText: null, // a re-sort the engine reported on opening, before any change here
     dry: null,
+    dryGeneration: -1, // which saveGeneration produced the preview: an add makes it stale
     showAll: false,
     applied: null,
   },
@@ -197,7 +198,7 @@ function needRow(item) {
 function renderOverview() {
   const o = state.overview;
   const docs = state.docs;
-  const dry = f().dry ?? (dryMemo && dryMemo.generation === saveGeneration ? dryMemo.report : null);
+  const dry = m.overviewDryReport({ preview: f().dry, previewGeneration: f().dryGeneration, memo: dryRuns.memo, generation: saveGeneration });
   const items = m.overviewItems({ status: o.status, docs, saved: f().saved, dry });
   paintedItems = items;
 
@@ -220,15 +221,13 @@ function renderOverview() {
   $('needSection').hidden = !busy;
   $('needCount').textContent = busy ? `${items.length} ${items.length === 1 ? 'item' : 'items'}` : '';
   // All-clear means every needs-you read landed for the current data AND the shared dry-run reported
-  // no moves. A read that has not run (or failed) never claims the library is tidy.
-  const dryChecked = dryMemo && dryMemo.generation === saveGeneration && dryMemo.report !== null;
-  const readsOk = state.docs && !state.docsError && o.status && f().saved;
-  $('allClear').hidden = !(readsOk && dryChecked && items.length === 0);
+  // `ok` with nothing to move. A read that has not run (or failed) never claims the library is tidy,
+  // and `m.allClear` keeps the library notice ahead of it, so a missing or outdated database shows
+  // only its recovery notice — never a false "nothing needs you".
+  $('allClear').hidden = !m.allClear({ docs, docsError: state.docsError, status: o.status, saved: f().saved, notice, dry, items });
   // One honest overview error line for why the clear state is not shown: the model status first,
   // then a failed dry-run, then a failed filing load. Each is retried on the next overview visit.
-  const overviewError = o.statusError
-    ?? (dryMemo && dryMemo.generation === saveGeneration && dryMemo.report === null ? dryError : null)
-    ?? (f().loaded && !f().saved ? f().error : null);
+  const overviewError = o.statusError ?? dryRuns.failure(saveGeneration) ?? (f().loaded && !f().saved ? f().error : null);
   $('statusError').hidden = overviewError === null;
   $('statusError').textContent = overviewError ?? '';
 }
@@ -269,6 +268,7 @@ async function routePreviewAndApply() {
   const report = memo && memo.generation === saveGeneration ? memo.report : null;
   if (report && m.dryRunProblem(report) === null && m.moveCount(report) > 0) {
     f().dry = report;
+    f().dryGeneration = saveGeneration;
     f().notice = 'preview';
     f().selected = null;
     f().touched = true; // keeps applyPendingNotice from replacing this preview
@@ -472,10 +472,13 @@ async function addDocs() {
     else if (res.outcome === 'failed') state.add.results[index] = { state: 'failed', error: res.error ?? 'the engine failed' };
     else {
       state.add.results[index] = { state: 'added', type: res.report?.type ?? 'document' };
-      // A new document can change where the filed copies belong: drop the cached move report so the
-      // next overview re-checks instead of showing an all-clear that predates this add.
-      dryMemo = null;
-      dryError = null;
+      // A new document can change where the filed copies belong: drop the cached move report *and*
+      // the filing's preview of it, so the next overview re-checks instead of showing an all-clear
+      // (or a stale zero-move preview) that predates this add.
+      dryRuns.invalidate();
+      f().dry = null;
+      f().dryGeneration = -1;
+      f().notice = 'ask';
       void loadDocs();
     }
     if (ok && res.done) break;
@@ -621,31 +624,13 @@ let saveGeneration = 0;
 
 /** The one dry-run both filing and overview share. It hashes every original (up to 10 min), so it
  * is memoised per saveGeneration: a save, an apply or a new add drops the memo, and the next caller
- * starts a fresh run. `jobs.recordDryRun` already arms apply for exactly this call. */
-let dryMemo = null; // {generation, promise, report}
-/** The one dry-run's failure, so the overview can say why it is not all-clear and try again. */
-let dryError = null;
+ * starts a fresh run. `jobs.recordDryRun` already arms apply for exactly this call. `DryRunMemo`
+ * (model.js) keeps pending and settled-failure apart, so concurrent callers join one pass instead
+ * of starting several. */
+const dryRuns = new m.DryRunMemo(() => track(api.dryRun()), () => saveGeneration);
 
 function ensureDryRun() {
-  // A failed dry-run is not a result to keep: the overview re-runs it on its next visit. Only a
-  // current, successful memo is reused (the shared hash pass filing and overview both use).
-  if (dryMemo && dryMemo.generation === saveGeneration && dryMemo.report !== null) return dryMemo.promise;
-  const generation = saveGeneration;
-  const memo = { generation, promise: null, report: null };
-  memo.promise = (async () => {
-    const dry = await track(api.dryRun());
-    if (generation !== saveGeneration) return null; // a save started while this ran
-    if (dry && dry.ok) {
-      memo.report = dry.report;
-      dryError = null;
-    } else {
-      memo.report = null;
-      dryError = dry?.error ?? 'The engine did not answer about the moves.';
-    }
-    return memo;
-  })();
-  dryMemo = memo;
-  return memo.promise;
+  return dryRuns.ensure(saveGeneration);
 }
 
 /** Boot: the filing lists and the dry-run behind the overview's re-sort item. The count and item
@@ -683,9 +668,10 @@ async function save(op) {
     f().selected = null;
     f().value = '';
     f().dry = null;
+    f().dryGeneration = -1;
     f().showAll = false;
     f().notice = 'ask';
-    dryMemo = null; // the lists changed: the overview will need a fresh dry-run
+    dryRuns.invalidate(); // the lists changed: the overview will need a fresh dry-run
     // A rename re-files the stored copies, so the row counts on the ask screen follow the save.
     void loadDocs();
   }
@@ -707,6 +693,7 @@ async function resort() {
     f().notice = 'ask';
   } else {
     f().dry = res.report;
+    f().dryGeneration = saveGeneration; // tag the preview: an add later makes it stale
     f().showAll = false;
     f().notice = 'preview';
   }
@@ -726,7 +713,8 @@ async function apply() {
     f().changes = [];
     f().pendingText = null;
     f().dry = null;
-    dryMemo = null; // the moves are done: the overview must not count them again
+    f().dryGeneration = -1;
+    dryRuns.invalidate(); // the moves are done: the overview must not count them again
     f().notice = 'done';
     void loadDocs();
   }
