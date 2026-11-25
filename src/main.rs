@@ -16,6 +16,7 @@ mod locate;
 mod mcp;
 mod organize;
 mod search;
+mod shared_model;
 
 use std::path::{Path, PathBuf};
 
@@ -154,7 +155,10 @@ async fn main() -> anyhow::Result<()> {
             .as_deref()
             .unwrap_or(DEFAULT_CONFIG_PATH.as_ref()),
     );
-    let config = Config::load(&path)?;
+    let config = Config::load_with_shared(
+        &path,
+        &shared_model::read(&expand_home(Path::new(shared_model::DEFAULT_PATH))),
+    )?;
     tracing::debug!(?config, "config loaded from {}", path.display());
     match cli.command {
         Command::Ingest => ingest(&config).await,
