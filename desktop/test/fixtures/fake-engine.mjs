@@ -8,6 +8,7 @@
 //   no-owners  the same library, before any owner was added
 //   clear      the same library with every document owned, indexed and downloaded (all-clear screen)
 //   empty      no library database yet
+//   outdated   the library was written by an older version of the engine
 // FAKE_DRY_RUN_DELAY_MS: make `organize --dry-run` slow (it plans the lists read at its start).
 // FAKE_ADD_DELAY_MS: make `add` slow, so the add panel can be caught mid-run.
 // FAKE_MODEL=down: `status --json` answers that the model is not reachable (the overview shows
@@ -370,6 +371,13 @@ else if (scenario === 'empty') {
   if (args[0] === 'documents') print(fixture('documents-no-database.json'));
   if (args[0] === 'ask') print(fixture('ask-no-passages.json'));
   if (args[0] === 'organize') print(fixture('organize-no-database.json'));
+  await library();
+} else if (scenario === 'outdated') {
+  // Every report is valid JSON and says the library must be rebuilt before anything can use it.
+  if (args[0] === 'documents') print(fixture('documents-outdated.json'));
+  if (args[0] === 'ask') print(fixture('ask-no-passages.json'));
+  if (args[0] === 'organize' && !args.includes('--apply'))
+    print({ version: 1, mode: 'dry_run', status: 'outdated', items: [], counts: { would_copy: 0, would_reuse: 0, would_move: 0, copied: 0, already: 0, moved: 0, failed: 0, duplicate: 0, not_classified: 0, missing: 0 } });
   await library();
 } else await library();
 

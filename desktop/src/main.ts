@@ -518,6 +518,11 @@ type SmokeChecks = {
 	dryRunRetryOk: boolean;
 	filingFailOk: boolean;
 	filingRetryOk: boolean;
+	// Round 3: an unusable library never claims all-clear, and a filing
+	// preview cannot outlive an add.
+	noDatabaseOk: boolean;
+	outdatedOk: boolean;
+	stalePreviewOk: boolean;
 	keyboardOk: boolean;
 	persisted?: boolean;
 	raceSafe?: boolean;
@@ -788,6 +793,54 @@ async function runSmoke(): Promise<void> {
       await d.settle();
       return !d.find('#allClear').hidden;
     `)) as boolean;
+    // Round-3 finding 2: a missing or an outdated database answers in valid JSON, but it is a library
+    // that needs attention. The overview may show only its recovery notice, never "nothing needs you".
+    process.env.FAKE_SCENARIO = 'empty';
+    process.env.FAKE_STATE_FILE = join(freshFakeState(), 'state.json');
+    const reloadNoDatabase = loaded(browser);
+    browser.reload();
+    await reloadNoDatabase;
+    result.noDatabaseOk = (await drive(browser, String.raw`
+      await d.settle();
+      return !d.find('#overviewNotice').hidden && d.find('#overviewNotice').textContent.includes('No library yet')
+        && d.find('#allClear').hidden && d.find('#statusError').hidden;
+    `)) as boolean;
+    process.env.FAKE_SCENARIO = 'outdated';
+    process.env.FAKE_STATE_FILE = join(freshFakeState(), 'state.json');
+    const reloadOutdated = loaded(browser);
+    browser.reload();
+    await reloadOutdated;
+    result.outdatedOk = (await drive(browser, String.raw`
+      await d.settle();
+      return !d.find('#overviewNotice').hidden && d.find('#overviewNotice').textContent.includes('older version')
+        && d.find('#allClear').hidden && d.find('#statusError').hidden;
+    `)) as boolean;
+    // Round-3 finding 3: a zero-move preview opened in filing used to override the plan after an add,
+    // so the overview claimed all-clear while the new document still needed a copy. The preview is
+    // tagged with the generation that produced it; an add makes it stale.
+    process.env.FAKE_SCENARIO = 'clear';
+    process.env.FAKE_STATE_FILE = join(freshFakeState(), 'state.json');
+    const reloadStalePreview = loaded(browser);
+    browser.reload();
+    await reloadStalePreview;
+    result.stalePreviewOk = (await drive(browser, String.raw`
+      await d.settle();
+      await d.click('[data-section="filing"]');
+      await d.settle();
+      d.find('#resortButton').click(); // the dry-run finds nothing to move: a zero-move preview
+      await d.settle();
+      await d.click('[data-section="overview"]');
+      await d.settle();
+      const clearedNow = !d.find('#allClear').hidden;
+      await d.click('[data-section="ask"]');
+      await d.settle();
+      d.find('#addDocsButton').click();
+      await d.settle();
+      await d.click('[data-section="overview"]');
+      await d.settle();
+      const pills = [...document.querySelectorAll('#needRows .need-row .pill')].map((x) => x.textContent);
+      return clearedNow && pills.includes('re-sort waiting') && d.find('#allClear').hidden;
+    `)) as boolean;
     process.env.FAKE_SCENARIO = 'library';
 		// The app name lives in the shared bar, so it shows on every screen. Check it is centred,
 		// clear of the emblem and that nothing scrolls sideways, on ask/filing/settings at 1200px
@@ -865,7 +918,7 @@ async function runSmoke(): Promise<void> {
 		const ok = own && title === PRODUCT_NAME && result.libraryRows > 0 && result.answered && result.folderRows > 0 && result.notice && result.moves > 0 && result.filed === 'filed' && result.persisted === true && result.raceSafe === true && result.titleWide === true && result.titleNarrow === true && result.appearanceLive === true && result.openAtLoginOk === true
 			&& result.dangerPill && result.sizeShown && result.searchRows === 2 && result.searchMeta && result.cleared === result.libraryRows && result.addDone && result.addAdded && result.addDuplicate && result.addFailed && result.grew && result.pageCited && result.openButtons === 2 && result.openedPath && result.vehiclesCounts && result.movesToVehicles && result.noUnsorted && result.movesToHousehold && result.sharedShownHousehold && result.sharedRenamedBack && result.applied === 'filed' && (result.geometry ?? []).length === 0
 			&& result.bootOverview && result.overviewFive && result.previewRoute && result.clearRoutes && result.keyboardOk && result.clearOk
-			&& result.addRefreshOk && result.dryRunFailOk && result.dryRunRetryOk && result.filingFailOk && result.filingRetryOk;
+			&& result.addRefreshOk && result.dryRunFailOk && result.dryRunRetryOk && result.filingFailOk && result.filingRetryOk && result.noDatabaseOk && result.outdatedOk && result.stalePreviewOk;
 		if (ok) {
 			console.error(`SMOKE OK: library ${result.libraryRows} rows (big-scan pill + MB sizes), search "loan" -> 2 rows -> cleared, add 3 files -> added/duplicate/failed + library grew, answer cites p. 4 and an open button handed the located path to main, rename Car->Vehicles counts 2 documents and previews moves to Vehicles (none to unsorted), shared owner "Household" re-files; stale dry-run after a save refused; app name centred on ask/filing/settings at 1200px and 360px; appearance live (dark/light/system); open-at-login reflects the real login item; layout checks clean (settings article, library search top, AppBar 132px clear, 44px targets) on ask/filing/settings at 1200px and 360px`);
 			code = 0;
