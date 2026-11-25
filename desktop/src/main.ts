@@ -739,9 +739,15 @@ async function runSmoke(): Promise<void> {
         && row.querySelector('.count').hidden === true // Finding 7: a zero count hides the pill outright
         && d.find('#figModel').textContent === 'connected';
     `)) as boolean;
+    // Each of these needs a clean all-clear library, so each starts from its own fresh fake state.
     // Finding 6: all-clear -> add a document -> overview. A new unfiled add must not reuse the cached
     // zero-move report: the re-sort item returns instead of a stale all-clear.
+    process.env.FAKE_STATE_FILE = join(freshFakeState(), 'state.json');
+    const reloadAdd = loaded(browser);
+    browser.reload();
+    await reloadAdd;
     result.addRefreshOk = (await drive(browser, String.raw`
+      await d.settle();
       await d.click('[data-section="ask"]');
       d.find('#addDocsButton').click();
       await d.settle();
@@ -753,13 +759,13 @@ async function runSmoke(): Promise<void> {
     // Finding 5: a failed dry-run and a failed filing load are surfaced, not hidden behind all-clear,
     // and each is retried on the next overview visit.
     process.env.FAKE_ORGANIZE_FAIL = '1';
+    process.env.FAKE_STATE_FILE = join(freshFakeState(), 'state.json');
     const reloadDryFail = loaded(browser);
     browser.reload();
     await reloadDryFail;
     result.dryRunFailOk = (await drive(browser, String.raw`
       await d.settle();
-      return d.find('#allClear').hidden && !d.find('#statusError').hidden
-        && d.find('#needSection').hidden;
+      return d.find('#allClear').hidden && !d.find('#statusError').hidden && d.find('#needSection').hidden;
     `)) as boolean;
     delete process.env.FAKE_ORGANIZE_FAIL;
     result.dryRunRetryOk = (await drive(browser, String.raw`
@@ -768,6 +774,7 @@ async function runSmoke(): Promise<void> {
       return !d.find('#allClear').hidden && d.find('#statusError').hidden;
     `)) as boolean;
     process.env.FAKE_FILING_FAIL = '1';
+    process.env.FAKE_STATE_FILE = join(freshFakeState(), 'state.json');
     const reloadFilingFail = loaded(browser);
     browser.reload();
     await reloadFilingFail;
