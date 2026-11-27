@@ -1579,14 +1579,20 @@ async function runShots(): Promise<void> {
 				if (shot.model === 'down') process.env.FAKE_MODEL = 'down'; else delete process.env.FAKE_MODEL;
 				if (shot.delayMs) process.env.FAKE_ADD_DELAY_MS = String(shot.delayMs); else delete process.env.FAKE_ADD_DELAY_MS;
 				// Every shot seeds the settings file explicitly: `true` opens the four screens as before,
-				// `false` (a `setup:` shot) is what makes the boot gate open the step screen. The model-step
-				// env is the fake engine's own selector, and it must not leak between shots.
-				seedSettings(shot.setup !== true, mode);
+				// `false` (a `setup:` shot) is what makes the boot gate open the step screen. The stored
+				// appearance stays 'system' (as an unseeded file defaults to), so the settings screen's own
+				// control paints exactly as the committed baseline does; the pass's theme comes from
+				// nativeTheme below. The model-step env is the fake engine's own selector, and it must not
+				// leak between shots.
+				seedSettings(shot.setup !== true, 'system');
 				if (shot.modelState) process.env.FAKE_MODEL_STATE = shot.modelState; else delete process.env.FAKE_MODEL_STATE;
 				if (shot.pick) process.env.FAKE_PICK_FOLDER = shot.pick; else delete process.env.FAKE_PICK_FOLDER;
 				if (shot.pull) process.env.FAKE_PULL = shot.pull; else delete process.env.FAKE_PULL;
 				delete process.env.FAKE_PULL_STEP_MS;
 				delete process.env.FAKE_DETECT_FOUND_AFTER;
+				// `load()` inside seedSettings applies the stored appearance, so re-assert the pass's theme
+				// after seeding it (order matters: the file says system, the window must still be dark/light).
+				nativeTheme.themeSource = mode;
 				browser.setSize(shot.width, shot.height);
 				const reload = loaded(browser);
 				browser.reload();
