@@ -99,5 +99,6 @@ test('the pull-error fixture is a stream that ends in the engine\'s own sentence
 	const lines = text.trim().split('\n').map((line) => parsePullLine(line));
 	assert.deepEqual(lines.map((line) => line?.stage), ['pulling manifest', 'downloading', 'error']);
 	assert.equal(lines[2]?.text, 'manifest not found');
-	assert.equal(pullProgress('qwen3:8b', lines[1] ?? ({} as never)).pct, 50, 'the bar advanced before the error');
+	const bar = pullProgress('qwen3:8b', lines[1] ?? ({} as never));
+	assert.equal(bar?.pct, 50, 'the bar advanced before the error');
 });
