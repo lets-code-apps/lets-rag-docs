@@ -23,6 +23,7 @@ pub struct Config {
     pub llm: LlmConfig,
     pub classify: ClassifyConfig,
     pub ocr: OcrConfig,
+    pub watch: WatchConfig,
 }
 
 /// `[qdrant]`: the vector store, over gRPC.
@@ -190,6 +191,21 @@ impl Default for OcrConfig {
     }
 }
 
+/// `[watch]`: the folders the first-run onboarding saves for the (not-yet-implemented) watcher.
+/// Kept separate from `[paths]` on purpose: these are user-picked source folders, never expanded
+/// or resolved, and empty by default so nothing is watched before a human chooses it.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WatchConfig {
+    pub folders: Vec<String>,
+}
+
+impl Default for WatchConfig {
+    fn default() -> Self {
+        WatchConfig { folders: Vec::new() }
+    }
+}
+
 impl Config {
     /// Reads the config at `path`; a missing file means all defaults, so the tool runs without
     /// setup. Stays pure: it never looks at the shared model file (see `load_with_shared`).
@@ -288,6 +304,30 @@ mod tests {
     #[test]
     fn unknown_keys_are_rejected() {
         assert!(toml::from_str::<Config>("[qdrant]\nulr = \"x\"").is_err());
+    }
+
+    #[test]
+    fn watch_section_parses() {
+        let config: Config =
+            toml::from_str("[watch]\nfolders = [\"~/Downloads\", \"~/Desktop\"]\n")
+                .unwrap();
+        assert_eq!(
+            config.watch.folders,
+            vec!["~/Downloads".to_string(), "~/Desktop".to_string()]
+        );
+        // Absent: empty, so nothing is watched by accident.
+        let empty: Config = toml::from_str("").unwrap();
+        assert_eq!(empty.watch.folders, Vec::new());
+        // Kept verbatim: no `~` expansion in the stored value.
+        assert_eq!(empty.watch.folders.first(), None);
+    }
+
+    #[test]
+    fn unknown_watch_key_rejected() {
+        assert!(
+            toml::from_str::<Config>("[watch]\nfoldrs = [\"x\"]").is_err(),
+            "a typo in [watch] must be an error, not ignored"
+        );
     }
 
     #[test]

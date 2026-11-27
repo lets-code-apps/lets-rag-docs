@@ -145,7 +145,7 @@ fn civil_from_days(days: i64) -> (i64, u8, u8) {
 
 /// A UTC RFC 3339 timestamp from whole seconds since the Unix epoch, with no date crate:
 /// the std clock gives seconds, this gives the eleven numbers of `YYYY-MM-DDThh:mm:ssZ`.
-fn rfc3339_utc(secs: u64) -> String {
+pub(crate) fn rfc3339_utc(secs: u64) -> String {
     let days: i64 = (secs / 86_400) as i64;
     let in_day = secs % 86_400;
     let (year, month, day) = civil_from_days(days);

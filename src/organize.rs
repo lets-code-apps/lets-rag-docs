@@ -332,8 +332,18 @@ type ContentFlags = fn(&Path) -> u32;
 
 /// The library must be a place of its own: if it is inside (or contains) `docs_dir` or `ocr_dir`, a
 /// filed copy could later be OCR'd or classified as a new original. Refuse rather than risk that.
-fn check_library_separation(config: &Config) -> anyhow::Result<()> {
-    let lib = std::path::absolute(&config.paths.library_dir)?;
+pub(crate) fn check_library_separation(config: &Config) -> anyhow::Result<()> {
+    check_library_separation_for(config, &config.paths.library_dir)
+}
+
+/// The same rule for an arbitrary candidate library path, so `setup save` can reject a folder that
+/// would collide with the originals or the OCR output before writing it. `library_dir` must already
+/// be expanded (no leading `~`): the caller in `setup.rs` expands it, this stays a pure path check.
+pub(crate) fn check_library_separation_for(
+    config: &Config,
+    library_dir: &Path,
+) -> anyhow::Result<()> {
+    let lib = std::path::absolute(library_dir)?;
     let others = [
         ("docs_dir", &config.paths.docs_dir),
         ("ocr_dir", &config.paths.ocr_dir),

@@ -16,6 +16,7 @@ mod locate;
 mod mcp;
 mod organize;
 mod search;
+mod setup;
 mod shared_model;
 mod status;
 
@@ -64,6 +65,22 @@ enum Filing {
         json: bool,
     },
     /// Read a draft from stdin, validate it, then write the two lists unless --check is set
+    Save {
+        /// Validate without writing
+        #[arg(long)]
+        check: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum Setup {
+    /// Print the effective `[paths] library_dir` and `[watch] folders` (plus recommendations) as JSON
+    Show {
+        /// Machine-readable output; required, there is no text mode for this command
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read a draft from stdin, validate it, then write the two fields unless --check is set
     Save {
         /// Validate without writing
         #[arg(long)]
@@ -142,6 +159,11 @@ enum Command {
         #[command(subcommand)]
         command: Filing,
     },
+    /// Show or change `[paths] library_dir` and `[watch] folders` through the engine
+    Setup {
+        #[command(subcommand)]
+        command: Setup,
+    },
     /// Serve `search_docs` to an MCP client over stdio
     Mcp,
     /// Answer a question from the documents with a local LLM, with citations
@@ -183,6 +205,10 @@ async fn main() -> anyhow::Result<()> {
         Command::Filing { command } => match command {
             Filing::Show { json } => filing::show(&config, json),
             Filing::Save { check } => filing::save(&config, &path, check),
+        },
+        Command::Setup { command } => match command {
+            Setup::Show { json } => setup::show(&config, &path, json),
+            Setup::Save { check } => setup::save(&config, &path, check),
         },
         Command::Mcp => mcp::run(&config).await,
         Command::Ask { question, json } => ask::run(&config, &question, json).await,
