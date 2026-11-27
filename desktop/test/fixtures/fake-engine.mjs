@@ -376,7 +376,7 @@ async function setupSaveCmd() {
   if (errors.length > 0) print({ version: 1, ok: false, saved: false, errors });
   const changed = state.library_dir !== draft.library_dir || JSON.stringify(state.watch ?? null) !== JSON.stringify(watch);
   const next = { ...state, library_dir: draft.library_dir, watch };
-  if (!args.includes('--check') && changed) save({ ...next, calls: [...(state.calls ?? []), 'setup save'] });
+  if (!args.includes('--check') && changed) save({ ...next, calls: [...(state.calls ?? []), `setup save ${draft.library_dir} ${watch.join(',')}`] });
   print({ version: 1, ok: true, saved: !args.includes('--check') && changed, errors: [] });
 }
 
@@ -429,7 +429,7 @@ function modelSaveCmd() {
   const url = flagValue('--url=') ?? '';
   const model = flagValue('--model=') ?? '';
   const state = load();
-  save({ ...state, model, calls: [...(state.calls ?? []), 'model save'] });
+  save({ ...state, model, calls: [...(state.calls ?? []), `model save ${runtime} ${model}`] });
   print({ ok: true, runtime, url, model });
 }
 
@@ -443,7 +443,13 @@ async function modelPullCmd() {
   say({ stage: 'pulling manifest' });
   const mode = process.env.FAKE_PULL || 'ok';
   const steps = mode === 'ok' ? [0.1, 0.25, 0.42, 0.75, 1] : mode === 'fail' ? [0.1, 0.3] : [0.1, 0.25, 0.42];
-  for (const part of steps) say({ stage: 'downloading', total: size, completed: Math.round(size * part) });
+  // FAKE_PULL_STEP_MS: pause between lines, so the stream stays open long enough for smoke to continue
+  // past it (the plan's "continue during a download" case needs a stream that outlives the click).
+  const stepMs = Number(process.env.FAKE_PULL_STEP_MS || 0);
+  for (const part of steps) {
+    say({ stage: 'downloading', total: size, completed: Math.round(size * part) });
+    if (stepMs > 0) await new Promise((resolve) => setTimeout(resolve, stepMs));
+  }
   if (mode === 'fail') {
     say({ stage: 'error', error: 'no space left on device' });
     process.exit(1);

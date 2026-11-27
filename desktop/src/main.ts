@@ -731,6 +731,268 @@ async function measureGeometry(browser: BrowserWindow): Promise<string[]> {
 	return failures;
 }
 
+/** The first-run onboarding pass (LET-165), driven exactly like a person would: the settings file is
+ * seeded WITHOUT `setupDone`, so the app must open the step screen; the page may only collect choices
+ * (the fake engine's `calls` list proves nothing was written); the LAST continue performs every write in
+ * main; the fake state's calls are then compared with what the steps showed. The state file is read here
+ * only to inspect that list of calls — never any document. */
+async function smokeOnboarding(browser: BrowserWindow): Promise<{ ok: boolean; detail: string; geometry: string[] }> {
+	const dirs: string[] = [];
+	const stateOf = (): { calls: string[]; detects: number } => {
+		try {
+			const raw = JSON.parse(readFileSync(String(process.env.FAKE_STATE_FILE), 'utf8')) as { calls?: string[]; detects?: number };
+			return { calls: raw.calls ?? [], detects: raw.detects ?? 0 };
+		} catch {
+			return { calls: [], detects: 0 };
+		}
+	};
+	// A scenario: fresh fake state, the env the step needs, no setupDone, then a reload so the boot gate
+	// decides again from scratch. `delete` matters: the env of one scenario must not leak into the next.
+	const scenario = async (env: Record<string, string | undefined>): Promise<void> => {
+		dirs.push(freshFakeState());
+		for (const [name, value] of Object.entries(env)) {
+			if (value === undefined) delete process.env[name];
+			else process.env[name] = value;
+		}
+		seedSettings(false, 'system');
+		const reload = loaded(browser);
+		browser.reload();
+		await reload;
+		await drive(browser, '');
+	};
+	const failures: string[] = [];
+	const check = async (name: string, steps: string): Promise<void> => {
+		if ((await drive(browser, steps)) !== true) failures.push(name);
+	};
+	const walk = async (to: 'model' | 'filing'): Promise<void> => {
+		await drive(browser, `await d.clickBtn('continue');`);
+		if (to === 'filing') return;
+		await drive(browser, `await d.clickBtn('continue');`);
+		await drive(browser, `await d.clickBtn('continue');`);
+	};
+	const wait = async (ms: number): Promise<void> => {
+		await new Promise((resolve) => setTimeout(resolve, ms));
+	};
+
+	// 1) The step screen replaces the sidebar and the four screens; the first step is current and the
+	// middle step is drawn skipped; the library field is read-only and shows the engine's recommendation.
+	await scenario({ FAKE_SCENARIO: 'library', FAKE_MODEL_STATE: 'found' });
+	await check('step screen', String.raw`
+		const li = [...document.querySelectorAll('#setupStepsList li')];
+		const current = li.filter((n) => n.getAttribute('aria-current') === 'step');
+		const field = d.find('#libField');
+		return li.length === 4 && current.length === 1 && current[0] === li[0] && li[2].classList.contains('step-skipped')
+		 && !d.find('#onboardingScreen').hidden && d.find('#sidebar').hidden
+		 && d.find('#overviewScreen').hidden && d.find('#askScreen').hidden && d.find('#filingScreen').hidden && d.find('#settingsScreen').hidden
+		 && d.find('#stepTitle').textContent === 'library location'
+		 && field.readOnly === true && field.value === '~/Documents/library';
+	`);
+
+	// 2) The four steps at both the design's 720px column and the 360px minimum: rule 6 on every step.
+	const geometry: string[] = [];
+	for (const width of [720, 360]) {
+		browser.setSize(width, width < 480 ? 780 : 820);
+		const reload = loaded(browser);
+		browser.reload();
+		await reload;
+		await drive(browser, '');
+		for (let step = 0; step < 4; step += 1) {
+			const geo = (await drive(browser, GEOMETRY)) as { ok: boolean; failures: string[] };
+			geometry.push(...geo.failures.map((f) => `${String(width)}@${String(step)} ${String(f)}`));
+			if (step < 3) await drive(browser, `await d.clickBtn('continue');`);
+		}
+	}
+
+	// 3) The untouched walk: every step kept what the engine showed, and the last continue saved exactly
+	// that (setup save with the recommended library + watch folders, model save of the memory-sized model,
+	// no filing save because no owner was added), then the app opened the overview and remembers setupDone.
+	await scenario({ FAKE_SCENARIO: 'library', FAKE_MODEL_STATE: 'found' });
+	const nothingWritten = stateOf().calls.length === 0;
+	if (!nothingWritten) failures.push('nothing-written-before-continue');
+	await walk('model');
+	await check('model step found', String.raw`
+		const card = d.find('.model-card');
+		return d.find('#stepTitle').textContent === 'model'
+		 && card.querySelector('.pill')?.textContent === 'Ollama found'
+		 && d.find('#stepContinueLabel').textContent === 'start filing'
+		 && d.find('#stepContinue').disabled === false;
+	`);
+	await drive(browser, `await d.clickBtn('start filing');`);
+	const saved = stateOf().calls;
+	const settingsNow = readFileSync(settingsFile, 'utf8');
+	if (!(saved.length === 2 && saved[0] === 'setup save ~/Documents/library ~/Downloads,~/Desktop'
+		&& saved[1] === 'model save ollama qwen3:8b' && !saved.some((c) => c.includes('filing save')))) {
+		failures.push(`untouched-saves ${JSON.stringify(saved)}`);
+	}
+	if (!settingsNow.includes('"setupDone":true')) failures.push('setupDone-not-in-file');
+	await check('lands on overview', String.raw`
+		return d.find('#onboardingScreen').hidden && !d.find('#overviewScreen').hidden && !d.find('#sidebar').hidden;
+	`);
+	const reloadOverview = loaded(browser);
+	browser.reload();
+	await reloadOverview;
+	await check('reloads to overview', String.raw`
+		return d.find('#onboardingScreen').hidden && !d.find('#overviewScreen').hidden;
+	`);
+
+	// 4) The iCloud pick: the note appears only for a folder inside iCloud Drive, and "use the recommended
+	// folder" clears both the path and the note.
+	await scenario({ FAKE_SCENARIO: 'library', FAKE_MODEL_STATE: 'found', FAKE_PICK_FOLDER: '~/Library/Mobile Documents/scans' });
+	await check('icloud pick', String.raw`
+		const hasNote = () => document.querySelector('.icloud-note') !== null;
+		const hasBtn = (label) => [...document.querySelectorAll('.btn')].some((b) => b.textContent.trim() === label);
+		d.btn('choose folder').click(); await d.settle();
+	 return d.find('#libField').value === '~/Library/Mobile Documents/scans' && hasNote() && hasBtn('use the recommended folder');
+	`);
+	await drive(browser, `await d.clickBtn('use the recommended folder');`);
+	await check('recommended clears the note', String.raw`
+		return d.find('#libField').value === '~/Documents/library' && document.querySelector('.icloud-note') === null;
+	`);
+
+	// 5) Back keeps the toggles: turning one folder off, going back to step 1 and forward again must keep
+	// the switch off (the choices live in the page until the last continue).
+	await scenario({ FAKE_SCENARIO: 'library', FAKE_MODEL_STATE: 'found' });
+	await drive(browser, `await d.clickBtn('continue');`);
+	await check('watch rows + muted lines', String.raw`
+		const rows = [...document.querySelectorAll('.watch-row')];
+		const off = (n) => { n.checked = false; n.dispatchEvent(new Event('input', { bubbles: true })); };
+		const paths = rows.map((r) => r.querySelector('.watch-note')?.textContent);
+		const muted = [...document.querySelectorAll('.watch-muted')].map((n) => n.textContent);
+		if (!(rows.length === 2 && JSON.stringify(paths) === JSON.stringify(['~/Downloads', '~/Desktop'])
+		 && rows.every((r) => r.querySelector('.switch')?.checked === true)
+		 && muted.includes('Rag docs never reads its own library, even inside a watched folder. Your originals are never moved or changed.')
+		 && muted.includes('Rag docs starts watching these folders in a later update.'))) return false;
+	 off(rows[0].querySelector('.switch'));
+	 await d.settle();
+	 return [...document.querySelectorAll('.watch-row .switch')][0].checked === false;
+	`);
+	await drive(browser, `d.find('#stepBack').click(); await d.settle();`);
+	await check('back to step 1', String.raw`return d.find('#stepTitle').textContent === 'library location';`);
+	await drive(browser, `await d.clickBtn('continue');`);
+	await check('toggle kept after back', String.raw`return [...document.querySelectorAll('.watch-row .switch')][0].checked === false;`);
+
+	// 6) Owners: an added owner is a row under the field with a 44px remove button, and the last continue
+	// performs the filing save with it.
+	await scenario({ FAKE_SCENARIO: 'library', FAKE_MODEL_STATE: 'found' });
+	await walk('filing');
+	await drive(browser, `await d.type('#ownerField', 'Example Person');`);
+	await drive(browser, `d.btn('add owner').click(); await d.settle();`);
+	await check('owner row', String.raw`
+		const rows = [...document.querySelectorAll('.owner-row')];
+		const remove = rows[0]?.querySelector('.btn');
+	 return rows.length === 1 && rows[0].querySelector('.row-title')?.textContent === 'Example Person'
+		 && remove?.textContent.trim() === 'remove' && remove.getBoundingClientRect().height >= 43.5;
+	`);
+	await drive(browser, `await d.clickBtn('continue');`);
+	await walk('model');
+	await drive(browser, `await d.clickBtn('start filing');`);
+	if (!stateOf().calls.some((c) => c.startsWith('filing save'))) failures.push('owner-not-saved');
+
+	// 7) Skip keeps the lists: skipping the owners step sends no owners, so no filing save follows.
+	await scenario({ FAKE_SCENARIO: 'library', FAKE_MODEL_STATE: 'found' });
+	await walk('filing');
+	await drive(browser, `d.btn('skip').click(); await d.settle();`);
+	await drive(browser, `await d.clickBtn('start filing');`);
+	if (stateOf().calls.some((c) => c.includes('filing save'))) failures.push('skip-still-saved-filing');
+
+	// 8) Not-found: the step re-checks itself (the fake state counts the detects), and the last continue
+	// is offered as "set up later" instead of a lie.
+	await scenario({ FAKE_SCENARIO: 'library', FAKE_MODEL_STATE: 'not-found' });
+	await walk('model');
+	await check('not-found', String.raw`
+	 return d.find('.model-card').querySelector('.pill')?.textContent === 'no runtime found'
+		 && d.find('#stepContinueLabel').textContent === 'set up later';
+	`);
+	const detectsBefore = stateOf().detects;
+	await wait(3600);
+	if (stateOf().detects < detectsBefore + 1) failures.push('not-found-does-not-recheck');
+
+	// 9) Download: the bar reads the engine's numbers, 42% is reachable, cancel re-detects; a failed pull
+	// shows the engine's sentence with "try again"; a finished pull becomes ready only after the engine's
+	// own completion probe answered (the board's answer 3).
+	await scenario({ FAKE_SCENARIO: 'library', FAKE_MODEL_STATE: 'found-empty', FAKE_PULL: 'hold-42' });
+	await walk('model');
+	await check('download offered', String.raw`
+		const hasBtn = (label) => [...document.querySelectorAll('.btn')].some((b) => b.textContent.trim() === label);
+	 return d.find('.model-card').querySelector('.pill')?.textContent === 'Ollama found' && hasBtn('download qwen3:8b');
+	`);
+	await drive(browser, `d.btn('download qwen3:8b').click();`);
+	const barAt42 = await drive(browser, String.raw`
+		for (let i = 0; i < 90; i += 1) {
+			const p = document.querySelector('.progress');
+			if (p && p.getAttribute('aria-valuenow') === '42') break;
+			await new Promise((r) => setTimeout(r, 100));
+		}
+	 const p = document.querySelector('.progress');
+	 return !!p && p.getAttribute('aria-valuenow') === '42' && d.find('.model-card').querySelector('.pill')?.textContent === 'downloading model';
+	`);
+	if (barAt42 !== true) failures.push('download-bar-42');
+	await drive(browser, `d.btn('cancel download').click(); await d.settle();`);
+	await check('cancel re-detects', String.raw`
+		return document.querySelector('.progress') === null && d.find('.model-card').querySelector('.pill')?.textContent === 'Ollama found';
+	`);
+
+	await scenario({ FAKE_SCENARIO: 'library', FAKE_MODEL_STATE: 'found-empty', FAKE_PULL: 'fail' });
+	await walk('model');
+	await drive(browser, `d.btn('download qwen3:8b').click();`);
+	await check('failed download', String.raw`
+		for (let i = 0; i < 60; i += 1) {
+			if (d.find('.model-card').querySelector('.pill')?.textContent === 'download failed') break;
+		 await new Promise((r) => setTimeout(r, 100));
+		}
+		const card = d.find('.model-card');
+		const hasBtn = (label) => [...card.querySelectorAll('.btn')].some((b) => b.textContent.trim() === label);
+	 return card.querySelector('.pill')?.textContent === 'download failed'
+		 && card.querySelector('.pill')?.classList.contains('danger') && hasBtn('try again')
+		 && card.textContent.includes('no space left on device');
+	`);
+
+	await scenario({ FAKE_SCENARIO: 'library', FAKE_MODEL_STATE: 'found-empty', FAKE_PULL: 'ok' });
+	await walk('model');
+	await drive(browser, `d.btn('download qwen3:8b').click();`);
+	await check('ready after pull', String.raw`
+		for (let i = 0; i < 90; i += 1) {
+			if (d.find('.model-card').querySelector('.pill')?.textContent === 'ready') break;
+			await new Promise((r) => setTimeout(r, 100));
+		}
+		const card = d.find('.model-card');
+	 return card.querySelector('.pill')?.textContent === 'ready' && card.textContent.includes('answered a test question');
+	`);
+
+	// 10) The shared block: the model triage mail chose wins, and continuing saves no model of our own.
+	await scenario({ FAKE_SCENARIO: 'library', FAKE_MODEL_STATE: 'shared' });
+	await walk('model');
+	await check('shared step', String.raw`
+		return d.find('.model-card').querySelector('.pill')?.textContent === 'using the model from triage mail';
+	`);
+	await drive(browser, `await d.clickBtn('start filing');`);
+	if (stateOf().calls.some((c) => c.includes('model save'))) failures.push('shared-saved-a-model');
+
+	// 11) "You can go on": continuing while the download is still running must NOT write the shared file
+	// mid-stream; main saves the choice the moment the job reports success.
+	await scenario({ FAKE_SCENARIO: 'library', FAKE_MODEL_STATE: 'found-empty', FAKE_PULL: 'ok', FAKE_PULL_STEP_MS: '900' });
+	await walk('model');
+	await drive(browser, `d.btn('download qwen3:8b').click();`);
+	await drive(browser, `await d.clickBtn('start filing');`);
+	const savedAfterPull = stateOf().calls.some((c) => c.includes('model save'));
+	if (!savedAfterPull) failures.push('continue-during-pull: no model save after success');
+	if (stateOf().calls.filter((c) => c.includes('model save')).length !== 1) failures.push('continue-during-pull: saved twice');
+
+	// 12) Keyboard: every onboarding control is a real button or input, focusable, and only continue may
+	// be disabled.
+	await scenario({ FAKE_SCENARIO: 'library', FAKE_MODEL_STATE: 'found' });
+	await walk('model');
+	await check('keyboard controls', String.raw`
+		const nodes = [...document.querySelectorAll('#onboardingScreen button, #onboardingScreen input')];
+	 const disabled = nodes.filter((n) => n.getAttribute('aria-disabled') === 'true');
+	 return nodes.length >= 4 && nodes.every((n) => (n.tagName === 'BUTTON' || n.tagName === 'INPUT') && n.tabIndex >= 0)
+		 && disabled.every((n) => n.id === 'stepContinue');
+	`);
+
+	for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
+	return { ok: failures.length === 0, detail: failures.join(' | '), geometry };
+}
+
 type SmokeChecks = {
 	libraryRows: number;
 	answered: boolean;
@@ -779,6 +1041,8 @@ type SmokeChecks = {
 	titleNarrow?: boolean;
 	appearanceLive?: boolean;
 	openAtLoginOk?: boolean;
+	onboardingOk: boolean;
+	onboardingDetail?: string;
 		openedPath?: boolean;
 		geometry?: string[];
 		diag?: string;
@@ -1166,14 +1430,23 @@ async function runSmoke(): Promise<void> {
 		// screens at both widths, with the add panel showing on ask. Failures show up in the SMOKE line.
 		result.geometry = await measureGeometry(browser);
 
+		// First-run onboarding (LET-165): the step screen instead of the four screens, the untouched walk,
+		// owners, and the model step (not-found re-check, 42% + cancel, failure, ready, shared, continuing
+		// during a download). Its layout failures join `geometry`; its own failures name the check.
+		const ob = await smokeOnboarding(browser);
+		result.onboardingOk = ob.ok;
+		result.onboardingDetail = ob.detail;
+		result.geometry.push(...ob.geometry);
+
 		const title = browser.getTitle();
 		const own = isOwnFile(browser.webContents.getURL(), INDEX_URL);
 		const ok = own && title === PRODUCT_NAME && result.libraryRows > 0 && result.answered && result.folderRows > 0 && result.notice && result.moves > 0 && result.filed === 'filed' && result.persisted === true && result.raceSafe === true && result.titleWide === true && result.titleNarrow === true && result.appearanceLive === true && result.openAtLoginOk === true
 			&& result.dangerPill && result.sizeShown && result.searchRows === 2 && result.searchMeta && result.cleared === result.libraryRows && result.addDone && result.addAdded && result.addDuplicate && result.addFailed && result.grew && result.pageCited && result.openButtons === 2 && result.openedPath && result.vehiclesCounts && result.movesToVehicles && result.noUnsorted && result.movesToHousehold && result.sharedShownHousehold && result.sharedRenamedBack && result.applied === 'filed' && (result.geometry ?? []).length === 0
 			&& result.bootOverview && result.overviewFive && result.previewRoute && result.clearRoutes && result.keyboardOk && result.clearOk
+			&& result.onboardingOk === true
 			&& result.addRefreshOk && result.dryRunFailOk && result.dryRunRetryOk && result.filingFailOk && result.filingRetryOk && result.noDatabaseOk && result.outdatedOk && result.stalePreviewOk;
 		if (ok) {
-			console.error(`SMOKE OK: library ${result.libraryRows} rows (big-scan pill + MB sizes), search "loan" -> 2 rows -> cleared, add 3 files -> added/duplicate/failed + library grew, answer cites p. 4 and an open button handed the located path to main, rename Car->Vehicles counts 2 documents and previews moves to Vehicles (none to unsorted), shared owner "Household" re-files; stale dry-run after a save refused; app name centred on ask/filing/settings at 1200px and 360px; appearance live (dark/light/system); open-at-login reflects the real login item; layout checks clean (settings article, library search top, AppBar 132px clear, 44px targets) on ask/filing/settings at 1200px and 360px`);
+			console.error(`SMOKE OK: library ${result.libraryRows} rows (big-scan pill + MB sizes), search "loan" -> 2 rows -> cleared, add 3 files -> added/duplicate/failed + library grew, answer cites p. 4 and an open button handed the located path to main, rename Car->Vehicles counts 2 documents and previews moves to Vehicles (none to unsorted), shared owner "Household" re-files; stale dry-run after a save refused; app name centred on ask/filing/settings at 1200px and 360px; appearance live (dark/light/system); open-at-login reflects the real login item; onboarding steps driven end-to-end (nothing written until the last continue, owners add/skip, model not-found re-check, 42% download + cancel, failed pull, ready, shared, continue during a pull); layout checks clean (settings article, library search top, AppBar 132px clear, 44px targets, onboarding column) on ask/filing/settings at 1200px and 360px and on every setup step at 720px and 360px`);
 			code = 0;
 		} else {
 			console.error(`SMOKE FAIL: own=${own} title=${title} checks=${JSON.stringify(result)}`);
