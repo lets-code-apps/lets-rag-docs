@@ -322,7 +322,7 @@ mod tests {
         assert!(!answering(&llm(&format!("{}/v1", server.uri()))).await);
 
         // An empty model is never asked for: no request would name a model to run.
-        let blank = llm("http://127.0.0.1:11434/v1");
+        let mut blank = llm("http://127.0.0.1:11434/v1");
         blank.model = String::new();
         assert!(!answering(&blank).await);
 
@@ -400,7 +400,10 @@ mod tests {
         // The seam: build the Report from fixed values, never the clock or the network.
         let report = Report {
             version: 1,
-            model: Model { reachable: true, answering: None },
+            model: Model {
+                reachable: true,
+                answering: None,
+            },
             last_sync: Some("2024-02-29T00:00:00Z".to_string()),
         };
         let json: String = serde_json::to_string(&report).unwrap();

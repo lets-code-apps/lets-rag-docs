@@ -253,13 +253,13 @@ impl Config {
 #[derive(Deserialize, Default)]
 pub(crate) struct Written {
     #[serde(default)]
-    llm: WrittenLlm,
+    pub(crate) llm: WrittenLlm,
 }
 
 #[derive(Deserialize, Default)]
 pub(crate) struct WrittenLlm {
-    base_url: Option<String>,
-    model: Option<String>,
+    pub(crate) base_url: Option<String>,
+    pub(crate) model: Option<String>,
 }
 
 /// Replaces a leading `~` with `$HOME`. The shell does this for arguments, not for paths in a file.

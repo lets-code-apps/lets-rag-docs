@@ -21,10 +21,10 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::ask::is_local_or_private_host;
-use anyhow::anyhow;
 use crate::config::{Config, Written};
 use crate::shared_model;
 use crate::status::rfc3339_utc;
+use anyhow::anyhow;
 
 /// Where Ollama listens by default.
 pub const OLLAMA_URL: &str = "http://127.0.0.1:11434";
@@ -55,7 +55,7 @@ pub fn default_endpoints() -> Vec<Endpoint> {
             runtime: "lmstudio".to_string(),
             url: LM_STUDIO_URL.to_string(),
         },
-    ];
+    ]
 }
 
 /// What one probe learned about one endpoint.
@@ -97,10 +97,7 @@ pub struct Detection {
 /// Probes every endpoint (`tokio::join!` for the two defaults) and reports the shared
 /// file the caller passed in - never `$HOME` (paths come from the caller, so tests
 /// decide the path).
-pub async fn detect(
-    endpoints: Vec<Endpoint>,
-    shared: shared_model::SharedModel,
-) -> Detection {
+pub async fn detect(endpoints: Vec<Endpoint>, shared: shared_model::SharedModel) -> Detection {
     let client = probe_client();
 
     let runtimes: Vec<Found> = match endpoints.len() {
@@ -118,7 +115,7 @@ pub async fn detect(
         _ => {
             let mut items: Vec<Found> = Vec::new();
             for endpoint in endpoints.iter() {
-                items.push(probe_endpoint(&client, &endpoint).await);
+                items.push(probe_endpoint(&client, endpoint).await);
             }
             items
         }
@@ -131,11 +128,11 @@ pub async fn detect(
         Some(base_url) => {
             let reachable = probe_listing(&client, base_url.to_string()).await.is_ok();
             Some(SharedBlock {
-                runtime: shared.runtime.clone().unwrap_or(String::new()),
-                url: shared.url.clone().unwrap_or(String::new()),
+                runtime: shared.runtime.clone().unwrap_or_default(),
+                url: shared.url.clone().unwrap_or_default(),
                 // `chat_model` borrows from `shared`; this field owns a copy.
                 model: shared.chat_model().unwrap_or("").to_string(),
-                set_by: shared.set_by.clone().unwrap_or(String::new()),
+                set_by: shared.set_by.clone().unwrap_or_default(),
                 reachable,
             })
         }
@@ -154,7 +151,7 @@ pub fn probe_client() -> reqwest::Client {
         .timeout(PROBE_TIMEOUT)
         .redirect(reqwest::redirect::Policy::none())
         .build()
-        .expect("a basic HTTP client always builds");
+        .expect("a basic HTTP client always builds")
 }
 
 /// The HTTP client for `model pull`: same no-redirect rule, but **no total timeout**.
@@ -168,7 +165,7 @@ pub fn download_client() -> reqwest::Client {
         .connect_timeout(PROBE_TIMEOUT)
         .redirect(reqwest::redirect::Policy::none())
         .build()
-        .expect("a basic HTTP client always builds");
+        .expect("a basic HTTP client always builds")
 }
 
 /// One endpoint: `GET {url}/v1/models`. Both Ollama and LM Studio answer that OpenAI-style
@@ -198,10 +195,7 @@ async fn probe_endpoint(client: &reqwest::Client, endpoint: &Endpoint) -> Found 
 }
 
 /// `GET {url}/v1/models` under the timeout: the status and body, or the error text.
-async fn probe_listing(
-    client: &reqwest::Client,
-    url: String,
-) -> Result<(u16, String), String> {
+async fn probe_listing(client: &reqwest::Client, url: String) -> Result<(u16, String), String> {
     let response = match client.get(models_url(url.as_str())).send().await {
         Err(error) => return Err(describe_error(error)),
         Ok(response) => response,
@@ -241,13 +235,21 @@ fn parse_model_list(status: u16, body: String) -> (Vec<String>, Vec<String>) {
     let ids: Vec<String> = match status {
         200..=299 => match serde_json::from_str::<Listing>(body.as_str()) {
             Err(_) => Vec::new(),
-            Ok(list) => list.data.into_iter().map(|entry| entry.id.to_string()).collect(),
+            Ok(list) => list
+                .data
+                .into_iter()
+                .map(|entry| entry.id.to_string())
+                .collect(),
         },
         _ => Vec::new(),
     };
     // Embedding models are listed but cannot answer chat; the desktop needs both lists
     // to tell "found, nothing usable" from "nothing installed".
-    let usable = ids.clone().into_iter().filter(|id| !id.contains("embed")).collect();
+    let usable = ids
+        .clone()
+        .into_iter()
+        .filter(|id| !id.contains("embed"))
+        .collect();
     (ids, usable)
 }
 
@@ -261,7 +263,7 @@ fn describe_error(error: reqwest::Error) -> String {
     while let Some(cause) = root.source() {
         root = cause;
     }
-    root.to_string();
+    root.to_string()
 }
 
 // ------------------------------------------------------------------- pull
@@ -282,7 +284,9 @@ pub async fn start_pull(
     model: String,
 ) -> Result<reqwest::Response, String> {
     let body = json!({"model": model}).to_string();
-    let request = client.post(format!("{}/api/pull", url.trim_end_matches('/'))).body(body);
+    let request = client
+        .post(format!("{}/api/pull", url.trim_end_matches('/')))
+        .body(body);
     let response = match request.send().await {
         Err(error) => return Err(describe_error(error)),
         Ok(response) => response,
@@ -377,6 +381,10 @@ pub fn normalise_pull_line(raw: String) -> Value {
 /// finished model, so the caller checks these flags rather than trusting "the loop
 /// ended".
 pub struct PullStream {
+    /// The collected normalised lines, kept so the library tests can assert on a whole stream
+    /// without a real server. The CLI's `pull` streams via `emit` and decides the exit code from
+    /// the three flags below, so it never reads this field.
+    #[allow(dead_code)] // read by the library tests (consume_pull_stream)
     pub lines: Vec<Value>,
     /// A `{"stage": "success"}` line arrived: the download is complete.
     pub saw_success: bool,
@@ -458,6 +466,7 @@ pub async fn consume_pull_stream_to<Emit: FnMut(Value)>(
 
 /// The flags-only form used by the library tests: read the whole stream and collect the
 /// lines, handing nothing over as it arrives (the emit callback does nothing).
+#[allow(dead_code)] // convenience wrapper exercised only by the unit tests
 pub async fn consume_pull_stream(response: reqwest::Response) -> PullStream {
     consume_pull_stream_to(response, |_line: Value| {}).await
 }
@@ -509,8 +518,18 @@ pub fn ensure_local(url: String) -> Result<String, String> {
 /// SQLite (`rusqlite`, already a dependency): `SELECT unixepoch()` answers with the
 /// same UTC seconds the `status` command formats.
 pub fn now_seconds() -> u64 {
-    let conn: rusqlite::Connection = rusqlite::Connection::open_in_memory();
-    let seconds: i64 = conn.query_scalar("SELECT unixepoch()").unwrap_or(0);
+    // `open_in_memory()` returns a `Result` and rusqlite 0.41 has no `query_scalar`,
+    // so read the one value with `query_row` (the same shape `db.rs` uses). Any failure
+    // here falls back to 0 rather than panicking: a missing timestamp is a cosmetic
+    // detail of the shared file, never a reason to abort a save.
+    let conn: rusqlite::Connection = match rusqlite::Connection::open_in_memory() {
+        Err(_) => return 0,
+        Ok(conn) => conn,
+    };
+    let seconds: i64 = match conn.query_row("SELECT unixepoch()", [], |row| row.get(0)) {
+        Err(_) => return 0,
+        Ok(value) => value,
+    };
     if seconds < 0 {
         return 0;
     }
@@ -546,12 +565,6 @@ pub fn save_to_shared(
 
 // ------------------------------------------------------------------- CLI handlers
 
-/// What a `model` command prints: the JSON for the app and the short text for people.
-struct Outcome {
-    json: Value,
-    text: String,
-}
-
 /// `model detect --json`: probe the endpoints and report what answers, plus the shared
 /// file and this app's own effective model (`config`). A refusal (a non-local `--url`)
 /// is `{ok:false,error}` with exit 1.
@@ -584,7 +597,10 @@ pub async fn detect_cmd(
     let shared_file: shared_model::SharedModel = shared_model::read(shared);
     let detection = detect(endpoints, shared_file).await;
     if json {
-        println!("{}", serde_json::to_string(&detect_json(&detection, config, path))?);
+        println!(
+            "{}",
+            serde_json::to_string(&detect_json(&detection, config, path))?
+        );
     } else {
         println!("{}", detect_text(&detection));
     }
@@ -622,10 +638,20 @@ fn detect_text(detection: &Detection) -> String {
             } else {
                 format!("usable: {}", found.usable.join(", "))
             };
-            lines.push(format!("{runtime} at {url} reachable, {usable}", runtime = found.runtime, url = found.url, usable = usable));
+            lines.push(format!(
+                "{runtime} at {url} reachable, {usable}",
+                runtime = found.runtime,
+                url = found.url,
+                usable = usable
+            ));
         } else {
             let why = found.error.clone().unwrap_or("unreachable".to_string());
-            lines.push(format!("{runtime} at {url} not reachable ({why})", runtime = found.runtime, url = found.url, why = why));
+            lines.push(format!(
+                "{runtime} at {url} not reachable ({why})",
+                runtime = found.runtime,
+                url = found.url,
+                why = why
+            ));
         }
     }
     if let Some(block) = detection.shared.as_ref() {
@@ -699,15 +725,13 @@ pub fn save_cmd(
     // strings to the write.
     let record: Value = save_json(&runtime, &url, &model);
     let text: String = format!("saved {} ({}) at {}", model, runtime, url);
-    match save_to_shared(shared, runtime, url, model) {
-        Err(reason) => {
-            if json {
-                println!("{}", failure_json(anyhow!(reason)));
-                std::process::exit(1);
-            }
-            return Err(anyhow!(reason));
+    // A refusal (the local rule or the shared-file validation) leaves the file untouched.
+    if let Err(reason) = save_to_shared(shared, runtime, url, model) {
+        if json {
+            println!("{}", failure_json(anyhow!(reason)));
+            std::process::exit(1);
         }
-        Ok(()) => {},
+        return Err(anyhow!(reason));
     }
     if json {
         println!("{}", serde_json::to_string(&record)?);
@@ -723,11 +747,7 @@ pub fn save_cmd(
 /// a line, and the command exits 1 once the stream ends if one was seen. A server
 /// that refuses the request outright (a 404 from LM Studio) is a one-sentence failure,
 /// printed as the usual failure object.
-pub async fn pull(
-    url: Option<String>,
-    model: String,
-    json: bool,
-) -> anyhow::Result<()> {
+pub async fn pull(url: Option<String>, model: String, _json: bool) -> anyhow::Result<()> {
     let base: String = match url {
         None => OLLAMA_URL.to_string(),
         Some(addr) => match ensure_local(addr.clone()) {
@@ -783,4 +803,567 @@ pub async fn pull(
 /// The failure shape the app reads when a command could not run.
 fn failure_json(error: anyhow::Error) -> Value {
     json!({"ok": false, "error": format!("{error:#}")})
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::*;
+
+    // Fixture lock shared with the TS tests and the fake engine: `testdata/desktop/<name>.json`
+    // holds the exact bytes the app emits; LOCK_FIXTURES=1 rewrites them.
+    fn lock(name: &str, actual: &str) {
+        let fixture: PathBuf = PathBuf::from("testdata/desktop").join(name);
+        if std::env::var("LOCK_FIXTURES")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+        {
+            std::fs::create_dir_all(fixture.parent().unwrap()).unwrap();
+            std::fs::write(&fixture, actual).unwrap();
+            return;
+        }
+        let want: String = std::fs::read_to_string(&fixture)
+            .expect("fixture missing: run the tests once with LOCK_FIXTURES=1");
+        assert_eq!(
+            actual,
+            want.as_str(),
+            "JSON shape changed (or the fixture is stale)"
+        );
+    }
+
+    // --- url & the local-only rule ---
+
+    #[test]
+    fn models_url_adds_v1_once() {
+        assert_eq!(
+            models_url("http://127.0.0.1:11434"),
+            "http://127.0.0.1:11434/v1/models"
+        );
+        assert_eq!(
+            models_url("http://127.0.0.1:11434/"),
+            "http://127.0.0.1:11434/v1/models"
+        );
+        // Already names /v1: do not add it a second time.
+        assert_eq!(
+            models_url("http://127.0.0.1:11434/v1"),
+            "http://127.0.0.1:11434/v1/models"
+        );
+    }
+
+    #[test]
+    fn ensure_local_refuses_remote_urls() {
+        assert!(ensure_local("http://127.0.0.1:11434".to_string()).is_ok());
+        assert!(ensure_local("http://localhost:1234".to_string()).is_ok());
+        assert!(
+            ensure_local("http://8.8.8.8".to_string()).is_err(),
+            "a public host"
+        );
+        assert!(
+            ensure_local("https://127.0.0.1:11434".to_string()).is_err(),
+            "this reqwest has no TLS, so https is not an http url"
+        );
+        assert!(
+            ensure_local("ftp://127.0.0.1".to_string()).is_err(),
+            "not a page url"
+        );
+    }
+
+    // --- model list & the usable split ---
+
+    #[test]
+    fn embedding_filter_splits_usable_from_listed() {
+        let body: String =
+            "{\"data\":[{\"id\":\"qwen3:8b\"},{\"id\":\"bge-m3-embed\"},{\"id\":\"nomic-embed-text\"}]}"
+                .to_string();
+        let (models, usable) = parse_model_list(200, body.as_str().to_string());
+        assert_eq!(
+            models,
+            vec![
+                "qwen3:8b".to_string(),
+                "bge-m3-embed".to_string(),
+                "nomic-embed-text".to_string(),
+            ]
+        );
+        // An embedding id is listed but cannot answer chat, so it is not usable for documents.
+        assert_eq!(usable, vec!["qwen3:8b".to_string()]);
+
+        // A non-2xx answer carries no list (reachability is the status, not the body).
+        let (none, none_usable) = parse_model_list(500, body.as_str().to_string());
+        assert!(none.is_empty() && none_usable.is_empty());
+    }
+
+    // --- pull line normalisation (pure) ---
+
+    #[test]
+    fn normalise_pull_line_maps_ollama_stages() {
+        assert_eq!(
+            normalise_pull_line("{\"status\":\"pulling manifest\"}".to_string()),
+            json!({"stage": "pulling manifest"})
+        );
+        assert_eq!(
+            normalise_pull_line(
+                "{\"status\":\"downloading abc: 42%\",\"completed\":1024,\"total\":2048}"
+                    .to_string()
+            ),
+            json!({"stage": "downloading", "total": 2048, "completed": 1024})
+        );
+        assert_eq!(
+            normalise_pull_line("{\"status\":\"success\"}".to_string()),
+            json!({"stage": "success"})
+        );
+        // An error line wins and carries the reason.
+        assert_eq!(
+            normalise_pull_line("{\"error\":\"manifest not found\"}".to_string()),
+            json!({"stage": "error", "error": "manifest not found"})
+        );
+        // Not JSON at all: never dropped, surfaced as an "other" line.
+        assert_eq!(
+            normalise_pull_line("hello".to_string()),
+            json!({"stage": "other", "status": "hello"})
+        );
+    }
+
+    #[test]
+    fn drain_lines_carries_the_tail_across_chunks() {
+        // One JSON line split over two chunks. The first chunk holds no whole line: it returns
+        // an empty set plus the unfinished tail. `drain_lines` does not remember the tail - the
+        // CALLER rejoins it with the next chunk, which is the ownership hand-off the by-value
+        // signature is built for.
+        let first: Vec<u8> = "{\"s\":".to_string().as_bytes().to_vec();
+        let (complete1, tail1) = drain_lines(first);
+        assert!(complete1.is_empty(), "no whole line in the first chunk");
+        assert_eq!(tail1, "{\"s\":".to_string().as_bytes().to_vec());
+
+        // The caller appends the next chunk onto the kept tail; now both lines are whole.
+        let next: Vec<u8> = "\"a\"}\n{\"s\":\"b\"}\n".to_string().as_bytes().to_vec();
+        let mut combined: Vec<u8> = tail1.clone();
+        combined.extend(next);
+        let (complete2, tail2) = drain_lines(combined);
+        assert_eq!(
+            complete2,
+            vec!["{\"s\":\"a\"}".to_string(), "{\"s\":\"b\"}".to_string(),]
+        );
+        assert!(tail2.is_empty(), "the joined buffer ended on a newline");
+    }
+
+    #[test]
+    fn pull_stream_failed_covers_every_failure_mode() {
+        let ok = PullStream {
+            lines: Vec::new(),
+            saw_success: true,
+            saw_error: false,
+            read_failed: false,
+        };
+        assert!(
+            !pull_stream_failed(ok),
+            "a confirmed success is not a failure"
+        );
+        let read = PullStream {
+            lines: Vec::new(),
+            saw_success: true,
+            saw_error: false,
+            read_failed: true,
+        };
+        assert!(pull_stream_failed(read), "the body read failed mid-stream");
+        let err = PullStream {
+            lines: Vec::new(),
+            saw_success: false,
+            saw_error: true,
+            read_failed: false,
+        };
+        assert!(
+            pull_stream_failed(err),
+            "the server reported an error stage"
+        );
+        let cut = PullStream {
+            lines: Vec::new(),
+            saw_success: false,
+            saw_error: false,
+            read_failed: false,
+        };
+        assert!(
+            pull_stream_failed(cut),
+            "the stream ended before ever reaching success"
+        );
+    }
+
+    // --- streaming a pull against a local server (wiremock) ---
+
+    #[tokio::test]
+    async fn a_pull_stream_ends_in_normalised_lines() {
+        let server = MockServer::start().await;
+        let ndjson: String =
+            "{\"status\":\"pulling manifest\"}\n{\"status\":\"downloading abc: 42%\",\"completed\":1024,\"total\":2048}\n{\"status\":\"success\"}\n"
+                .to_string();
+        Mock::given(method("POST"))
+            .and(path("/api/pull"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(ndjson))
+            .mount(&server)
+            .await;
+        let response = start_pull(
+            download_client(),
+            server.uri().to_string(),
+            "qwen3:8b".to_string(),
+        )
+        .await;
+        assert!(response.is_ok(), "a 200 pull request yields a stream");
+        let stream = consume_pull_stream(response.unwrap()).await;
+        assert_eq!(stream.lines.len(), 3, "three normalised lines");
+        let last_stage: String = stream
+            .lines
+            .get(2)
+            .expect("third line")
+            .get("stage")
+            .and_then(|s| s.as_str())
+            .unwrap_or("")
+            .to_string();
+        assert_eq!(last_stage, "success");
+        assert!(!pull_stream_failed(stream), "the server confirmed success");
+    }
+
+    #[tokio::test]
+    async fn consume_pull_stream_marks_an_incomplete_body_as_not_done() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/pull"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "{\"status\":\"downloading abc: 10%\",\"completed\":1,\"total\":100}\n",
+            ))
+            .mount(&server)
+            .await;
+        let response = start_pull(
+            download_client(),
+            server.uri().to_string(),
+            "qwen3:8b".to_string(),
+        )
+        .await;
+        let stream = consume_pull_stream(response.unwrap()).await;
+        assert!(!stream.saw_success, "no success stage in the body");
+        assert!(
+            pull_stream_failed(stream),
+            "a body that stopped early is not a finished model"
+        );
+    }
+
+    #[tokio::test]
+    async fn consume_pull_stream_hands_each_line_over_as_it_arrives() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/pull"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(
+                    "{\"status\":\"pulling manifest\"}\n{\"status\":\"success\"}\n",
+                ),
+            )
+            .mount(&server)
+            .await;
+        let response = start_pull(
+            download_client(),
+            server.uri().to_string(),
+            "qwen3:8b".to_string(),
+        )
+        .await;
+        // The CLI's live-progress path: every line is handed to `emit` as the stream delivers it.
+        let mut delivered: Vec<String> = Vec::new();
+        let collector = |line: Value| {
+            let stage: String = line
+                .get("stage")
+                .and_then(|s| s.as_str())
+                .unwrap_or("")
+                .to_string();
+            delivered.push(stage);
+        };
+        let stream = consume_pull_stream_to(response.unwrap(), collector).await;
+        assert_eq!(
+            delivered,
+            vec!["pulling manifest".to_string(), "success".to_string()]
+        );
+        assert_eq!(
+            stream.lines.len(),
+            delivered.len(),
+            "emit saw exactly the stream's lines"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_server_without_a_pull_endpoint_gives_one_sentence() {
+        // LM Studio has no /api/pull: a non-2xx request becomes a one-sentence failure, not a stream.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/pull"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("404 Not Found"))
+            .mount(&server)
+            .await;
+        match start_pull(
+            download_client(),
+            server.uri().to_string(),
+            "qwen3:8b".to_string(),
+        )
+        .await
+        {
+            Err(reason) => assert_eq!(reason.trim(), "404 Not Found"),
+            Ok(_) => panic!("a 404 from /api/pull must be a failure, not a stream"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_closed_port_is_not_found_fast() {
+        // Nothing is listening: the download client's connect_timeout (2 s) still bounds this.
+        let started = std::time::Instant::now();
+        assert!(
+            start_pull(
+                download_client(),
+                "http://127.0.0.1:1".to_string(),
+                "qwen3:8b".to_string()
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            std::time::Instant::now() - started < std::time::Duration::from_secs(10),
+            "the download client still fails a dead port fast"
+        );
+    }
+
+    // --- detect against a fake server (wiremock) ---
+
+    #[tokio::test]
+    async fn detect_lists_models_and_usable_from_a_fake_server() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"data": [{"id": "qwen3:8b"}, {"id": "bge-m3-embed"}]})),
+            )
+            .mount(&server)
+            .await;
+        let endpoint = Endpoint {
+            runtime: "custom".to_string(),
+            url: server.uri().to_string(),
+        };
+        let detection = detect(vec![endpoint], shared_model::SharedModel::default()).await;
+        assert_eq!(detection.runtimes.len(), 1);
+        let found = detection.runtimes.first().expect("one endpoint probed");
+        assert!(found.reachable, "the fake server answers the listing");
+        assert_eq!(
+            found.usable,
+            vec!["qwen3:8b".to_string()],
+            "the embedding id is listed but not usable"
+        );
+        assert_eq!(found.models.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn the_shared_block_carries_reachable() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": []})))
+            .mount(&server)
+            .await;
+        let shared = shared_model::SharedModel {
+            runtime: Some("ollama".to_string()),
+            url: Some(server.uri().to_string()),
+            model: Some("qwen3:8b".to_string()),
+            set_by: Some("triage mail".to_string()),
+            updated: Some("2026-11-25T09:00:00Z".to_string()),
+        };
+        // No endpoints to probe; only the shared block is reported.
+        let block = detect(Vec::new(), shared)
+            .await
+            .shared
+            .expect("a complete shared file gives a block");
+        assert!(block.reachable, "the stored url answers now");
+        assert_eq!(block.model, "qwen3:8b".to_string());
+        assert_eq!(block.set_by, "triage mail".to_string());
+
+        // The other app chose it, but its server is off: the block still appears, `reachable` false.
+        let off = detect(
+            Vec::new(),
+            shared_with_url("http://127.0.0.1:1".to_string()),
+        )
+        .await
+        .shared
+        .expect("block present even when the server is off");
+        assert!(!off.reachable, "a dead stored url is data, not an error");
+    }
+
+    fn shared_with_url(url: String) -> shared_model::SharedModel {
+        shared_model::SharedModel {
+            runtime: None,
+            url: Some(url),
+            model: Some("qwen3:8b".to_string()),
+            set_by: None,
+            updated: None,
+        }
+    }
+
+    // --- overridden (rag-only: this app's own [llm] keys win over the shared file) ---
+
+    #[test]
+    fn overridden_reflects_written_llm_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let file: PathBuf = dir.path().join("config.toml");
+
+        std::fs::write(&file, "[llm]\nmodel = \"x\"\n").unwrap();
+        assert!(
+            llm_keys_written(&file),
+            "a written [llm] model means this app overrides the shared file"
+        );
+
+        std::fs::write(&file, "[llm]\nbase_url = \"http://127.0.0.1:9999/v1\"\n").unwrap();
+        assert!(
+            llm_keys_written(&file),
+            "a written [llm] base_url counts too"
+        );
+
+        std::fs::write(&file, "[classify]\ntypes = [\"x\"]\n").unwrap();
+        assert!(
+            !llm_keys_written(&file),
+            "no [llm] keys: the shared file still rules"
+        );
+
+        std::fs::write(&file, "").unwrap();
+        assert!(!llm_keys_written(&file), "an empty config is unwritten");
+        assert!(
+            !llm_keys_written(&dir.path().join("missing.toml")),
+            "no file at all is unwritten"
+        );
+    }
+
+    // --- model save (writes the shared file) ---
+
+    #[test]
+    fn save_writes_the_shared_file_and_refuses_bad_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let file: PathBuf = dir.path().join("model.toml");
+
+        assert!(
+            save_to_shared(
+                &file,
+                "ollama".to_string(),
+                "http://127.0.0.1:11434".to_string(),
+                "qwen3:8b".to_string()
+            )
+            .is_ok(),
+            "a valid choice saves"
+        );
+        let saved = shared_model::read(&file);
+        assert_eq!(saved.chat_model(), Some("qwen3:8b"));
+        assert_eq!(saved.set_by.as_deref().unwrap_or(""), "rag docs");
+        assert!(saved.updated.is_some(), "the save stamps an updated time");
+
+        // Refusals leave the file exactly as it was (the local rule and validation run first).
+        assert!(
+            save_to_shared(
+                &file,
+                "ollama".to_string(),
+                "http://8.8.8.8".to_string(),
+                "qwen3:8b".to_string()
+            )
+            .is_err(),
+            "a remote url is refused"
+        );
+        assert!(
+            save_to_shared(
+                &file,
+                "cloud".to_string(),
+                "http://127.0.0.1:11434".to_string(),
+                "qwen3:8b".to_string()
+            )
+            .is_err(),
+            "an unknown runtime is refused"
+        );
+        assert!(
+            save_to_shared(
+                &file,
+                "ollama".to_string(),
+                "http://127.0.0.1:11434".to_string(),
+                "".to_string()
+            )
+            .is_err(),
+            "a blank model is refused"
+        );
+        assert_eq!(
+            shared_model::read(&file).chat_model(),
+            Some("qwen3:8b"),
+            "a refusal changes nothing"
+        );
+    }
+
+    #[test]
+    fn now_seconds_is_the_real_clock() {
+        // rusqlite's unixepoch(): after 2024, comfortably positive.
+        assert!(
+            now_seconds() > 1_700_000_000u64,
+            "a plausible present-day timestamp"
+        );
+    }
+
+    // --- JSON shape locks (the desktop parses these) ---
+
+    #[test]
+    fn detect_json_shape_is_locked() {
+        // Built from fixed values only: no clock, no network. A missing config file => not overridden.
+        let detection = Detection {
+            runtimes: vec![
+                Found {
+                    runtime: "ollama".to_string(),
+                    url: "http://127.0.0.1:11434".to_string(),
+                    reachable: true,
+                    models: vec!["qwen3:8b".to_string()],
+                    usable: vec!["qwen3:8b".to_string()],
+                    error: None,
+                },
+                Found {
+                    runtime: "lmstudio".to_string(),
+                    url: "http://127.0.0.1:1234".to_string(),
+                    reachable: false,
+                    models: Vec::new(),
+                    usable: Vec::new(),
+                    error: Some("timed out".to_string()),
+                },
+            ],
+            shared: None,
+        };
+        let config = Config::default();
+        let file = PathBuf::from("/nonexistent/lets-rag-docs/config.toml");
+        let js: String = serde_json::to_string(&detect_json(&detection, &config, &file)).unwrap();
+        lock("model-detect-found.json", &js);
+    }
+
+    #[test]
+    fn save_json_shape_is_locked() {
+        // `save_json` borrows its three strings, so hold them in locals and pass references.
+        let runtime: String = "ollama".to_string();
+        let url: String = "http://127.0.0.1:11434".to_string();
+        let model: String = "qwen3:8b".to_string();
+        let v = save_json(&runtime, &url, &model);
+        let js: String = serde_json::to_string(&v).unwrap();
+        lock("model-save.json", &js);
+    }
+
+    #[test]
+    fn pull_line_shape_is_locked() {
+        // The NDJSON the app streams, locked so the fake engine and TS tests replay byte-for-byte.
+        let lines: Vec<Value> = vec![
+            normalise_pull_line("{\"status\":\"pulling manifest\"}".to_string()),
+            normalise_pull_line(
+                "{\"status\":\"downloading abc: 42%\",\"completed\":1024,\"total\":2048}"
+                    .to_string(),
+            ),
+            normalise_pull_line("{\"status\":\"success\"}".to_string()),
+        ];
+        let parts: Vec<String> = lines
+            .iter()
+            .map(|line| serde_json::to_string(line).unwrap())
+            .collect();
+        let with_trailing: String = parts.join("\n") + "\n";
+        lock("model-pull.jsonl", &with_trailing);
+    }
 }

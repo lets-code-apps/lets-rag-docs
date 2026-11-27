@@ -14,10 +14,10 @@ mod filing;
 mod index;
 mod locate;
 mod mcp;
+mod model_setup;
 mod organize;
 mod search;
 mod setup;
-mod model_setup;
 mod shared_model;
 mod status;
 
@@ -234,10 +234,7 @@ async fn main() -> anyhow::Result<()> {
             .unwrap_or(DEFAULT_CONFIG_PATH.as_ref()),
     );
     let shared_path = expand_home(Path::new(shared_model::DEFAULT_PATH));
-    let config = Config::load_with_shared(
-        &path,
-        &shared_model::read(&shared_path),
-    )?;
+    let config = Config::load_with_shared(&path, &shared_model::read(&shared_path))?;
     tracing::debug!(?config, "config loaded from {}", path.display());
     match cli.command {
         Command::Ingest => ingest(&config).await,
@@ -251,7 +248,19 @@ async fn main() -> anyhow::Result<()> {
             organize::run(&config, mode.dry_run, mode.apply, json).await
         }
         Command::Documents { json } => documents::run(&config, json),
-        Command::Status { json } => status::run(&config, json).await,
+        Command::Status { json, answer } => status::run(&config, json, answer).await,
+        Command::Model { command } => match command {
+            Model::Detect { url, json } => {
+                model_setup::detect_cmd(&config, &path, &shared_path, url, json).await
+            }
+            Model::Pull { url, model, json } => model_setup::pull(url, model, json).await,
+            Model::Save {
+                runtime,
+                url,
+                model,
+                json,
+            } => model_setup::save_cmd(&shared_path, runtime, url, model, json),
+        },
         Command::Filing { command } => match command {
             Filing::Show { json } => filing::show(&config, json),
             Filing::Save { check } => filing::save(&config, &path, check),
@@ -401,7 +410,7 @@ mod tests {
         // Without --json the clap side still parses (the flag is optional there); the command
         // refuses at run time, before touching config, with a non-zero exit.
         let config = Config::default();
-        let result = super::status::run(&config, false).await;
+        let result = super::status::run(&config, false, false).await;
         assert!(
             result.is_err(),
             "status without --json is refused, not printed by hand"
