@@ -11,7 +11,11 @@ import {
 	parseFilingSave,
 	parseFilingShow,
 	parseLocate,
+	parseModelDetect,
+	parseModelSave,
 	parseOrganize,
+	parseSetupSave,
+	parseSetupShow,
 	parseSearch,
 	parseStatus,
 } from '../src/reports.ts';
@@ -164,10 +168,17 @@ test('status report parses; reachable:false and last_sync:null are data, not fai
 	assert.ok(status.ok);
 	assert.equal(status.value.model.reachable, true);
 	assert.equal(status.value.last_sync, '2024-02-29T00:00:00Z');
+	// `answering` is the real completion probe (the board's Ready check). The locked fixture records it
+	// as null: not run, which is NOT the same as false.
+	assert.equal(status.value.model.answering, null, 'a probe that did not run is unknown, not false');
 	const down = parseStatus('{"version":1,"model":{"reachable":false},"last_sync":null}', []);
 	assert.ok(down.ok);
 	assert.equal(down.value.model.reachable, false);
 	assert.equal(down.value.last_sync, null);
+	assert.equal(down.value.model.answering, null, 'an older engine without the field reads null');
+	const answering = parseStatus('{"version":1,"model":{"reachable":true,"answering":true},"last_sync":null}', []);
+	assert.ok(answering.ok);
+	assert.equal(answering.value.model.answering, true, 'the tiny completion came back: Ready can depend on it');
 });
 
 test('status: wrong version, missing model, and empty stdout are refused', () => {
@@ -192,4 +203,72 @@ test('documents: the dataless bit parses; an older engine reads as false', () =>
 	const old = parseDocuments('{"version":1,"status":"ok","documents":[{"path":"a.pdf","type":"invoice","title":null,"date":null,"folder":null,"owner":null,"filed_as":null}]}', []);
 	assert.ok(old.ok);
 	assert.equal(old.value.documents[0].dataless, false, 'absent means "not known to be dataless", not unknown');
+});
+
+// ---- first-run onboarding reports (LET-136) ----
+
+test('setup show parses the locked fixture; the recommendations and the *_set flags are data', () => {
+	const show = parseSetupShow(read('setup-show.json'), []);
+	assert.ok(show.ok);
+	assert.equal(show.value.version, 1);
+	assert.equal(show.value.library_dir, '~/Documents/library');
+	assert.equal(show.value.library_dir_set, true, 'a written library_dir is marked set');
+	assert.deepEqual(show.value.watch_folders, ['~/Downloads', '~/Desktop']);
+	assert.deepEqual(show.value.recommended_watch_folders, ['~/Downloads', '~/Desktop']);
+	// A refusal to parse is an error with the engine's reason, never a guess.
+	const empty = parseSetupShow('', ['setup: bad config']);
+	assert.ok(!empty.ok);
+	assert.equal(empty.error, 'setup: bad config');
+});
+
+test('setup save parses ok/saved and carries per-field errors; a refusal is data', () => {
+	const saved = parseSetupSave(read('setup-save.json'), []);
+	assert.ok(saved.ok);
+	assert.equal(saved.value.ok, true);
+	assert.equal(saved.value.saved, true);
+	assert.deepEqual(saved.value.errors, []);
+	const refused = parseSetupSave('{"version":1,"ok":false,"saved":false,"errors":[{"field":"library_dir","message":"must be absolute or start with ~/"}]}', []);
+	assert.ok(refused.ok);
+	assert.equal(refused.value.ok, false, 'a rejected draft is a valid report, not a crash');
+	assert.equal(refused.value.errors[0].field, 'library_dir');
+});
+
+test('model detect parses runtimes, the shared block and this app\'s config (no version key)', () => {
+	const found = parseModelDetect(read('model-detect-found.json'), []);
+	assert.ok(found.ok);
+	assert.equal(found.value.runtimes[0].reachable, true);
+	assert.deepEqual(found.value.runtimes[0].usable, ['qwen3:8b']);
+	assert.deepEqual(found.value.runtimes[0].models, ['qwen3:8b']);
+	assert.equal(found.value.runtimes[1].reachable, false, 'a dead port is data, with its error text');
+	assert.equal(found.value.runtimes[1].error, 'timed out');
+	assert.equal(found.value.shared, null, 'no shared file yet');
+	assert.equal(found.value.config.overridden, false, 'the user pinned nothing in [llm]');
+	// A refusal (a non-local --url) is a clean error carrying the engine's sentence.
+	const refused = parseModelDetect('{"ok":false,"error":"`http://8.8.8.8` is not on the local network"}', []);
+	assert.ok(!refused.ok);
+	assert.match(refused.error, /local network/);
+});
+
+test('model save parses the choice; a refusal (remote url / bad runtime) is a clean error', () => {
+	const saved = parseModelSave(read('model-save.json'), []);
+	assert.ok(saved.ok);
+	assert.equal(saved.value.model, 'qwen3:8b');
+	assert.equal(saved.value.runtime, 'ollama');
+	const refused = parseModelSave('', ['Error: `http://8.8.8.8` is not on the local network']);
+	assert.ok(!refused.ok);
+	assert.match(refused.error, /local network/, 'the local-only rule reaches the page');
+});
+
+test('the other two detect fixtures are data too: nothing reachable, and the shared block', () => {
+	// Both shapes decide what the onboarding step says, so both are locked as fixtures and parsed here.
+	const none = parseModelDetect(read('model-detect-not-found.json'), []);
+	assert.ok(none.ok);
+	assert.equal(none.value.runtimes.length, 2);
+	assert.ok(none.value.runtimes.every((r) => r.reachable === false), 'nothing reachable is a valid report');
+	assert.equal(none.value.shared, null);
+	const shared = parseModelDetect(read('model-detect-shared.json'), []);
+	assert.ok(shared.ok);
+	assert.equal(shared.value.shared?.model, 'qwen3:8b');
+	assert.equal(shared.value.shared?.set_by, 'triage mail', 'the step follows the other app only when it wrote the file');
+	assert.equal(shared.value.shared?.reachable, true, 'a shared block that cannot be reached is not a choice');
 });

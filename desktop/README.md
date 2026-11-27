@@ -25,7 +25,7 @@ Run from this `desktop/` directory.
 | Build | `npm run build` | `tsc -p tsconfig.build.json` into `dist/` and copy `preload.cjs` |
 | Dev launch | `npm start` | build, then open a visible window (`RAG_DOCS_START_WINDOW=1 electron .`) |
 | Smoke | `npm run smoke` | build, then hidden Electron with the fake engine; exits `SMOKE OK` / `SMOKE FAIL` |
-| Screenshots | `npm run shots` | build, then drive the real page against the fake engine (type, click, save, re-sort) and `capturePage` overview (busy and clear), ask, the 10 RagFiling states and settings (and the 360px views), in light and dark: 44 PNGs under `screenshots/` |
+| Screenshots | `npm run shots` | build, then drive the real page against the fake engine (type, click, save, re-sort) and `capturePage` overview (busy and clear), ask, the 10 RagFiling states, settings, and the first-run onboarding steps (library, iCloud pick, folders to watch, owners, model found / not-found / downloading / shared) in light and dark: 64 PNGs under `screenshots/` |
 | Compare | `npm run compare -- <baseline> <shots> [out]` | diff `<shots>` against `<baseline>` PNGs with Electron's `nativeImage` (no image library): writes `out/compare-report.md`, `out/compare-report.json` and `out/diff/<name>.png` for changed shots, exits non-zero if anything changed |
 | Icons | `npm run icons` | re-render `assets/*.png` from SVG (see below) |
 
@@ -37,7 +37,7 @@ data; real failures exit non-zero with empty stdout and a reason on stderr.
 | Call | Desktop API | Shape |
 |---|---|---|
 | `documents --json` | `rag.documents()` | `{version, max_file_mb, status, documents:[{path,title,type,date,folder,owner,filed_as,bytes,pages,skipped,dataless}]}` — `dataless:true` marks an iCloud-only file (macOS `SF_DATALESS` bit, read from metadata only, never downloaded) |
-| `status --json` | `rag.status()` | `{version, model:{reachable}, last_sync:RFC3339|null}` — the engine probes `GET {base_url}/models` with its own 3 s timeout; `last_sync` is the library database file's mtime |
+| `status --json` | `rag.status()` | `{version, model:{reachable, answering}, last_sync:RFC3339|null}` — the engine probes `GET {base_url}/models` with its own 3 s timeout; `answering` is a tiny completion through `POST {base_url}/chat/completions` (`null` when the probe did not run, so "ready" can never rest on a port that merely answers); `last_sync` is the library database file's mtime |
 | `search --json --limit 20 -- <query>` | `rag.search()` | `{version, passages:[{source,file,chunk,page?,score}]}` — citation keys only, never text |
 | `ask --json -- <question>` | `rag.ask()` | `{version, answer:string|null, sources:[{source,file,chunk,page?,score}]}` |
 | `filing show --json` | `rag.filing()` | `{version, folders, owners, shared_owner}` |
@@ -46,9 +46,15 @@ data; real failures exit non-zero with empty stdout and a reason on stderr.
 | `locate --json -- <path>` | `rag.openDocument()` | `{version, status, kind, path}` — main opens only what the engine vouches for |
 | `organize --dry-run --json` | `rag.dryRun()` | `{version, mode, status, items, counts}` |
 | `organize --apply --json` | `rag.resort()` | same shape as dry-run; refused unless the last report was a dry-run with `status:"ok"`, with no save and no apply since |
+| `setup show --json` | `rag.setupShow()` | `{version, library_dir, library_dir_set, recommended_library_dir, watch_folders, watch_folders_set, recommended_watch_folders}` — paths in `~/` form; `*_set:false` means "this is the recommendation, nobody wrote it" |
+| `setup save [--check]` (stdin JSON draft) | `rag.setupSave()` | `{version, ok, saved, errors:[{field,message}]}` — the draft is `{library_dir, watch_folders}`; a rejected draft is exit 0 data, and `--check` or an unchanged draft write nothing (`saved:false`) |
+| `model detect --json [--url=<addr>]` | `rag.modelDetect()` | `{ok, runtimes:[{runtime,url,reachable,models,usable,error}], shared:{runtime,url,model,set_by,reachable}|null, config:{model,overridden}}` — Ollama `127.0.0.1:11434` and LM Studio `127.0.0.1:1234` probed together (2 s each, no redirects); `usable` excludes `embed` ids; a dead port is data (`reachable:false` plus its error text), never a failed call |
+| `model pull --json [--url=<addr>] -- <model>` | `rag.modelPull()` | NDJSON on stdout, one flushed line per update: `{stage:"pulling manifest"}`, `{stage:"downloading",total,completed}`, then `{stage:"success"}` or `{stage:"error",error}` (an unreadable or cut stream also gets an error line, exit 1); non-JSON becomes `{stage:"other",status}`. Cancel is one `SIGTERM`; the page paints the bar from `rag.modelPullStatus` |
+| `model save --json --runtime=<r> --url=<u> --model=<m>` | `rag.modelSave()` | `{ok, runtime, url, model}` — writes the shared `~/.config/lets-code/model.toml` with `set_by:"rag docs"`; the three values are argv, validated in main before the spawn |
 
 Time budgets: reads 10 s, dry-run 10 min (it hashes every original), apply 60 min (it copies and
-re-embeds a batch through the local model), ask 6 min, add 20 min (OCR plus one embedding per file).
+re-embeds a batch through the local model), ask 6 min, add 20 min (OCR plus one embedding per file),
+model download 60 min (its client has only a connect timeout, so a slow download is never cut mid-stream).
 A call over budget is stopped and reported as "… timed out", never parsed as half a report.
 `ask`, `add` and `apply` share one slot (local LLM and Qdrant writes, concurrency 1); `cancelAsk`
 and `cancelAdd` kill the running child.
@@ -74,6 +80,12 @@ login item: it is read live from the OS every time the screen paints (so it refl
 System Settings, and is off by default) and written back with `app.setLoginItemSettings`; we never store
 it in our file. `npm run smoke` and `npm run shots` use a throwaway temp file and an in-memory login
 item, so a headless run never registers a real login item on the machine.
+
+First-run onboarding adds one more key, **`setupDone`**: absent or false means the app opens the setup
+steps instead of the screens, and only main may write it (`setSetting` accepts `true`, never `false`),
+recorded at the end of the last "continue". A normal file stays `{"appearance":…}`; only a finished setup
+adds `"setupDone":true`. The same channel also answers `memGb` (the machine's memory from a main-only host)
+so the model step can name the size that fits — the page never measures the machine itself.
 
 ## Icons
 
@@ -103,7 +115,7 @@ line. Two controls are drawn under 44px today and are allow-listed in `KNOWN_SHO
 
 **Reading the PR comment.** After `shots`, CI copies the committed PNGs to a temp baseline, takes fresh
 shots, and runs `npm run compare`. If shots match, one comment (marked `<!-- desktop-shots -->`, updated on
-each push, not stacked) says all 44 match. If not, it lists the changed shots and links the run artifact
+each push, not stacked) says all 64 match. If not, it lists the changed shots and links the run artifact
 (`desktop-ci-<run id>`) that holds the new `screenshots/*.png`, `smoke.txt`, `shots.txt`, `compare-report.md|json`,
 `compare-measured.json`
 and `diff/<name>.png` (red where pixels differ). The same markdown also lands in the step summary; on fork PRs
@@ -125,7 +137,7 @@ CI render is the baseline**, not your laptop.
 a shot is **changed** when over `MAX_RATIO = 0.002` (0.2%) of its pixels differ, on a size mismatch, or when a
 pair is missing (`new`/`removed`). These are a starting point: run the CI job twice on an unchanged tree, record
 the largest ratio you saw, keep `MAX_RATIO` at least 3× that and at most 0.5%, and write the measured noise here.
-Every run also uploads `compare-measured.json` (the ratio of all 44 shots, green or red), which is where these
+Every run also uploads `compare-measured.json` (the ratio of all 64 shots, green or red), which is where these
 numbers come from. Measured on the fixed workflow, two runs against a CI-rendered baseline: run 44420909156 had
 6 of 38 shots with any differing pixels, run 44421965171 had 5, and the largest ratio in either run was **0.0000258
 (0.0026%)**. `MAX_RATIO = 0.002` is therefore ~77× the observed noise and still under the 0.5% ceiling — keep it
@@ -163,3 +175,24 @@ never document text.
 - Smoke/screenshots always use `test/fixtures/fake-engine.mjs` and synthetic fixtures.
 - The real macOS login item is touched only through the Electron host; `app.setLoginItemSettings` appears
   in that one host, and smoke/shots swap in an in-memory login item, so an unattended run registers nothing.
+
+First-run onboarding adds 11 more channels (`rag.setupShow`, `rag.setupSave`, `rag.modelDetect`,
+`rag.modelSave`, `rag.modelPull`, `rag.cancelPull`, `rag.modelPullStatus`, `rag.setupComplete`,
+`rag.modelSetup`, `rag.pickFolder`, `rag.installOllama`) — 26 handlers in all, every one of them
+`fromUs`-checked. The rules they keep:
+
+- The page only collects choices; **main performs every write**, at the last "continue", in one fixed order
+  (`setup save` → `filing save` only when an owner was added → `model save` only when a model was chosen and
+  the shared block is not being kept) and then records `setupDone` through the settings controller, stopping
+  at the first failing step. Quitting mid-onboarding writes nothing.
+- A download is one single-flight child: `model pull` streams its NDJSON into a job, `cancelPull` sends exactly
+  one `SIGTERM`, and the page reads the bar from `modelPullStatus` snapshots (never by parsing a line itself).
+  Continuing while a download runs does not write the shared model file mid-stream: main remembers the choice
+  and saves it only once the job reports success.
+- `rag.pickFolder` is a host seam: the OS folder picker answers the chosen path, and main converts it to
+  `~/` form before it goes anywhere. Nothing lists or reads folders for the page.
+- `rag.installOllama` is the app's **one** `shell.openExternal`, and it opens only the fixed Ollama download
+  URL constant in `src/setup.ts` — no argument built from page data, and `boundaries.test.ts` fails if a second
+  `openExternal(` or a second Ollama URL appears.
+- `memGb` on the `settings` channel comes from a main-only host (`memoryBytes`; smoke/shots fix it at 16 GiB),
+  so the recommendation the step shows is a host answer, never a page-side guess.

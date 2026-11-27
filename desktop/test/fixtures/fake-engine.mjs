@@ -16,6 +16,13 @@
 // FAKE_STATE_FILE: where `library`/`no-owners` keep the saved lists, filed copies and added files
 // between calls (default: a file in the OS temp folder). Delete it to start over.
 // The fake library root is /tmp/rag-docs-fake/library — what `locate` resolves paths to.
+// First-run onboarding (LET-136), mirroring lets-triage mail's selector names:
+// FAKE_MODEL_STATE=found|found-empty|not-found|shared|install: what `model detect` answers (default found).
+// FAKE_DETECT_FOUND_AFTER=<n>: the first <n> detects answer not-found (the step re-checks itself).
+// FAKE_PULL=ok|hold-42|fail: how `model pull` streams (hold-42 stops at 42% and waits for SIGTERM).
+// FAKE_PICK_FOLDER=<path>: the folder the smoke/shots picker host returns (unset: the user cancelled).
+// FAKE_ANSWERING=0: `status --json` says the model is reachable but did NOT answer a completion.
+// Every engine call appends to state `calls` so smoke can assert exactly what setup saved.
 
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -72,6 +79,20 @@ async function fixtures() {
     print(fixture(process.env.FAKE_INVALID === '1' ? 'filing-errors.json' : 'filing.json'));
   }
   if (args[0] === 'organize') print(fixture(args.includes('--apply') ? 'organize-apply.json' : 'organize-dry-run.json'));
+  if (args[0] === 'setup' && args[1] === 'show') print(fixture('setup-show.json'));
+  if (args[0] === 'setup' && args[1] === 'save') {
+    await readStdin();
+    print(fixture('setup-save.json'));
+  }
+  if (args[0] === 'model' && args[1] === 'detect') print(fixture('model-detect-found.json'));
+  if (args[0] === 'model' && args[1] === 'save') print(fixture('model-save.json'));
+  if (args[0] === 'model' && args[1] === 'pull') {
+    // The fixture stream: each normalised line, exit 0 (the Rust tests lock these bytes).
+    for (const line of fixture('model-pull.jsonl').split('\n')) {
+      if (line.trim() !== '') process.stdout.write(`${line}\n`);
+    }
+    process.exit(0);
+  }
 }
 
 // ---- a synthetic library ----
@@ -102,7 +123,7 @@ const DOCUMENTS = [
 const BIG_DOC = ['big-scan.pdf', null, 'unsorted', null, null, null, 64_000_000, null, 'over_limit', false];
 
 function initialState() {
-  return { folders: [...FOLDERS], owners: scenario === 'no-owners' ? [] : [...OWNERS], filed: null, docs: null, added: [], shared: null };
+  return { folders: [...FOLDERS], owners: scenario === 'no-owners' ? [] : [...OWNERS], filed: null, docs: null, added: [], shared: null, library_dir: null, watch: null, model: null, calls: [], detects: 0 };
 }
 
 function load() {
@@ -310,13 +331,173 @@ function locateReport() {
   print({ version: 1, status: 'missing', kind: null, path: null });
 }
 
+// ---- first-run onboarding (LET-136): setup show/save, model detect/save/pull ----
+// Same shapes as the Rust engine (`src/setup.rs`, `src/model_setup.rs`); every write call lands in
+// state `calls` so smoke can assert exactly what setup wrote and what it never did.
+
+const HOME_PATH = /^(~|~\/|\/)/;
+const RECOMMENDED_LIBRARY = '~/Documents/library';
+const RECOMMENDED_WATCH = ['~/Downloads', '~/Desktop'];
+
+function setupShowReport(state) {
+  const set = typeof state.library_dir === 'string' && state.library_dir !== '';
+  const watchSet = Array.isArray(state.watch);
+  print({
+    version: 1,
+    library_dir: set ? state.library_dir : RECOMMENDED_LIBRARY,
+    library_dir_set: set,
+    recommended_library_dir: RECOMMENDED_LIBRARY,
+    watch_folders: watchSet ? state.watch : [],
+    watch_folders_set: watchSet,
+    recommended_watch_folders: [...RECOMMENDED_WATCH],
+  });
+}
+
+function validSetupPath(v) {
+  return typeof v === 'string' && v.length > 0 && v.length <= 4096 && !v.includes('\u0000') && HOME_PATH.test(v);
+}
+
+async function setupSaveCmd() {
+  let draft;
+  try {
+    draft = JSON.parse((await readStdin()).trim());
+  } catch {
+    fail('fake engine: stdin must be one JSON object');
+  }
+  const state = load();
+  const errors = [];
+  if (!validSetupPath(draft.library_dir)) {
+    errors.push({ field: 'library_dir', message: 'library_dir must be an absolute path or start with ~/ and hold no control characters' });
+  }
+  const watch = draft.watch_folders;
+  if (!Array.isArray(watch) || watch.length > 20 || watch.some((p) => !validSetupPath(p)) || new Set(watch).size !== watch.length) {
+    errors.push({ field: 'watch_folders', message: 'watch_folders must be at most 20 unique absolute or ~/ paths' });
+  }
+  if (errors.length > 0) print({ version: 1, ok: false, saved: false, errors });
+  const changed = state.library_dir !== draft.library_dir || JSON.stringify(state.watch ?? null) !== JSON.stringify(watch);
+  const next = { ...state, library_dir: draft.library_dir, watch };
+  if (!args.includes('--check') && changed) save({ ...next, calls: [...(state.calls ?? []), `setup save ${draft.library_dir} ${watch.join(',')}`] });
+  print({ version: 1, ok: true, saved: !args.includes('--check') && changed, errors: [] });
+}
+
+function flagValue(prefix) {
+  const found = args.find((a) => a.startsWith(prefix));
+  return found === undefined ? undefined : found.slice(prefix.length);
+}
+
+function modelDetectCmd() {
+  const state = load();
+  const detects = (state.detects ?? 0) + 1;
+  save({ ...state, detects });
+  const mode = process.env.FAKE_MODEL_STATE || 'found';
+  const after = Number(process.env.FAKE_DETECT_FOUND_AFTER || 0);
+  const custom = flagValue('--url=');
+  const dead = (runtime, url) => ({ runtime, url, reachable: false, models: [], usable: [], error: `no server at ${new URL(url).host}` });
+  const alive = (runtime, url, models, usable) => ({ runtime, url, reachable: true, models, usable, error: null });
+  const config = { model: state.model ?? '', overridden: false };
+  if (mode === 'install') {
+    // Guided install (review finding 6, LET-165): the first FAKE_DETECT_FOUND_AFTER detects are not-found (no
+    // runtime); after that Ollama appears but is empty (reachable, only an embedding model), so the step sees
+    // found-empty after a not-found and the page auto-starts the recommended pull exactly once.
+    const nf = Number(process.env.FAKE_DETECT_FOUND_AFTER || 1);
+    if (detects <= nf) {
+      print({ ok: true, runtimes: [dead('ollama', 'http://127.0.0.1:11434'), dead('lmstudio', 'http://127.0.0.1:1234')], shared: null, config });
+    }
+    print({ ok: true, runtimes: [alive('ollama', 'http://127.0.0.1:11434', ['bge-m3:latest'], []), dead('lmstudio', 'http://127.0.0.1:1234')], shared: null, config });
+  }
+  if (after > 0 && detects <= after) {
+    print({ ok: true, runtimes: [dead('ollama', 'http://127.0.0.1:11434'), dead('lmstudio', 'http://127.0.0.1:1234')], shared: null, config });
+  }
+  if (custom !== undefined) {
+    const reach = mode === 'not-found' ? [] : ['qwen3:8b'];
+    print({ ok: true, runtimes: [alive('custom', custom, reach, reach)], shared: null, config });
+  }
+  if (mode === 'found-empty') {
+    print({ ok: true, runtimes: [alive('ollama', 'http://127.0.0.1:11434', ['bge-m3:latest'], []), dead('lmstudio', 'http://127.0.0.1:1234')], shared: null, config });
+  }
+  if (mode === 'shared') {
+    print({
+      ok: true,
+      runtimes: [alive('ollama', 'http://127.0.0.1:11434', ['qwen3:8b'], ['qwen3:8b']), dead('lmstudio', 'http://127.0.0.1:1234')],
+      shared: { runtime: 'ollama', url: 'http://127.0.0.1:11434', model: 'qwen3:8b', set_by: 'triage mail', reachable: true },
+      config,
+    });
+  }
+  if (mode === 'not-found') {
+    print({ ok: true, runtimes: [dead('ollama', 'http://127.0.0.1:11434'), dead('lmstudio', 'http://127.0.0.1:1234')], shared: null, config });
+  }
+  print({
+    ok: true,
+    runtimes: [alive('ollama', 'http://127.0.0.1:11434', ['qwen3:8b', 'llama3.2:3b'], ['qwen3:8b', 'llama3.2:3b']), dead('lmstudio', 'http://127.0.0.1:1234')],
+    shared: null,
+    config,
+  });
+}
+
+function modelSaveCmd() {
+  const runtime = flagValue('--runtime=') ?? '';
+  const url = flagValue('--url=') ?? '';
+  const model = flagValue('--model=') ?? '';
+  const state = load();
+  save({ ...state, model, calls: [...(state.calls ?? []), `model save ${runtime} ${model}`] });
+  print({ ok: true, runtime, url, model });
+}
+
+async function modelPullCmd() {
+  // One normalised line per update, flushed as it "arrives" (stdout is a pipe to main). The bytes
+  // belong to the recommended qwen3:8b: 5.2 GB on the 16 GiB smoke/shots machine.
+  const size = Math.round(5.2 * 1024 ** 3);
+  const say = (line) => {
+    process.stdout.write(`${JSON.stringify(line)}\n`);
+  };
+  say({ stage: 'pulling manifest' });
+  const mode = process.env.FAKE_PULL || 'ok';
+  const steps = mode === 'ok' ? [0.1, 0.25, 0.42, 0.75, 1] : mode === 'fail' ? [0.1, 0.3] : [0.1, 0.25, 0.42];
+  // FAKE_PULL_STEP_MS: pause between lines, so the stream stays open long enough for smoke to continue
+  // past it (the plan's "continue during a download" case needs a stream that outlives the click).
+  const stepMs = Number(process.env.FAKE_PULL_STEP_MS || 0);
+  for (const part of steps) {
+    say({ stage: 'downloading', total: size, completed: Math.round(size * part) });
+    if (stepMs > 0) await new Promise((resolve) => setTimeout(resolve, stepMs));
+  }
+  if (mode === 'fail') {
+    say({ stage: 'error', error: 'no space left on device' });
+    process.exit(1);
+  }
+  if (mode === 'hold-42') {
+    // Stop at 42% and wait for main's SIGTERM (the page's cancel button); the stream ends without
+    // a success line, exactly as a cancelled real pull does. The interval is not decoration: with no
+    // pending I/O left, node exits on its own ("unsettled top-level await") and the hold becomes a
+    // premature failure instead of a download that really is still running.
+    const busy = setInterval(() => { }, 1000);
+    await new Promise((resolve) => {
+      process.on('SIGTERM', () => {
+        clearInterval(busy);
+        resolve();
+      });
+    });
+    process.exit(1);
+  }
+  say({ stage: 'success' });
+  process.exit(0);
+}
+
+
 async function library() {
   const state = load();
   if (args[0] === 'documents') print(documents(state));
   if (args[0] === 'status') {
-    // Same shape as the Rust `status --json`. The timestamp is fixed so the overview figures
-    // and screenshots are byte-stable; smoke/shots run with TZ=UTC (package.json).
-    print({ version: 1, model: { reachable: process.env.FAKE_MODEL !== 'down' }, last_sync: '2025-03-09T09:24:00Z' });
+    // Same shape and same probe ARGS as the real Rust `status`. The overview's cheap `status --json` reports
+    // `answering: null` (no completion was asked). Only when `--answer` is on the command line does the probe
+    // run: then `answering` is true for a reachable model, false when FAKE_ANSWERING=0 (a reachable model whose
+    // tiny completion never answers — the empty/malformed-completion case). The `--url`/`--model` the onboarding
+    // passes identify WHICH model was probed; the fake only ever uses local endpoints, matching the engine's
+    // local-only rule (it would refuse a public url there). This is why the smoke download can now reach Ready:
+    // the step passes `--answer --url --model`, and the probe answers.
+    const reachable = process.env.FAKE_MODEL !== 'down';
+    const wantsAnswer = args.includes('--answer');
+    const answering = wantsAnswer && reachable && process.env.FAKE_ANSWERING !== '0';
+    print({ version: 1, model: { reachable, answering: wantsAnswer ? answering : null }, last_sync: '2025-03-09T09:24:00Z' });
   }
   if (args[0] === 'search') {
     const limit = Number(args[args.indexOf('--limit') + 1] || 20);
@@ -351,9 +532,14 @@ async function library() {
     const changed = JSON.stringify([draft.folders, draft.owners]) !== JSON.stringify([state.folders, state.owners])
       || renamed > 0
       || draft.shared_owner !== undefined && draft.shared_owner !== state.shared;
-    if (!args.includes('--check') && changed) save(next);
+    if (!args.includes('--check') && changed) save({ ...next, calls: [...(state.calls ?? []), 'filing save'] });
     print({ version: 1, ok: true, saved: !args.includes('--check') && changed, renamed, folders: draft.folders, owners: draft.owners, shared_owner: shared, errors: [] });
   }
+  if (args[0] === 'setup' && args[1] === 'show') setupShowReport(state);
+  if (args[0] === 'setup' && args[1] === 'save') await setupSaveCmd();
+  if (args[0] === 'model' && args[1] === 'detect') modelDetectCmd();
+  if (args[0] === 'model' && args[1] === 'save') modelSaveCmd();
+  if (args[0] === 'model' && args[1] === 'pull') await modelPullCmd();
   if (args[0] === 'organize') {
     const apply = args.includes('--apply');
     // FAKE_ORGANIZE_FAIL: the dry-run fails, so the overview must show an error and stay not-all-clear

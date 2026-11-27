@@ -359,3 +359,145 @@ test('callers join a pending dry-run; only a settled failure is retried', async 
   const moved = new m.DryRunMemo(() => Promise.resolve({ ok: true, report: { status: 'ok', items: [], counts: {} } }), () => 2);
   assert.equal(await moved.ensure(1), null);
 });
+
+// ---- first-run onboarding (LET-136) ----
+
+test('isICloudPath matches only the iCloud Drive mount, not a near-miss name', () => {
+  assert.equal(m.isICloudPath('~/Library/Mobile Documents/com~apple~CloudDocs/library'), true);
+  assert.equal(m.isICloudPath('~/Documents/library'), false);
+  assert.equal(m.isICloudPath('~/Library/Mobile Documentsx/library'), false);
+});
+
+test('recommendedModel sizes by the Mac\'s memory, the same thresholds triage mail uses', () => {
+  const gb = 1024 ** 3;
+  assert.deepEqual(m.recommendedModel(8 * gb), { model: 'qwen3:4b', sizeGb: 2.5 });
+  assert.deepEqual(m.recommendedModel(16 * gb), { model: 'qwen3:8b', sizeGb: 5.2 });
+  assert.deepEqual(m.recommendedModel(64 * gb), { model: 'qwen3:14b', sizeGb: 9.3 });
+});
+
+test('the download bar reads 2.2 of 5.2 GB · 42% from the engine\'s own numbers', () => {
+  assert.equal(m.formatProgress(2.2, 5.2, 42), '2.2 of 5.2 GB · 42%');
+});
+
+test('stepFromDetect: a reachable shared block the other app set wins as shared', () => {
+  const detect = { ok: true, runtimes: [], shared: { runtime: 'ollama', url: 'http://127.0.0.1:11434', model: 'qwen3:8b', set_by: 'triage mail', reachable: true }, config: { model: '', overridden: false } };
+  const step = m.stepFromDetect(detect, 16 * 1024 ** 3);
+  assert.deepEqual([step.state, step.model, step.runtime], ['shared', 'qwen3:8b', 'ollama']);
+});
+
+test('stepFromDetect: a shared block set by this app does not win; a found runtime does', () => {
+  const detect = { ok: true, runtimes: [{ runtime: 'ollama', url: 'u', reachable: true, usable: ['qwen3:8b', 'bge-m3'], models: [] }], shared: { runtime: 'ollama', url: 'u', model: 'qwen3:14b', set_by: 'rag docs', reachable: true }, config: { model: '', overridden: false } };
+  const step = m.stepFromDetect(detect, 16 * 1024 ** 3);
+  assert.deepEqual([step.state, step.model, step.runtime], ['found', 'qwen3:8b', 'ollama']);
+});
+
+test('stepFromDetect preselect order: config.model, then the recommendation, then the first usable', () => {
+  const gb = 1024 ** 3;
+  const base = { runtime: 'ollama', url: 'u', reachable: true, models: [], usable: ['qwen3:4b', 'qwen3:8b', 'qwen3:14b'] };
+  // config.model wins when it is usable, and carries the overridden note.
+  let step = m.stepFromDetect({ ok: true, runtimes: [base], shared: null, config: { model: 'qwen3:14b', overridden: true } }, 16 * gb);
+  assert.equal(step.model, 'qwen3:14b');
+  assert.equal(step.overridden, true);
+  // else the recommendation when it is usable.
+  step = m.stepFromDetect({ ok: true, runtimes: [{ ...base, usable: ['qwen3:8b', 'qwen3:4b'] }], shared: null, config: { model: 'not-there', overridden: false } }, 16 * gb);
+  assert.equal(step.model, 'qwen3:8b');
+  // else the first usable, when neither config.model nor the recommendation is present.
+  step = m.stepFromDetect({ ok: true, runtimes: [{ ...base, usable: ['mistral:7b'] }], shared: null, config: { model: '', overridden: false } }, 16 * gb);
+  assert.equal(step.model, 'mistral:7b');
+});
+
+test('stepFromDetect: reachable but nothing usable is found-empty that offers the recommendation', () => {
+  const detect = { ok: true, runtimes: [{ runtime: 'ollama', url: 'u', reachable: true, usable: [], models: ['bge-m3'] }], shared: null, config: { model: '', overridden: false } };
+  const step = m.stepFromDetect(detect, 16 * 1024 ** 3);
+  assert.equal(step.state, 'found-empty');
+  assert.equal(step.model, null);
+  assert.equal(step.recommend.model, 'qwen3:8b');
+});
+
+test('stepFromDetect: nothing reachable is not-found (the step re-checks itself)', () => {
+  const detect = { ok: true, runtimes: [{ runtime: 'ollama', url: 'u', reachable: false, usable: [], models: [] }], shared: null, config: { model: '', overridden: false } };
+  const step = m.stepFromDetect(detect, 16 * 1024 ** 3);
+  assert.equal(step.state, 'not-found');
+});
+
+test('watchRows pre-fills the recommendations and marks watched only once the list is set', () => {
+  const rec = { watch_folders_set: false, watch_folders: [], recommended_watch_folders: ['~/Downloads', '~/Desktop'] };
+  assert.deepEqual(m.watchRows(rec), [{ path: '~/Downloads', watched: false }, { path: '~/Desktop', watched: false }]);
+  const set = { watch_folders_set: true, watch_folders: ['~/Downloads'], recommended_watch_folders: ['~/Downloads', '~/Desktop'] };
+  assert.deepEqual(m.watchRows(set), [{ path: '~/Downloads', watched: true }]);
+});
+
+test('setupSteps: the owners step is current while you use it and done after Continue', () => {
+  // Review finding 7 (LET-165): the owners step (index 2) is a step the person uses, so it must carry
+  // aria-current while they are on it and show done once they have continued past it. Only an actual Skip
+  // (the page passes filingSkipped=true) draws it as skipped.
+  assert.deepEqual(m.setupSteps(2).map((s) => [s.key, s.state]),
+    [['library', 'done'], ['watch', 'done'], ['filing', 'current'], ['model', 'rest']]);
+  assert.deepEqual(m.setupSteps(3).map((s) => [s.key, s.state]),
+    [['library', 'done'], ['watch', 'done'], ['filing', 'done'], ['model', 'current']]);
+  assert.equal(m.setupSteps(1).find((s) => s.key === 'filing').state, 'rest', 'before the owners step: still to do');
+  const onFiling = m.setupSteps(2).find((s) => s.key === 'filing');
+  assert.deepEqual([onFiling.state, onFiling.skipped], ['current', false], 'the current step, not a skipped one');
+  // The only way it reads skipped is an explicit skip the page passes:
+  assert.equal(m.setupSteps(3, true).find((s) => s.key === 'filing').state, 'skipped', 'a real skip still draws as skipped');
+});
+
+test('model choices come only from the selected endpoint, not every runtime', () => {
+  // Review finding 5 (LET-165): two runtimes both list qwen3:8b, only LM Studio has llama3.2:3b. With Ollama
+  // selected the LM-Studio-only id must not be offered — choosing it would save it at Ollama's url, where it
+  // does not exist (a valid choice producing a broken shared config).
+  const detect = {
+    ok: true,
+    runtimes: [
+      { runtime: 'ollama', url: 'http://127.0.0.1:11434', reachable: true, usable: ['qwen3:8b'] },
+      { runtime: 'lmstudio', url: 'http://127.0.0.1:1234', reachable: true, usable: ['qwen3:8b', 'llama3.2:3b'] },
+    ],
+    shared: null,
+    config: { model: '', overridden: false },
+  };
+  const step = m.stepFromDetect(detect, 16 * 1024 ** 3);
+  assert.equal(step.url, 'http://127.0.0.1:11434', 'the first reachable runtime with a usable model is selected');
+  assert.deepEqual(m.choiceList(detect, step.url), ['qwen3:8b'], 'the LM-Studio-only id is never offered at the Ollama endpoint');
+  assert.deepEqual(m.choiceList(detect, 'http://127.0.0.1:1234'), ['qwen3:8b', 'llama3.2:3b'], 'at LM Studio both are offered');
+  assert.deepEqual(m.choiceList(detect, 'http://127.0.0.1:9999'), [], 'an endpoint not present offers nothing');
+});
+
+test('use-another-model switches the shared step to a selectable found step', () => {
+  // Review finding 4 (LET-165): the shared step hides the chooser; the action drops the shared block and
+  // falls back to the found step so the person can pick a different model at the shared runtime.
+  const detect = {
+    ok: true,
+    runtimes: [{ runtime: 'ollama', url: 'http://127.0.0.1:11434', reachable: true, usable: ['qwen3:8b', 'llama3.2:3b'] }],
+    shared: { runtime: 'ollama', url: 'http://127.0.0.1:11434', model: 'qwen3:8b', set_by: 'triage mail', reachable: true },
+    config: { model: '', overridden: false },
+  };
+  assert.equal(m.stepFromDetect(detect, 16 * 1024 ** 3).state, 'shared', 'as-is the other app\'s choice wins');
+  const found = m.switchFromShared(detect, 16 * 1024 ** 3);
+  assert.equal(found.state, 'found', 'the chooser and address appear');
+  assert.equal(found.url, 'http://127.0.0.1:11434');
+  assert.deepEqual(m.choiceList(detect, found.url), ['qwen3:8b', 'llama3.2:3b'], 'both models can now be chosen');
+});
+
+test('a failed or not-found "set up later" saves no model; an installed or running choice may', () => {
+  // Review finding 3 (LET-165): deferring setup must never leave the shared file pointing at a model whose
+  // download failed. A model travels only for a real installed choice or a still-running pull (whose save main
+  // defers to success); keeping the other app\'s choice saves nothing.
+  assert.equal(m.modelTravels('failed', false, false), false, 'a failed download: no model save');
+  assert.equal(m.modelTravels('not-found', false, false), false, 'nothing installed: no model save');
+  assert.equal(m.modelTravels('found-empty', false, false), false, 'no usable model installed: no model save');
+  assert.equal(m.modelTravels('ready', false, false), true, 'downloaded and answered: save it');
+  assert.equal(m.modelTravels('found', false, false), true, 'an installed found model: save it');
+  assert.equal(m.modelTravels('downloading', true, false), true, 'a still-running pull: main defers the save to success');
+  assert.equal(m.modelTravels('shared', false, true), false, 'keeping the other app\'s choice: no model save');
+});
+
+test('guided install auto-starts the recommended pull only once, only after a not-found', () => {
+  // Review finding 6 (LET-165): the not-found screen promises installing Ollama then downloading the
+  // recommendation itself. The pull auto-starts on the transition not-found -> newly-detected empty, exactly
+  // once; an initially-empty runtime keeps the manual offer only.
+  assert.equal(m.guidedInstall(true, 'found-empty', false), true, 'empty appears where there was none: start the pull');
+  assert.equal(m.guidedInstall(false, 'found-empty', false), false, 'first detect already empty: manual offer only');
+  assert.equal(m.guidedInstall(true, 'found-empty', true), false, 'the recommended pull fires only once');
+  assert.equal(m.guidedInstall(true, 'not-found', false), false, 'not-found is not an empty runtime to download into');
+  assert.equal(m.guidedInstall(true, 'found', false), false, 'a found runtime with a usable model needs no download');
+});

@@ -575,5 +575,211 @@ export class DryRunMemo {
   }
 }
 
+// ---- first-run onboarding (LET-136) ----
+//
+// The model-step brain: what `model detect --json` answered becomes the state and the preselected model
+// the step shows; the folders-to-watch rows and the four-step list are shaped from `setup show`; and a
+// download progress snapshot becomes the design's "2.2 of 5.2 GB · 42%". Every number is the engine's;
+// nothing here opens a socket or invents data. The shared thresholds and preselect order are lets-triage
+// mail's (PR #26), so both apps recommend and preselect alike.
+
+/** True only when the library path is inside iCloud Drive's `Mobile Documents` mount, where macOS may keep
+ * files online-only (the overview's "only in iCloud" item). Checked on the home-relative path the engine
+ * reports, so a near-miss folder name (`Mobile Documentsx`) is not iCloud. */
+export function isICloudPath(path) {
+  return String(path).startsWith('~/Library/Mobile Documents/');
+}
+
+/** Recommended model by the Mac's memory — the SAME thresholds lets-triage mail uses, so both apps
+ * suggest the same size for the same machine (smoke and shots fix the machine at 16 GiB). */
+const GB = 1024 ** 3;
+export function recommendedModel(totalBytes) {
+  const mem = totalBytes / GB;
+  if (mem < 12) return { model: 'qwen3:4b', sizeGb: 2.5 };
+  if (mem < 32) return { model: 'qwen3:8b', sizeGb: 5.2 };
+  return { model: 'qwen3:14b', sizeGb: 9.3 };
+}
+
+/** The download bar's text for one progress snapshot. GB are the engine's own byte numbers (already
+ * one decimal, as `pullProgress` produces), and the percent is the engine's completed/total, never a guess. */
+export function formatProgress(done, total, pct) {
+  const r1 = (x) => Math.round(x * 10) / 10;
+  return `${r1(done)} of ${r1(total)} GB · ${pct}%`;
+}
+
+/** `setup show` → the folders-to-watch rows (step 2). Pre-fill is the recommendations until the user has
+ * actually written the list, after which it is exactly what they wrote. A row is "watched" only once the
+ * list was set — watching the folders is a follow-up task, so the step carries the muted note, not a claim. */
+export function watchRows(show) {
+  const set = show.watch_folders_set === true;
+  const list = set ? (show.watch_folders ?? []) : (show.recommended_watch_folders ?? []);
+  return list.map((path) => ({ path, watched: set }));
+}
+
+/** The four design steps in order, with the shared progress state. `current` is the index the page marks
+ * `aria-current="step"`; steps before it are done, after are still to do. The "folders and owners" step (index
+ * 2) is a step the person really uses — they add owners on it — so it is CURRENT while they are on it and DONE
+ * once they have continued past it (board acceptance, review finding 7 LET-165: the owners step must carry the
+ * current marker and show complete after Continue). It is drawn "skipped" (a dashed –) only when the person
+ * actually pressed Skip on it, which the page passes as `filingSkipped`; the skip is tracked separately from the
+ * done/current state so the accessible progress no longer contradicts the step being used. */
+export function setupSteps(current, filingSkipped) {
+  const steps = [
+    { key: 'library', title: 'library' },
+    { key: 'watch', title: 'folders to watch' },
+    { key: 'filing', title: 'folders and owners' },
+    { key: 'model', title: 'model' },
+  ];
+  return steps.map((s, i) => {
+    const skipped = s.key === 'filing' && filingSkipped === true;
+    const state = skipped ? 'skipped' : i < current ? 'done' : i === current ? 'current' : 'rest';
+    return { ...s, skipped, state };
+  });
+}
+
+/** The model ids the page may offer in the chooser: the usable list of the ONE runtime the step
+ * actually selected (`stepUrl`), not the union of every reachable runtime (review finding 5, LET-165).
+ * Offering another runtime's models would let a click save a model id at the selected endpoint's url,
+ * where that id does not exist — a valid choice that produces a broken shared config. */
+export function choiceList(detect, stepUrl) {
+  const runtimes = detect?.runtimes ?? [];
+  const selected = runtimes.find((r) => r.reachable && r.url === stepUrl);
+  return selected ? [...(selected.usable ?? [])] : [];
+}
+
+/** "Use another model" on the shared step (review finding 4, LET-165): drop the shared block and fall back
+ * to the found step, so the chooser (and the address field) appear and the person can pick a different model
+ * at the shared runtime — instead of leaving the view on `shared`, which hides both. */
+export function switchFromShared(detect, memBytes) {
+  return stepFromDetect({ ...(detect ?? {}), shared: null }, memBytes);
+}
+
+/** Whether the finish payload may carry a model, given the step's state (review finding 3, LET-165).
+ * A model is saved only for a real installed choice (found / ready), an explicit switch on the shared
+ * step (now a found state), or a still-running pull whose save main defers to its success. A failed or
+ * not-found "set up later" sends NO model: deferring setup must not leave the shared file pointing at a
+ * model whose download failed. `keepShared` (keeping the other app's choice) sends no model either. */
+export function modelTravels(viewState, pullRunning, keepShared) {
+  if (keepShared) return false;
+  if (viewState === 'found' || viewState === 'ready' || viewState === 'shared') return true;
+  if (pullRunning === true) return true;
+  return false;
+}
+
+/** The guided-install download (review finding 6, LET-165): the not-found screen promises that installing
+ * Ollama and re-detecting will download the recommendation itself. The recommended pull auto-starts ONLY on
+ * the transition from a previous not-found to a newly-detected empty runtime, and only once. An initially
+ * detected empty runtime keeps the manual download offer (no surprise download before the person looked).
+ * `priorNotFound` is whether the previous detect was not-found; `guidedStarted` guards the once. */
+export function guidedInstall(priorNotFound, state, guidedStarted) {
+  return priorNotFound === true && state === 'found-empty' && guidedStarted !== true;
+}
+
+/** The runtime word the engine names, said the way the design says it ("Ollama", "LM Studio"). */
+export function runtimeName(runtime) {
+  const names = { ollama: 'Ollama', lmstudio: 'LM Studio' };
+  return names[runtime] ?? 'A model runtime';
+}
+
+/** The muted line the board's answer 4 asked for: this app's own `[llm]` keys already pick a model,
+ * so the shared setting only takes effect for the other app. One note, shown on the found/shared step
+ * when `config.overridden` is true. The "change it later in settings" sentence from the design is
+ * dropped (answer 2): no settings model picker exists yet. */
+export function sharedNote() {
+  return 'Rag docs and triage mail share this setting.';
+}
+
+/** The `[llm]`-over-shared note, shown only when `overridden` is true. */
+export const OVERRIDDEN_NOTE = 'Your config.toml sets its own model; this setting is saved for the other app.';
+
+/**
+ * The model step's view: one state + the engine's data → the exact pill/line/note/rows the page paints
+ * (the same shape lets-triage mail's setup-model.ts produces, with rag docs' copy). All strings are
+ * fixed design copy or engine-derived data; the page formats nothing. `memGb` is the machine's memory
+ * in whole GB as main answers it (a host number, never a guess here); `pull` is the engine's own
+ * progress snapshot; `error` is the engine's sentence for a failed download.
+ */
+export function modelView(state, data) {
+  const runtime = runtimeName(data.runtime ?? 'ollama');
+  const url = data.url ?? '';
+  const memGb = data.memGb ?? 0;
+  const rec = data.recommend ?? recommendedModel(memGb * 1024 ** 3);
+  const view = { state, pill: '', tone: 'neutral', text: '', note: '', ob: data.overridden === true, bar: null, barModel: '', actions: [], models: [], selected: '', modelNote: '', hasAddress: true, nextLabel: 'start filing', nextOff: false, nextVariant: 'primary' };
+  switch (state) {
+    case 'detecting':
+      return { ...view, pill: 'looking for a runtime', tone: 'neutral', text: 'Checking Ollama at localhost:11434 and LM Studio at localhost:1234.', note: 'The model runs on this Mac, so nothing you give it leaves the computer.', address: '', nextOff: true };
+    case 'found': {
+      const n = (data.usable ?? []).length;
+      return { ...view, pill: `${runtime} found`, tone: 'positive', text: `${runtime} is running at ${url} with ${n} ${n === 1 ? 'model' : 'models'}. Rag docs picked the one that fits this Mac.`, note: sharedNote(), models: data.usable ?? [], selected: data.model ?? '', modelNote: `Recommended for this Mac's ${memGb} GB of memory: ${rec.model}, ${rec.sizeGb} GB.` };
+    }
+    case 'found-empty':
+      return { ...view, pill: `${runtime} found`, tone: 'attention', text: `${runtime} is running at ${url}, with no model rag docs can use yet.`, note: `Downloading ${rec.model} (${rec.sizeGb} GB) fits this Mac's ${memGb} GB of memory.`, actions: [{ label: `download ${rec.model}`, variant: 'primary', glyph: 'arrow-down' }], nextOff: true };
+    case 'not-found':
+      return { ...view, pill: 'no runtime found', tone: 'attention', text: 'Rag docs needs a model runtime on this Mac. Ollama is free and runs models locally, so nothing leaves the computer.', note: `Install Ollama and open it. This step finds it by itself, then downloads ${rec.model} (${rec.sizeGb} GB), the right size for this Mac's ${memGb} GB of memory.`, actions: [{ label: 'install Ollama', variant: 'primary', glyph: 'arrow-up-right' }, { label: 'check again', variant: 'secondary', glyph: '' }], nextLabel: 'set up later', nextVariant: 'secondary' };
+    case 'downloading': {
+      const pull = data.pull ?? { model: rec.model, done: 0, gb: 0, pct: 0 };
+      return { ...view, pill: 'downloading model', tone: 'neutral', text: `${runtime} is running. Rag docs is downloading ${pull.model} through it.`, note: 'You can go on. The download keeps going, and rag docs starts when it is done.', bar: formatProgress(pull.done, pull.gb, pull.pct), barModel: pull.model, actions: [{ label: 'cancel download', variant: 'ghost', glyph: '' }] };
+    }
+    case 'ready':
+      return { ...view, pill: 'ready', tone: 'positive', text: `${data.model} runs in ${runtime} on this Mac and answered a test question.`, note: sharedNote() };
+    case 'shared':
+      return { ...view, pill: 'using the model from triage mail', tone: 'positive', text: `${data.model} in ${runtime} at ${url}, set up when you installed triage mail.`, note: sharedNote(), hasAddress: false, actions: [{ label: 'use another model', variant: 'secondary', glyph: '' }] };
+    default:
+      return { ...view, pill: 'download failed', tone: 'danger', text: data.error ?? 'The download stopped before the model was complete.', note: '', actions: [{ label: 'try again', variant: 'primary', glyph: '' }], nextLabel: 'set up later', nextVariant: 'secondary' };
+  }
+}
+
+/** The four steps' titles and opening lines, the design's copy (the step content below is built from
+ * engine reports). `watchNote` is the board's answer 1: the screen must not promise watching that
+ * does not happen yet, so this exact muted line sits under the folder list. */
+export const SETUP_COPY = {
+  library: { title: 'library location', text: 'Rag docs keeps a filed copy of each document here. Your originals stay where they are.' },
+  watch: { title: 'folders to watch', text: 'New documents in these folders are copied to the library and filed. Turn off any you don’t want read.' },
+  filing: { title: 'folders and owners', text: 'Each copy is filed by folder, then by owner. The default folders fit most homes.' },
+  model: { title: 'model', text: 'Rag docs reads and files your documents with a model that runs on this Mac.' },
+  watchMuted: 'Rag docs never reads its own library, even inside a watched folder. Your originals are never moved or changed.',
+  watchLater: 'Rag docs starts watching these folders in a later update.',
+  ownersMuted: 'No owners yet is fine. Every copy is filed under Shared until you add some.',
+};
+
+/**
+ * `model detect --json` → the model step. The rules are the board's and the design's, and read the engine
+ * report without deciding anything the engine has not already decided:
+ *  - a complete shared block that is reachable AND was set by "triage mail" wins as `shared` (the other
+ *    app already chose the model; this app just follows it).
+ *  - else the first reachable runtime with a usable model is `found`. Preselect order: this app's own
+ *    `config.model` when usable, else the memory `recommendedModel` when usable, else the first usable id
+ *    (the engine already keeps embeddings out of `usable`).
+ *  - else a reachable runtime with no usable model is `found-empty`: the step offers a download of the
+ *    recommendation (the design's open proposal, kept — no auto-download).
+ *  - else nothing is reachable: `not-found` (the step re-checks itself every 3 s while it stays there).
+ * `overridden` is the one muted note that config.toml sets its own model; `recommend` is what a download
+ * would fetch on this machine.
+ */
+export function stepFromDetect(detect, memBytes) {
+  const rec = recommendedModel(memBytes);
+  const overridden = detect.config?.overridden === true;
+  const runtimes = detect.runtimes ?? [];
+  const reachable = runtimes.filter((r) => r.reachable);
+  const has = (id) => reachable.some((r) => (r.usable ?? []).includes(id));
+
+  const shared = detect.shared;
+  if (shared && shared.reachable && shared.set_by === 'triage mail') {
+    return { state: 'shared', model: shared.model, runtime: shared.runtime, url: shared.url, overridden, recommend: rec };
+  }
+  const withUsable = reachable.find((r) => (r.usable ?? []).length > 0);
+  if (withUsable) {
+    const cfgModel = detect.config?.model ?? '';
+    const chosen = has(cfgModel) ? cfgModel : has(rec.model) ? rec.model : withUsable.usable[0];
+    const source = reachable.find((r) => (r.usable ?? []).includes(chosen));
+    return { state: 'found', model: chosen, runtime: source.runtime, url: source.url, overridden, recommend: rec };
+  }
+  const empty = reachable.find((r) => (r.usable ?? []).length === 0);
+  if (empty) {
+    return { state: 'found-empty', model: null, runtime: empty.runtime, url: empty.url, overridden, recommend: rec };
+  }
+  return { state: 'not-found', model: null, runtime: null, url: null, overridden, recommend: rec };
+}
+
 
 

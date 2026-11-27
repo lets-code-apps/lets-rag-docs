@@ -28,7 +28,7 @@ test('GEOMETRY returns { ok, failures } on an empty page and names every rule', 
 	const result = await fn(emptyPage, { innerWidth: 1200 });
 	assert.equal(result.ok, true);
 	assert.deepEqual(result.failures, []);
-	for (const id of ['settings-article', 'overview-article', 'library-search', 'appbar-clear', 'control-height']) {
+	for (const id of ['settings-article', 'overview-article', 'library-search', 'appbar-clear', 'control-height', 'onboarding']) {
 		assert.ok(GEOMETRY.includes(id), `GEOMETRY missing rule id ${id}`);
 	}
 });

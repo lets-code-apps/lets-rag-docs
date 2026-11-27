@@ -23,6 +23,7 @@ pub struct Config {
     pub llm: LlmConfig,
     pub classify: ClassifyConfig,
     pub ocr: OcrConfig,
+    pub watch: WatchConfig,
 }
 
 /// `[qdrant]`: the vector store, over gRPC.
@@ -190,6 +191,15 @@ impl Default for OcrConfig {
     }
 }
 
+/// `[watch]`: the folders the first-run onboarding saves for the (not-yet-implemented) watcher.
+/// Kept separate from `[paths]` on purpose: these are user-picked source folders, never expanded
+/// or resolved, and empty by default so nothing is watched before a human chooses it.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct WatchConfig {
+    pub folders: Vec<String>,
+}
+
 impl Config {
     /// Reads the config at `path`; a missing file means all defaults, so the tool runs without
     /// setup. Stays pure: it never looks at the shared model file (see `load_with_shared`).
@@ -241,15 +251,15 @@ impl Config {
 /// What the user wrote under `[llm]`; `Config` cannot say (serde fills in defaults). Unknown
 /// keys stay allowed here: this is the user's own config, already validated by `Config`.
 #[derive(Deserialize, Default)]
-struct Written {
+pub(crate) struct Written {
     #[serde(default)]
-    llm: WrittenLlm,
+    pub(crate) llm: WrittenLlm,
 }
 
 #[derive(Deserialize, Default)]
-struct WrittenLlm {
-    base_url: Option<String>,
-    model: Option<String>,
+pub(crate) struct WrittenLlm {
+    pub(crate) base_url: Option<String>,
+    pub(crate) model: Option<String>,
 }
 
 /// Replaces a leading `~` with `$HOME`. The shell does this for arguments, not for paths in a file.
@@ -288,6 +298,32 @@ mod tests {
     #[test]
     fn unknown_keys_are_rejected() {
         assert!(toml::from_str::<Config>("[qdrant]\nulr = \"x\"").is_err());
+    }
+
+    #[test]
+    fn watch_section_parses() {
+        let config: Config =
+            toml::from_str("[watch]\nfolders = [\"~/Downloads\", \"~/Desktop\"]\n").unwrap();
+        assert_eq!(
+            config.watch.folders,
+            vec!["~/Downloads".to_string(), "~/Desktop".to_string()]
+        );
+        // Absent: empty, so nothing is watched by accident.
+        let empty: Config = toml::from_str("").unwrap();
+        assert!(
+            empty.watch.folders.is_empty(),
+            "an absent [watch] stays empty"
+        );
+        // Kept verbatim: no `~` expansion in the stored value.
+        assert_eq!(empty.watch.folders.first(), None);
+    }
+
+    #[test]
+    fn unknown_watch_key_rejected() {
+        assert!(
+            toml::from_str::<Config>("[watch]\nfoldrs = [\"x\"]").is_err(),
+            "a typo in [watch] must be an error, not ignored"
+        );
     }
 
     #[test]

@@ -61,10 +61,32 @@ test('child_process is only used by engine.ts', () => {
 test('preload exposes the ipc channels', () => {
 	const ipc = readFileSync(join(SRC, 'ipc.ts'), 'utf8');
 	const preload = readFileSync(join(SRC, 'preload.cjs'), 'utf8');
-	for (const name of ['ask', 'cancelAsk', 'documents', 'status', 'filingShow', 'filingSave', 'dryRun', 'resort', 'settings', 'setSetting']) {
+	for (const name of [
+		'ask',
+		'cancelAsk',
+		'documents',
+		'status',
+		'filingShow',
+		'filingSave',
+		'dryRun',
+		'resort',
+		'settings',
+		'setSetting',
+		'setupShow',
+		'setupSave',
+		'modelDetect',
+		'modelSave',
+		'modelPull',
+		'cancelPull',
+		'modelPullStatus',
+		'setupComplete',
+		'modelSetup',
+		'pickFolder',
+		'installOllama',
+	]) {
 		assert.ok(ipc.includes(`'rag.${name}'`), `ipc.ts missing ${name}`);
 	}
-	for (const fn of ['ask', 'cancelAsk', 'documents', 'status', 'filing', 'saveFiling', 'dryRun', 'resort', 'settings', 'setSetting']) {
+	for (const fn of ['ask', 'cancelAsk', 'documents', 'status', 'search', 'filing', 'saveFiling', 'dryRun', 'resort', 'pickFiles', 'addNext', 'cancelAdd', 'openDocument', 'settings', 'setSetting', 'setupShow', 'setupSave', 'modelDetect', 'modelSave', 'modelPull', 'cancelPull', 'modelPullStatus', 'completeSetup', 'modelSetup', 'pickFolder', 'installOllama']) {
 		assert.ok(preload.includes(`${fn}:`), `preload missing ${fn}`);
 	}
 });
@@ -72,9 +94,10 @@ test('preload exposes the ipc channels', () => {
 test('every IPC handler checks senderFrame', () => {
 	const main = readFileSync(join(SRC, 'main.ts'), 'utf8');
 	const handles = main.split('ipcMain.handle(').slice(1);
-	// 9 read/edit channels plus step 3's five: search, pickFiles, addNext, cancelAdd,
-	// openDocument, plus #19's status.
-	assert.equal(handles.length, 15, 'all declared channels need handlers');
+	// The 15 channels of the shipped app (reads/edit/add/open/settings) plus LET-136's eleven onboarding
+	// channels: setup show/save, model detect/save/pull, cancelPull, modelPullStatus, setupComplete, modelSetup,
+	// and the two host seams pickFolder + installOllama.
+	assert.equal(handles.length, 26, 'all declared channels need handlers');
 	// The renderer reaches apply in one place only: the explicit "move N copies" button.
 	const page = readFileSync(join(RENDERER, 'app.js'), 'utf8');
 	assert.equal(page.split('api.resort(').length - 1, 1);
@@ -91,6 +114,19 @@ test('settings cross the boundary; only the real host ever registers a login ite
 	// Exactly one call to the real OS login item (the Electron host); smoke/shots use the in-memory one.
 	assert.equal(main.split('setLoginItemSettings').length - 1, 1, 'only the real host registers a login item');
 	assert.ok(main.includes('memoryLoginItem'), 'smoke/shots must use an in-memory login item, not the OS one');
+});
+
+test('first-run onboarding opens at most one external link, to one fixed URL', () => {
+	const main = readFileSync(join(SRC, 'main.ts'), 'utf8');
+	// The only external browser hand-off is "install Ollama", to the one fixed download page.
+	assert.equal(main.split('shell.openExternal(').length - 1, 1, 'exactly one openExternal');
+	const url = ['https', '://ollama.com', '/download'].join('');
+	const setup = readFileSync(join(SRC, 'setup.ts'), 'utf8');
+	assert.equal(setup.split(url).length - 1, 1, 'main must reference the Ollama URL through the setup.ts constant');
+	assert.ok(main.includes('OLLAMA_INSTALL_URL'), 'main must use the constant, never restate the URL');
+	// The folder picker and the memory size are main-only host seams (never a page-named path or a socket).
+	assert.ok(main.includes('folderPicker = '), 'folder picker host not built in boot');
+	assert.ok(main.includes('memoryBytes = '), 'memory host not built in boot');
 });
 
 test('smoke and shots hard-set the fake engine', () => {

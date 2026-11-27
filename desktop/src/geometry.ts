@@ -100,5 +100,17 @@ export const GEOMETRY = `
     }
   }
 
+  // 6) onboarding: the first-run screen's reading column stays within the design's 720.5px maximum and
+  // never scrolls sideways (the document is no wider than the window plus ${TOLERANCE}px+3). Only on an
+  // onboarding screen, on every step and at both the 720px and the 360px minimum widths.
+  const onb = document.querySelector('.onboarding');
+  if (onb && shown(onb)) {
+    const col = document.querySelector('.onboarding-col') || onb;
+    const c = col.getBoundingClientRect();
+    if (c.width > 720.5) fail.push('onboarding col=' + c.width.toFixed(1));
+    const overflow = document.documentElement.scrollWidth - window.innerWidth;
+    if (overflow > ${TOLERANCE} + 3) fail.push('onboarding overflow=' + overflow.toFixed(1));
+  }
+
   return { ok: fail.length === 0, failures: fail };
 `;

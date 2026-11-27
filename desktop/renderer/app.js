@@ -40,7 +40,39 @@ const state = {
   search: { query: '', seq: 0, hits: null, error: null },
   add: { picked: [], results: [], running: false, cancelled: false },
   open: { error: null },
-  settings: { appearance: 'system', openAtLogin: false },
+  settings: { appearance: 'system', openAtLogin: false, memGb: 0 },
+  // First-run onboarding (LET-136): step choices live only in here until the last continue sends
+  // them to main (modelSetup), which performs every write in one fixed order and records setupDone.
+  onboarding: {
+    active: false,
+    step: 0, // 0 library, 1 watch, 2 filing (drawn skipped in the step list), 3 model
+    show: null, // `setup show` report
+    libPath: '',
+    recommended: '',
+    watch: [], // [{path, on}]
+    owners: [], // added this session; only these travel to `filing save`
+    filing: null, // `filing show` report for the folders block
+    typedOwner: '',
+    detect: null, // last `model detect` report
+    stepModel: null, // m.stepFromDetect result for the current detect
+    viewState: 'detecting', // detecting|found|found-empty|not-found|downloading|ready|failed|shared
+    models: [], // usable ids of the chosen runtime (the model segmented control)
+    chosenModel: '', // a model the user picked in the segmented control
+    pull: null, // {model, done, gb, pct} while a download runs; engine's own numbers
+    pullRunning: false,
+    pullError: null, // the engine's sentence for a failed download
+    cancelled: false, // the user cancelled the download: re-detect, not a failure
+    overrideShared: false, // "use another model" on the shared step: a pick here travels
+    address: '', // typed runtime address (only used by a re-check)
+    recheck: null, // timer id: not-found re-detects every 3 s
+    poll: null, // interval id: reads modelPullStatus (~500 ms), never wrapped in track()
+    error: null, // why a continue did not go through
+    filingLoaded: false,
+    filingSkipped: false, // the person pressed Skip on the owners step: the step list draws it skipped
+    wasNotFound: false, // the previous detect found no runtime (the guided-install transition, finding 6)
+    guidedStarted: false, // the recommended pull already auto-started once (finding 6)
+    done: false,
+  },
 };
 
 // ---- small DOM helpers ----
@@ -116,11 +148,25 @@ function listRow(row, onPick) {
 // ---- navigation ----
 
 function render() {
+  if (state.onboarding.active) {
+    // Onboarding replaces the sidebar and every screen (LET-136); the four screens stay hidden
+    // until the last continue records setupDone.
+    renderOnboarding();
+    $('sidebar').hidden = true;
+    $('onboardingScreen').hidden = false;
+    $('overviewScreen').hidden = true;
+    $('askScreen').hidden = true;
+    $('filingScreen').hidden = true;
+    $('settingsScreen').hidden = true;
+    return;
+  }
   renderOverview();
   // The sidebar is one shared component (design Sidebar.dc.html): paint moves the current row
   // and shows the overview count. It counts what a render can currently see pending; the dry-run
   // item appears when the memo lands, then a render raises the count.
   sidebar.paint($('sidebar'), state.section, paintedItems.length);
+  $('sidebar').hidden = false;
+  $('onboardingScreen').hidden = true;
   $('overviewScreen').hidden = state.section !== 'overview';
   $('askScreen').hidden = state.section !== 'ask';
   $('filingScreen').hidden = state.section !== 'filing';
@@ -912,8 +958,9 @@ function renderForm() {
 
 async function loadSettings() {
   const res = await track(api.settings());
-  if (res) state.settings = { appearance: res.appearance, openAtLogin: res.openAtLogin === true };
+  if (res) state.settings = { appearance: res.appearance, openAtLogin: res.openAtLogin === true, memGb: typeof res.memGb === 'number' ? res.memGb : 0 };
   renderSettings();
+  return res;
 }
 
 function renderSettings() {
@@ -932,7 +979,585 @@ async function commitSetting(name, value) {
   renderSettings();
 }
 
-// ---- wiring ----
+// ---- first-run onboarding (LET-136) ----
+//
+// The step screen: `setupDone:false` from settings replaces the sidebar and every screen. Each
+// step opens pre-filled from an engine report; the page only collects choices, and the LAST
+// continue ("start filing") sends them to main once. Nothing is written until then.
+
+const ob = state.onboarding;
+
+function obClearTimers() {
+  if (ob.recheck !== null) {
+    clearTimeout(ob.recheck);
+    ob.recheck = null;
+  }
+  if (ob.poll !== null) {
+    clearInterval(ob.poll);
+    ob.poll = null;
+  }
+}
+
+// The design's four-step list. The middle one ("folders and owners") is drawn skipped — a dashed
+// circle with "–", never the current step; done steps get the check glyph; only the current step
+// carries `aria-current="step"`.
+function obRenderStepList() {
+  const ol = $('setupStepsList');
+  ol.replaceChildren();
+  for (let i = 0; i < 4; i += 1) {
+    const s = m.setupSteps(ob.step, ob.filingSkipped)[i];
+    const li = el('li', `step-${s.state}`);
+    const dot = el('span', 'step-dot');
+    if (s.state === 'done') dot.append(icon('check', 14));
+    else if (s.state === 'skipped') dot.append(el('span', '', '–'));
+    else dot.append(el('span', '', String(i + 1)));
+    li.append(dot, el('span', 'step-label', s.title));
+    if (s.state === 'done') li.append(el('span', 'sr', ', done'));
+    if (s.state === 'current') li.setAttribute('aria-current', 'step');
+    ol.append(li);
+  }
+}
+
+function obField(labelText, inputId, opts) {
+  const wrap = el('label', 'field-wrap');
+  wrap.append(el('span', 'field-label', labelText));
+  const field = el('span', 'field');
+  const input = el('input');
+  input.id = inputId;
+  input.type = 'text';
+  input.autocomplete = 'off';
+  if (opts.readonly) input.readOnly = true;
+  if (opts.placeholder) input.placeholder = opts.placeholder;
+  if (opts.value) input.value = opts.value;
+  if (opts.helper) {
+    input.setAttribute('aria-describedby', `${inputId}Helper`);
+  }
+  field.append(input);
+  wrap.append(field);
+  if (opts.helper) {
+    const helper = el('span', 'helper');
+    helper.id = `${inputId}Helper`;
+    helper.textContent = opts.helper;
+    wrap.append(helper);
+  }
+  return { wrap, input };
+}
+
+// Step 1 (library location): the folder is a read-only field showing the engine's effective value;
+// the OS picker or "use the recommended folder" (only when an iCloud folder is picked) change it.
+function obBuildLibrary() {
+  const body = el('div', 'step-content');
+  body.append(obField('library folder', 'libField', { readonly: true, value: ob.libPath, helper: 'Recommended: on this Mac, inside Documents.' }).wrap);
+  const btns = el('div', 'step-btns');
+  const choose = el('button', 'btn secondary');
+  choose.type = 'button';
+  choose.append(el('span', '', 'choose folder'));
+  choose.addEventListener('click', () => void obPickFolder(false));
+  btns.append(choose);
+  if (m.isICloudPath(ob.libPath)) {
+    const useRec = el('button', 'btn ghost');
+    useRec.type = 'button';
+    useRec.append(el('span', '', 'use the recommended folder'));
+    useRec.addEventListener('click', () => {
+      ob.libPath = ob.recommended;
+      render();
+    });
+    btns.append(useRec);
+  }
+  body.append(btns);
+  if (m.isICloudPath(ob.libPath)) {
+    const note = el('div', 'model-card icloud-note');
+    note.setAttribute('role', 'note');
+    note.append(pill('turn on keep downloaded', 'attention'));
+    note.append(el('p', '', 'In Finder, Control-click the library folder and choose Keep Downloaded. Otherwise rag docs can’t read files that are stored only in iCloud.'));
+    note.append(el('span', 'model-note', 'Copies in iCloud Drive are uploaded to Apple’s iCloud. The model and the search index stay on this Mac.'));
+    body.append(note);
+  }
+  return body;
+}
+
+// Step 2 (folders to watch): a 44px switch row per folder — label is the folder's name, the muted
+// note is the engine's path — plus "add folder" (the OS picker). Turn off any you do not want read.
+// Under the list: the design's muted line, then the board's answer — watching is a follow-up, so
+// the screen says so instead of promising it.
+function obBuildWatch() {
+  const body = el('div', 'step-content');
+  const rows = el('div', 'watch-rows');
+  for (const w of ob.watch) {
+    const row = el('div', 'watch-row');
+    row.append(el('span', 'switch-label', m.basename(w.path)));
+    const sw = el('input', 'switch');
+    sw.type = 'checkbox';
+    sw.setAttribute('role', 'switch');
+    sw.setAttribute('aria-label', w.path);
+    sw.checked = w.on;
+    sw.addEventListener('input', () => {
+      w.on = sw.checked;
+      render();
+    });
+    row.append(sw);
+    row.append(el('span', 'watch-note', w.path));
+    rows.append(row);
+  }
+  body.append(rows);
+  const btns = el('div', 'step-btns');
+  const add = el('button', 'btn secondary');
+  add.type = 'button';
+  add.append(icon('plus', 18), el('span', '', 'add folder'));
+  add.addEventListener('click', () => void obPickFolder(true));
+  btns.append(add);
+  body.append(btns);
+  body.append(el('span', 'watch-muted', m.SETUP_COPY.watchMuted));
+  body.append(el('span', 'watch-muted', m.SETUP_COPY.watchLater));
+  return body;
+}
+
+// Step 3 (folders and owners): the folders block is the filing list shown as text (the default list,
+// edited later in filing); owners are added through the name field + "add owner", and every added
+// owner becomes a simple row under the field (name, 44px remove button) reusing the filing row style.
+function obBuildFiling() {
+  const body = el('div', 'step-content');
+  const folders = el('div', 'step-section');
+  folders.append(el('span', 'step-subhead', 'folders'));
+  folders.append(el('p', 'folders-list', (ob.filing?.folders ?? []).join(', ')));
+  folders.append(el('span', 'model-note', 'The default list. Rename or add folders later in filing.'));
+  body.append(folders);
+  const owners = el('div', 'step-section');
+  owners.append(el('span', 'step-subhead', 'owners'));
+  owners.append(obField('owner name', 'ownerField', { placeholder: 'e.g. Jan Kowalski', helper: 'Whose documents these are: a family member or one of your own companies.' }).wrap);
+  const btns = el('div', 'step-btns');
+  const add = el('button', 'btn secondary');
+  add.type = 'button';
+  add.append(icon('plus', 18), el('span', '', 'add owner'));
+  add.addEventListener('click', () => {
+    const input = document.getElementById('ownerField');
+    const name = input ? input.value.trim() : '';
+    if (name === '' || ob.owners.includes(name)) {
+      render();
+      return;
+    }
+    ob.owners.push(name);
+    render();
+  });
+  btns.append(add);
+  body.append(btns);
+  const rows = el('div', 'owner-rows');
+  for (const name of ob.owners) {
+    const row = el('div', 'owner-row');
+    row.append(el('span', 'row-title', name));
+    const remove = el('button', 'btn ghost');
+    remove.type = 'button';
+    remove.append(el('span', '', 'remove'));
+    remove.addEventListener('click', () => {
+      ob.owners = ob.owners.filter((x) => x !== name);
+      render();
+    });
+    row.append(remove);
+    rows.append(row);
+  }
+  owners.append(rows);
+  owners.append(el('span', 'model-note', m.SETUP_COPY.ownersMuted));
+  body.append(owners);
+  return body;
+}
+
+// Step 4 (model): the card `m.modelView` shapes — pill, line, optional bar (the engine's own
+// numbers), note, the `[llm]`-over-shared note, and the state's actions — plus the model segmented
+// control when there are choices and the runtime address field. Not-found re-checks itself every
+// 3 s; a finished download is confirmed by the engine's completion probe (`model.answering`) before
+// the step may say "ready".
+function obBuildModel() {
+  const body = el('div', 'step-content');
+  const view = m.modelView(ob.viewState, {
+    runtime: ob.stepModel?.runtime ?? 'ollama',
+    url: ob.stepModel?.url ?? ob.address,
+    model: ob.chosenModel || ob.stepModel?.model || ob.pull?.model || '',
+    memGb: state.settings.memGb,
+    overridden: ob.stepModel?.overridden ?? false,
+    recommend: ob.stepModel?.recommend ?? m.recommendedModel((state.settings.memGb || 16) * 1024 ** 3),
+    usable: ob.models,
+    pull: ob.pull,
+    error: ob.pullError,
+  });
+  const card = el('div', 'model-card');
+  card.setAttribute('role', 'status');
+  card.append(pill(view.pill, view.tone));
+  card.append(el('p', '', view.text));
+  if (view.bar) {
+    const bar = el('div', 'progress');
+    bar.setAttribute('role', 'progressbar');
+    bar.setAttribute('aria-label', `downloading ${view.barModel}`);
+    bar.setAttribute('aria-valuemin', '0');
+    bar.setAttribute('aria-valuemax', '100');
+    bar.setAttribute('aria-valuenow', String(Math.round(ob.pull?.pct ?? 0)));
+    const fill = el('div', 'fill');
+    fill.style.width = `${Math.min(100, Math.max(0, Math.round(ob.pull?.pct ?? 0)))}%`;
+    bar.append(fill);
+    card.append(bar);
+    card.append(el('span', 'bar-meta', view.bar));
+  }
+  if (view.note) card.append(el('span', 'model-note', view.note));
+  if (view.ob) card.append(el('span', 'model-note', m.OVERRIDDEN_NOTE));
+  for (const a of view.actions) {
+    const button = el('button', `btn ${a.variant}`);
+    button.type = 'button';
+    if (a.glyph) button.append(icon(a.glyph, 18));
+    button.append(el('span', '', a.label));
+    button.addEventListener('click', () => void modelAction(a.label));
+    card.append(button);
+  }
+  body.append(card);
+  if (view.models.length > 0) {
+    const row = el('div', 'model-row');
+    row.append(el('span', 'model-label', 'model'));
+    const seg = el('div', 'seg');
+    seg.setAttribute('role', 'radiogroup');
+    seg.setAttribute('aria-label', 'model');
+    for (const id of view.models) {
+      const option = el('button', '');
+      option.type = 'button';
+      option.setAttribute('role', 'radio');
+      option.dataset.value = id;
+      option.setAttribute('aria-checked', (ob.chosenModel || ob.stepModel?.model) === id ? 'true' : 'false');
+      option.append(el('span', '', id));
+      option.addEventListener('click', () => {
+        ob.chosenModel = id;
+        render();
+      });
+      seg.append(option);
+    }
+    row.append(seg);
+    row.append(el('span', 'model-note', view.modelNote));
+    body.append(row);
+  }
+  if (view.hasAddress) {
+    body.append(obField('runtime address', 'addressField', { placeholder: 'http://localhost:11434', value: ob.address, helper: 'Another port or runtime? Type its address.' }).wrap);
+  }
+  if (ob.error !== null) {
+    const err = el('p', 'step-error');
+    err.setAttribute('role', 'alert');
+    err.textContent = ob.error;
+    body.append(err);
+  }
+  return body;
+}
+
+function modelAction(label) {
+  if (label === 'install Ollama') {
+    // One hand-off of the fixed URL to the OS browser (main's only openExternal); the step keeps
+    // re-checking itself either way.
+    void track(api.installOllama());
+    return;
+  }
+  if (label === 'check again' || label === 'try again') {
+    obClearTimers();
+    void obDetect();
+    return;
+  }
+  if (label === 'cancel download') {
+    ob.cancelled = true;
+    void track(api.cancelPull());
+    return; // cancel → re-detect when the pull reports it stopped
+  }
+  if (label.startsWith('download ')) {
+    startDownload(label.slice('download '.length));
+    return;
+  }
+  if (label === 'use another model') {
+    // Transition to the selectable found state (not stay on `shared`, which hides the model chooser and
+    // the address field), preselecting the shared runtime so the person can pick a different model there
+    // (review finding 4, LET-165). The finish then saves that choice under rag docs, not the shared one.
+    ob.overrideShared = true;
+    const step = m.switchFromShared(ob.detect, (state.settings.memGb || 16) * 1024 ** 3);
+    ob.stepModel = step;
+    ob.viewState = step.state;
+    ob.models = m.choiceList(ob.detect, step.url);
+    ob.chosenModel = step.model ?? '';
+    render();
+  }
+}
+
+function obClearAddressFromField() {
+  const field = document.getElementById('addressField');
+  if (field) ob.address = field.value.trim();
+}
+
+function startDownload(modelId) {
+  const url = ob.stepModel?.url ?? '';
+  ob.pull = { model: modelId, done: 0, gb: 0, pct: 0 };
+  ob.viewState = 'downloading';
+  ob.pullError = null;
+  ob.cancelled = false;
+  ob.pullRunning = true;
+  // A download streams for minutes: the page never awaits it and never tracks it (it would never
+  // settle). The bar reads `modelPullStatus` every 500 ms — engine numbers, painted as data — and
+  // the pull result lands success/failed when it arrives.
+  void api.modelPull(modelId, url === '' ? undefined : url).then((res) => void onPullResult(modelId, res));
+  ob.poll = setInterval(() => void obPollBar(), 500);
+  render();
+}
+
+async function obPollBar() {
+  if (!ob.pullRunning || ob.poll === null) return;
+  const res = await api.modelPullStatus();
+  if (ob.pullRunning && res && ob.poll !== null) {
+    ob.pull = { model: res.model || ob.pull?.model || '', done: res.done ?? 0, gb: res.gb ?? 0, pct: res.pct ?? 0 };
+    render();
+  }
+}
+
+function onPullResult(modelId, res) {
+  ob.pullRunning = false;
+  if (ob.poll !== null) {
+    clearInterval(ob.poll);
+    ob.poll = null;
+  }
+  if (!ob.active || ob.step !== 3) return;
+  if (ob.cancelled) {
+    ob.pull = null;
+    ob.chosenModel = '';
+    void obDetect(); // "Cancel → re-detect"
+    return;
+  }
+  if (!res || !res.ok) {
+    ob.pullError = res?.error ?? 'the engine did not answer';
+    ob.viewState = 'failed';
+    render();
+    return;
+  }
+  if (res.success !== true) {
+    ob.pullError = res.reason ?? 'the download ended before the model finished';
+    ob.viewState = 'failed';
+    render();
+    return;
+  }
+  // Ready is the board's answer 3, made real (review finding 1, LET-165): ask the engine to run its
+  // completion probe on the model that was just downloaded, at its own endpoint — `status --answer --url --
+  // model` — NOT the cheap `status --json` (which never sends `--answer` and reports `answering: null`, and
+  // would otherwise ask the old model still in config.toml). The engine reads the completion body, so only a
+  // model that actually generates lands Ready; the desktop gives this call a budget longer than the engine's
+  // own completion budget. Nothing is written before the save.
+  const probeUrl = ob.stepModel?.url || ob.address || '';
+  void track(api.status(probeUrl, modelId)).then((st) => {
+    if (!ob.active) return;
+    if (st && st.ok && st.report?.model?.answering === true) {
+      ob.viewState = 'ready';
+      ob.chosenModel = modelId;
+      if (ob.stepModel) ob.stepModel = { ...ob.stepModel, state: 'found', model: modelId };
+    } else {
+      ob.viewState = 'failed';
+      ob.pullError = 'the model was downloaded, but it did not answer the test question.';
+    }
+    render();
+  });
+}
+
+async function obDetect() {
+  obClearAddressFromField();
+  const priorNotFound = ob.wasNotFound; // whether the last detect saw no runtime (the guided-install transition)
+  const res = await track(api.modelDetect(ob.address === '' ? undefined : ob.address));
+  if (!ob.active || ob.step !== 3) return;
+  if (!res || !res.ok) {
+    ob.stepModel = null;
+    ob.detect = null;
+    ob.viewState = 'not-found';
+    ob.wasNotFound = true;
+    scheduleRecheck();
+    render();
+    return;
+  }
+  ob.detect = res.report;
+  ob.chosenModel = '';
+  const step = m.stepFromDetect(res.report, (state.settings.memGb || 16) * 1024 ** 3);
+  ob.stepModel = step;
+  ob.wasNotFound = step.state === 'not-found';
+  if (step.state === 'shared' && ob.overrideShared === true) {
+    ob.viewState = 'found';
+    ob.models = m.choiceList(res.report, step.url);
+  } else if (step.state === 'shared') {
+    ob.viewState = 'shared';
+    ob.models = [];
+  } else if (step.state === 'found') {
+    ob.viewState = 'found';
+    ob.models = m.choiceList(res.report, step.url);
+  } else {
+    ob.viewState = step.state;
+    if (step.state === 'not-found') {
+      scheduleRecheck();
+    } else if (m.guidedInstall(priorNotFound, step.state, ob.guidedStarted)) {
+      // Guided install (finding 6): the not-found screen promised that installing Ollama then re-detecting
+      // downloads the recommendation itself. The first detect that now finds an empty Ollama after a not-found
+      // starts that recommended pull exactly once; an initially-empty runtime keeps the manual offer only.
+      ob.guidedStarted = true;
+      startDownload(step.recommend.model);
+      return;
+    }
+  }
+  render();
+}
+
+function scheduleRecheck() {
+  if (ob.recheck !== null) {
+    clearTimeout(ob.recheck);
+    ob.recheck = null;
+  }
+  ob.recheck = setTimeout(() => {
+    ob.recheck = null;
+    if (ob.active && ob.step === 3 && ob.viewState === 'not-found') void obDetect();
+  }, 3000);
+}
+
+async function obPickFolder(isWatch) {
+  const res = await track(api.pickFolder());
+  if (!res || !res.ok || res.canceled === true || typeof res.path !== 'string') {
+    render();
+    return;
+  }
+  if (isWatch) {
+    if (!ob.watch.some((w) => w.path === res.path)) ob.watch.push({ path: res.path, on: true });
+  } else {
+    ob.libPath = res.path;
+  }
+  render();
+}
+
+function obStepBody() {
+  if (ob.step === 0) return obBuildLibrary();
+  if (ob.step === 1) return obBuildWatch();
+  if (ob.step === 2) return obBuildFiling();
+  return obBuildModel();
+}
+
+function renderOnboarding() {
+  obRenderStepList();
+  const stepCopy = m.SETUP_COPY[['library', 'watch', 'filing', 'model'][ob.step]];
+  $('stepTitle').textContent = stepCopy.title;
+  $('stepText').textContent = stepCopy.text;
+  $('stepBody').replaceChildren(obStepBody());
+  // back / skip / continue: back from every step but the first; skip only on the skippable
+  // folders-and-owners step; continue's label is the design's, and only continue may ever be
+  // disabled (aria-disabled while the model step is still detecting).
+  $('stepBack').hidden = ob.step === 0;
+  $('stepSkip').hidden = ob.step !== 2;
+  const cont = $('stepContinue');
+  const label = ob.step < 3 ? 'continue' : obModelNextLabel();
+  $('stepContinueLabel').textContent = label;
+  const off = ob.step === 3 && ob.viewState === 'detecting';
+  cont.setAttribute('aria-disabled', off ? 'true' : 'false');
+  cont.disabled = off;
+  cont.className = `btn ${ob.step === 3 && (ob.viewState === 'not-found' || ob.viewState === 'failed') ? 'secondary' : 'primary'}`;
+}
+
+function obModelNextLabel() {
+  if (ob.viewState === 'detecting') return 'continue';
+  if (ob.viewState === 'not-found' || ob.viewState === 'failed') return 'set up later';
+  return 'start filing';
+}
+
+// Navigation. Steps 1-3 never write: "continue" means "use what is shown"; skip on the owners
+// step leaves the lists untouched. The model step's continue is the LAST one: main runs the writes.
+function obGoStep(step) {
+  ob.step = step;
+  if (step === 2) {
+    // Back into the owners step starts using it again, so the Skip marking does not survive the trip
+    // (LET-165 review round 3): after a Skip, pressing Back, adding an owner and continuing must land on
+    // a step that really saves the owner and reads done in the step list - not one stuck in the dashed
+    // skip drawing.
+    ob.filingSkipped = false;
+  }
+  if (step === 3) {
+    ob.viewState = 'detecting';
+    // A fresh entry to the model step starts a new detect cycle: the guided-install transition (finding 6)
+    // is per-cycle, so a not-found from an earlier visit must not trigger a surprise pull on return.
+    ob.wasNotFound = false;
+    ob.guidedStarted = false;
+    void obDetect();
+  }
+  if (step === 2 && ob.filingLoaded !== true) {
+    ob.filingLoaded = true;
+    void track(api.filing()).then((res) => {
+      ob.filing = res && res.ok ? res.report : null;
+      if (ob.active && ob.step === 2) render();
+    });
+  }
+  render();
+}
+
+function obContinue() {
+  if (ob.step === 3) {
+    void obFinish();
+    return;
+  }
+  obGoStep(ob.step + 1);
+}
+
+function obSkip() {
+  // Skip on the owners step: the existing lists stand, nothing was added, so no owner save follows. The
+  // step list then draws this step as actually skipped (a dashed –) instead of a visited step.
+  ob.owners = [];
+  ob.filingSkipped = true;
+  obGoStep(3);
+}
+
+function obBack() {
+  if (ob.step === 0) return;
+  const target = ob.step - 1;
+  obClearTimers();
+  obGoStep(target);
+}
+
+// The last continue: send the choices once. `model` travels when one is chosen and the shared block
+// is not being kept; during a download it travels too, and main runs the save when the job reports
+// success (never while the stream is open).
+async function obFinish() {
+  const watchFolders = ob.watch.filter((w) => w.on).map((w) => w.path);
+  const payload = { library_dir: ob.libPath, watch_folders: watchFolders };
+  if (ob.owners.length > 0) payload.owners = ob.owners;
+  // A download's in-flight model counts as a choice only while it is still running (main defers that save
+  // to the pull's success); once a pull has finished-and-failed its model id must not become the choice.
+  const chosen = ob.chosenModel || ob.stepModel?.model || (ob.pullRunning ? ob.pull?.model : '') || '';
+  const keepShared = ob.stepModel?.state === 'shared' && ob.overrideShared !== true;
+  // A model travels only for a real installed choice (found/ready), an explicit switch on the shared step,
+  // or a still-running pull. A failed or not-found "set up later" sends no model, so deferring setup can
+  // never leave the shared file pointing at a model whose download failed (review finding 3, LET-165).
+  if (m.modelTravels(ob.viewState, ob.pullRunning, keepShared) && chosen !== '') {
+    payload.model = { runtime: ob.stepModel?.runtime ?? 'ollama', url: ob.stepModel?.url ?? ob.address, model: chosen };
+  }
+  const res = await track(api.modelSetup(payload));
+  if (!res || !res.ok) {
+    // Stay on the step and say which failed: re-continuing is safe (an unchanged engine save writes
+    // nothing), per the main-side contract.
+    ob.error = res?.error ?? 'the setup did not go through';
+    render();
+    return;
+  }
+  obClearTimers();
+  ob.active = false;
+  ob.done = true;
+  state.settings.setupDone = true;
+  showSection('overview');
+  void loadDocs();
+  void loadOverview();
+  void bootFiling();
+}
+
+function startOnboarding() {
+  ob.active = true;
+  ob.step = 0;
+  render();
+  void track(api.setupShow()).then((res) => {
+    if (!res || !res.ok) {
+      ob.error = res?.error ?? 'the engine did not answer.';
+      render();
+      return;
+    }
+    ob.show = res.report;
+    ob.recommended = res.report.recommended_library_dir;
+    ob.libPath = res.report.library_dir_set === true ? res.report.library_dir : res.report.recommended_library_dir;
+    ob.watch = m.watchRows(res.report).map((w) => ({ path: w.path, on: true }));
+    render();
+  });
+}
 
 function wire() {
   for (const button of document.querySelectorAll('.nav button')) {
@@ -1007,18 +1632,39 @@ function wire() {
 
   // macOS lets the user change the login item in System Settings while the app is open; refocusing
   // re-reads it, so the switch never shows a state the OS no longer has. The overview re-reads its
-  // two engine calls the same way: the window you look at is the window that is true.
+  // two engine calls the same way: the window you look at is the window that is true. The onboarding
+  // gate is re-checked on focus too: while the step screen is up, the overview must not load behind
+  // it; once `setupDone` landed (from the last continue), normal loading resumes.
   window.addEventListener('focus', () => {
-    void loadSettings();
-    void loadOverview();
+    void loadSettings().then((res) => {
+      if (res && res.setupDone === true && !state.onboarding.active) void loadOverview();
+    });
   });
+
+  // Onboarding: the three design buttons; the step's own controls are (re)built inside #stepBody
+  // on every render, so their listeners travel with the nodes.
+  $('stepContinue').addEventListener('click', () => void obContinue());
+  $('stepSkip').addEventListener('click', () => void obSkip());
+  $('stepBack').addEventListener('click', () => obBack());
 }
 
 document.body.dataset.pending = '0';
 sidebar.build($('sidebar'));
 wire();
 render();
-void loadDocs();
-void loadOverview();
-void bootFiling();
-void loadSettings();
+
+// Boot gate (the plan's): read settings first; only if `setupDone` do the normal loads start
+// (no 10-minute dry-run before setup). A false `setupDone` opens the step screen instead.
+async function boot() {
+  const res = await loadSettings();
+  if (res && res.setupDone === true) {
+    state.settings.setupDone = true;
+    void loadDocs();
+    void loadOverview();
+    void bootFiling();
+  } else {
+    startOnboarding();
+  }
+}
+
+void boot();

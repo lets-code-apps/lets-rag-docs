@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { test } from 'node:test';
 
-import { Engine, type EngineProcess } from '../src/engine.ts';
+import { Engine, STATUS_ANSWER_MS, type EngineProcess } from '../src/engine.ts';
 
 class FakeChild extends EventEmitter {
 	readonly stdin: NodeJS.WritableStream | null = null;
@@ -245,4 +245,200 @@ test('status parses the engine report through the real collect path', async () =
 	assert.ok(result.ok);
 	assert.equal(result.value.model.reachable, false);
 	assert.equal(result.value.last_sync, null);
+});
+
+// The onboarding's Ready probe (review finding 1, LET-165): `status --answer` with the just-chosen model+endpoint.
+test('status --answer argv is the completion probe on the chosen model+endpoint', async () => {
+	const recorded: string[][] = [];
+	const spawn = {
+		call(file: string, args: string[]) {
+			void file;
+			recorded.push(args);
+			const child = new FakeChild();
+			queueMicrotask(() => child.emit('close'));
+			return child as unknown as EngineProcess;
+		},
+	};
+	const engine = new Engine({ RAG_DOCS_ENGINE_PATH: 'fake' }, '/repo', spawn, 0, 100);
+	await engine.statusAnswer('http://127.0.0.1:11434/v1', 'qwen3:8b');
+	assert.deepEqual(recorded, [['status', '--json', '--answer', '--url=http://127.0.0.1:11434/v1', '--model=qwen3:8b']]);
+	// A value that could not be a valid model id (here: empty) is refused by the builder and never reaches argv.
+	const bad = await engine.statusAnswer('http://127.0.0.1:11434/v1', '');
+	assert.ok(!bad.ok, 'a blank model is rejected by the builder');
+});
+
+test('the Ready probe parses answering through the real collect path', async () => {
+	const seen = { args: [] as string[][], stdin: [] as string[] };
+	const spawn = slowSpawn(0, JSON.stringify({ version: 1, model: { reachable: true, answering: true }, last_sync: null }), seen);
+	const engine = new Engine({ RAG_DOCS_ENGINE_PATH: 'fake' }, '/repo', spawn, 0, 100);
+	const result = await engine.statusAnswer('http://127.0.0.1:1234', 'qwen3:8b');
+	assert.ok(result.ok);
+	assert.equal(result.value.model.answering, true, 'the download can reach Ready on a real answer');
+});
+
+test('the Ready probe gives the child a budget longer than the engine\'s 30 s completion timeout', () => {
+	// The engine bounds `--answer` at 30 s (a freshly pulled model takes seconds to load). The desktop must
+	// not SIGKILL that child at a shorter budget and report a failure the engine never had (finding 1).
+	assert.ok(STATUS_ANSWER_MS > 30_000, 'desktop budget must exceed the engine completion budget');
+	assert.ok(STATUS_ANSWER_MS < 60_000, 'still bounded: a dead endpoint returns rather than hanging onboarding');
+});
+
+// ---- first-run onboarding (LET-136): setup show/save and model detect/save/pull ----
+
+test('setup show argv is exactly setup show --json', async () => {
+	const recorded: string[][] = [];
+	const spawn = {
+		call(file: string, args: string[]) {
+			void file;
+			recorded.push(args);
+			const child = new FakeChild();
+			queueMicrotask(() => child.emit('close'));
+			return child as unknown as EngineProcess;
+		},
+	};
+	const engine = new Engine({ RAG_DOCS_ENGINE_PATH: 'fake' }, '/repo', spawn, 0);
+	await engine.setupShow();
+	assert.deepEqual(recorded, [['setup', 'show', '--json']]);
+});
+
+test('the setup draft travels on stdin like a filing draft; --check is the only difference', async () => {
+	const seen = { args: [] as string[][], stdin: [] as string[], killed: false };
+	const show = JSON.stringify({ version: 1, ok: true, saved: true, errors: [] });
+	const engine = new Engine({ RAG_DOCS_ENGINE_PATH: 'fake' }, '/repo', slowSpawn(1, show, seen), 1000);
+	const result = await engine.setupSave({ library_dir: '~/Documents/library', watch_folders: ['~/Downloads'] }, false);
+	assert.ok(result.ok);
+	assert.deepEqual(seen.args, [['setup', 'save']]);
+	assert.deepEqual(seen.stdin, ['{"library_dir":"~/Documents/library","watch_folders":["~/Downloads"]}\n']);
+	await engine.setupSave({ library_dir: '~/L', watch_folders: [] }, true);
+	assert.deepEqual(seen.args[1], ['setup', 'save', '--check']);
+});
+
+test('setup save refuses a wrong-typed draft before touching the engine', async () => {
+	const seen = { args: [] as string[][], stdin: [] as string[], killed: false };
+	const engine = new Engine({ RAG_DOCS_ENGINE_PATH: 'fake' }, '/repo', slowSpawn(1, '{}', seen), 1000);
+	const noLibrary = await engine.setupSave({ watch_folders: [] }, true);
+	const folderNotString = await engine.setupSave({ library_dir: '~/L', watch_folders: [42] }, true);
+	assert.ok(!noLibrary.ok);
+	assert.ok(!folderNotString.ok);
+	assert.equal(seen.args.length, 0, 'no engine call for an invalid draft');
+});
+
+test('model detect argv is closed: model detect --json, --url only when typed', async () => {
+	const recorded: string[][] = [];
+	const spawn = {
+		call(file: string, args: string[]) {
+			void file;
+			recorded.push(args);
+			const child = new FakeChild();
+			queueMicrotask(() => child.emit('close'));
+			return child as unknown as EngineProcess;
+		},
+	};
+	const engine = new Engine({ RAG_DOCS_ENGINE_PATH: 'fake' }, '/repo', spawn, 0);
+	await engine.modelDetect();
+	await engine.modelDetect('http://127.0.0.1:11434');
+	assert.deepEqual(recorded, [['model', 'detect', '--json'], ['model', 'detect', '--json', '--url=http://127.0.0.1:11434']]);
+	// A value that cannot be an address (a flag) never spawns anything.
+	const before = recorded.length;
+	const refused = await engine.modelDetect('--evil');
+	assert.ok(!refused.ok);
+	assert.equal(recorded.length, before, 'a bad --url is refused in-process');
+});
+
+test('model save argv is the three validated value-flags', async () => {
+	const recorded: string[][] = [];
+	const spawn = {
+		call(file: string, args: string[]) {
+			void file;
+			recorded.push(args);
+			const child = new FakeChild();
+			queueMicrotask(() => child.emit('close'));
+			return child as unknown as EngineProcess;
+		},
+	};
+	const engine = new Engine({ RAG_DOCS_ENGINE_PATH: 'fake' }, '/repo', spawn, 0);
+	await engine.modelSave('ollama', 'http://127.0.0.1:11434', 'qwen3:8b');
+	assert.deepEqual(recorded, [['model', 'save', '--json', '--runtime=ollama', '--url=http://127.0.0.1:11434', '--model=qwen3:8b']]);
+	const bad = await engine.modelSave('cloud', 'http://127.0.0.1:11434', 'qwen3:8b');
+	assert.ok(!bad.ok, 'only the engine runtime words reach argv');
+});
+
+/** A child that streams NDJSON over `chunks` then closes; records argv and whether it was killed. */
+function pullSpawn(chunks: string[], seen: { args: string[][]; killed: boolean }, opts: { delayMs: number; hold?: boolean }) {
+	return {
+		call(file: string, args: string[]) {
+			void file;
+			seen.args.push(args);
+			const child = new EventEmitter() as EventEmitter & Record<string, unknown>;
+			const out = new EventEmitter();
+			child.stdout = out;
+			child.stderr = new EventEmitter();
+			if (!opts.hold) {
+				setTimeout(() => {
+					for (const c of chunks) out.emit('data', c);
+					child.emit('exit', 0);
+					child.emit('close');
+				}, opts.delayMs);
+			}
+			child.kill = () => {
+				seen.killed = true;
+				child.emit('close');
+			};
+			return child as unknown as EngineProcess;
+		},
+	};
+}
+
+test('model pull streams the NDJSON, updates the bar live, and reports success', async () => {
+	const seen = { args: [] as string[][], killed: false };
+	// A chunk boundary lands mid-line: the buffer tail must rejoin it before parsing.
+	const chunks = ['{"stage":"pulling manifest"}\n{"stage":"down', 'loading","total":2048,"completed":1024}\n', '{"stage":"success"}\n'];
+	// env, repo, spawn, read, ask, resources, dryRun, apply, add, pull
+	const engine = new Engine({ RAG_DOCS_ENGINE_PATH: 'fake' }, '/repo', pullSpawn(chunks, seen, { delayMs: 2 }), 0, 100, undefined, 1000, 1000, 1000, 1000);
+	const result = await engine.modelPull('qwen3:8b');
+	assert.ok(result.ok);
+	assert.equal(result.value.success, true);
+	assert.equal(result.value.error, null);
+	assert.deepEqual(seen.args, [['model', 'pull', '--json', '--', 'qwen3:8b']]);
+	const status = engine.modelPullStatus();
+	assert.equal(status.model, 'qwen3:8b');
+	assert.equal(status.stage, 'success');
+	assert.equal(status.success, true);
+	assert.equal(status.pct, 50, '1024/2048 of the way through the download');
+	assert.equal(status.running, false, 'the slot is closed once the pull is over');
+});
+
+test('cancelPull kills the download child and the pull reports it did not finish', async () => {
+	const seen = { args: [] as string[][], killed: false };
+	// hold: the child never closes on its own, so only cancelPull ends it.
+	const engine = new Engine({ RAG_DOCS_ENGINE_PATH: 'fake' }, '/repo', pullSpawn([], seen, { delayMs: 0, hold: true }), 0, 100, undefined, 1000, 1000, 1000, 1000);
+	const running = engine.modelPull('qwen3:14b');
+	const cancelled = engine.cancelPull();
+	const result = await running;
+	assert.equal(cancelled, true);
+	assert.equal(seen.killed, true);
+	assert.ok(result.ok, 'a cancelled stream is still a result, not a crash');
+	assert.equal(result.value.success, false);
+	assert.match(result.value.error ?? '', /ended|finish/i);
+});
+
+test('a second model pull is refused while one runs (single flight)', async () => {
+	const seen = { args: [] as string[][], killed: false };
+	const engine = new Engine({ RAG_DOCS_ENGINE_PATH: 'fake' }, '/repo', pullSpawn([], seen, { delayMs: 0, hold: true }), 0, 100, undefined, 1000, 1000, 1000, 1000);
+	void engine.modelPull('qwen3:8b'); // starts the single slot and awaits on the held child
+	const second = await engine.modelPull('qwen3:4b');
+	assert.ok(!second.ok);
+	assert.match(second.error, /already running/);
+	assert.equal(seen.args.length, 1, 'the refused pull never spawns a child');
+	engine.cancelPull();
+});
+
+test('a pull whose stream never reaches success is a failed pull, not an engine error', async () => {
+	const seen = { args: [] as string[][], killed: false };
+	// The server reports only a downloading line, then closes: no `success` stage.
+	const chunks = ['{"stage":"downloading","total":2048,"completed":1}\n'];
+	const engine = new Engine({ RAG_DOCS_ENGINE_PATH: 'fake' }, '/repo', pullSpawn(chunks, seen, { delayMs: 2 }), 0, 100, undefined, 1000, 1000, 1000, 1000);
+	const result = await engine.modelPull('qwen3:8b');
+	assert.ok(result.ok);
+	assert.equal(result.value.success, false, 'a body that stopped early is not a finished model');
 });

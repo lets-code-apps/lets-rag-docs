@@ -32,6 +32,10 @@ export type StatusReport = {
 
 export type ModelStatus = {
 	reachable: boolean;
+	// Whether a tiny completion actually came back (the engine's `status --answer` probe).
+	// `null` means the probe did not run or the engine does not answer: it is not the same as
+	// `false`, and the onboarding "Ready" check reads the answer, not just reachability.
+	answering: boolean | null;
 };
 
 export type SearchReport = {
@@ -229,10 +233,14 @@ export function parseStatus(stdout: string, stderrTail: string[]): Parse<StatusR
 	if (typeof obj.model !== 'object' || obj.model === null || typeof (obj.model as { reachable?: unknown }).reachable !== 'boolean') {
 		return err('status report is missing model.reachable');
 	}
-	const reachable = (obj.model as { reachable: unknown }).reachable === true;
+	const modelObj = obj.model as { reachable: unknown; answering?: unknown };
+	const reachable = modelObj.reachable === true;
+	// `answering` is the real completion the board's Ready check depends on. An older engine that
+	// never sends it, or a probe that could not run, reads `null` (unknown) — never a fake `false`.
+	const answering = modelObj.answering === true ? true : modelObj.answering === false ? false : null;
 	// A database that does not exist yet reports null; an older engine may omit the key.
 	const lastSync = obj.last_sync === null || obj.last_sync === undefined ? null : stringOrNull(obj.last_sync);
-	return { ok: true, value: { version: 1, model: { reachable }, last_sync: lastSync } };
+	return { ok: true, value: { version: 1, model: { reachable, answering }, last_sync: lastSync } };
 }
 
 export function parseSearch(stdout: string, stderrTail: string[]): Parse<SearchReport> {
@@ -363,6 +371,182 @@ export function parseFilingSave(stdout: string, stderrTail: string[]): Parse<Fil
 	// own current value.
 	const shared = stringOrNull(obj.shared_owner);
 	return { ok: true, value: { version: 1, ok: obj.ok, saved: obj.saved, renamed, folders, owners, shared_owner: shared, errors } };
+}
+
+// ---- first-run onboarding: setup show/save and model detect/save ----
+
+// `setup show --json` (src/setup.rs ShowReport, shape-locked): the effective value and whether the
+// user actually wrote it, plus a recommendation, so the desktop can pre-fill without overwriting a
+// real install. `watch_folders` starts empty: nothing is watched by accident (watching is a follow-up).
+export type SetupShowReport = {
+	version: number;
+	library_dir: string;
+	library_dir_set: boolean;
+	recommended_library_dir: string;
+	watch_folders: string[];
+	watch_folders_set: boolean;
+	recommended_watch_folders: string[];
+};
+
+// `setup save` reports ok/saved, and per-field errors when a draft is refused (the reason names the
+// field, never the document). saved:false is a no-change repeat, not a failure.
+export type SetupSaveReport = {
+	version: number;
+	ok: boolean;
+	saved: boolean;
+	errors: SetupFieldError[];
+};
+export type SetupFieldError = { field: string; message: string };
+
+// `model detect --json` (src/model_setup.rs detect_json, shape-locked). No version key. One probe per
+// endpoint plus the shared `model.toml` block when it is complete, and this app's own effective model
+// with `overridden` (an explicit `[llm]` key wins over the shared file). A refusal is `{ok:false,error}`.
+export type ModelDetectReport = {
+	ok: boolean;
+	runtimes: ModelProbe[];
+	shared: ModelShared | null;
+	config: { model: string; overridden: boolean };
+};
+export type ModelProbe = {
+	runtime: string;
+	url: string;
+	reachable: boolean;
+	models: string[];
+	usable: string[];
+	error: string | null;
+};
+export type ModelShared = {
+	runtime: string;
+	url: string;
+	model: string;
+	set_by: string;
+	reachable: boolean;
+};
+
+// `model save --json` (save_json). No version key; the local-only rule and the shared-file validation
+// run before anything is written, so a refusal leaves the file untouched and reports `{ok:false,error}`.
+export type ModelSaveReport = { ok: boolean; runtime: string; url: string; model: string };
+
+/** `setup show --json`: read-only data. An older engine missing a field is an error, not a guess. */
+export function parseSetupShow(stdout: string, stderrTail: string[]): Parse<SetupShowReport> {
+	const parsed = parseJson(stdout, stderrTail);
+	if (!parsed.ok) return { ok: false, error: parsed.error };
+	if (!requireVersion(parsed.value) || typeof parsed.value !== 'object') return err('setup show report version is not 1');
+	const obj = parsed.value as {
+		library_dir: unknown;
+		library_dir_set: unknown;
+		recommended_library_dir: unknown;
+		watch_folders: unknown;
+		watch_folders_set: unknown;
+		recommended_watch_folders: unknown;
+	};
+	const libraryDir = stringOrNull(obj.library_dir);
+	const recommended = stringOrNull(obj.recommended_library_dir);
+	const folders = stringArrayOrNull(obj.watch_folders);
+	const recommendedFolders = stringArrayOrNull(obj.recommended_watch_folders);
+	if (libraryDir === null || recommended === null || folders === null || recommendedFolders === null) {
+		return err('setup show report is missing a text/list field');
+	}
+	if (typeof obj.library_dir_set !== 'boolean' || typeof obj.watch_folders_set !== 'boolean') {
+		return err('setup show report is missing a *_set flag');
+	}
+	return {
+		ok: true,
+		value: {
+			version: 1,
+			library_dir: libraryDir,
+			library_dir_set: obj.library_dir_set,
+			recommended_library_dir: recommended,
+			watch_folders: folders,
+			watch_folders_set: obj.watch_folders_set,
+			recommended_watch_folders: recommendedFolders,
+		},
+	};
+}
+
+/** `setup save`: ok/saved are booleans and errors carry a field+message. A refusal is data, exit 0. */
+export function parseSetupSave(stdout: string, stderrTail: string[]): Parse<SetupSaveReport> {
+	const parsed = parseJson(stdout, stderrTail);
+	if (!parsed.ok) return { ok: false, error: parsed.error };
+	if (!requireVersion(parsed.value) || typeof parsed.value !== 'object') return err('setup save report version is not 1');
+	const obj = parsed.value as { ok: unknown; saved: unknown; errors: unknown };
+	if (typeof obj.ok !== 'boolean' || typeof obj.saved !== 'boolean' || !Array.isArray(obj.errors)) {
+		return err('setup save report is missing ok/saved/errors');
+	}
+	const errors: SetupFieldError[] = [];
+	for (const issue of obj.errors) {
+		if (typeof issue !== 'object' || issue === null) return err('setup save error row is not an object');
+		const row = issue as { field: unknown; message: unknown };
+		const field = stringOrNull(row.field);
+		const message = stringOrNull(row.message);
+		if (field === null || message === null) return err('setup save error row has a missing text field');
+		errors.push({ field, message });
+	}
+	return { ok: true, value: { version: 1, ok: obj.ok, saved: obj.saved, errors } };
+}
+
+/** `model detect --json` (no version key). A refusal `{ok:false,error}` is a clean error, not a crash. */
+export function parseModelDetect(stdout: string, stderrTail: string[]): Parse<ModelDetectReport> {
+	const parsed = parseJson(stdout, stderrTail);
+	if (!parsed.ok) return { ok: false, error: parsed.error };
+	if (typeof parsed.value !== 'object' || parsed.value === null) return err('model detect report is not an object');
+	const obj = parsed.value as Record<string, unknown>;
+	if (obj.ok !== true) {
+		return { ok: false, error: typeof obj.error === 'string' ? obj.error : 'the model detect did not answer' };
+	}
+	const probe = (v: unknown): ModelProbe | null => {
+		if (typeof v !== 'object' || v === null) return null;
+		const p = v as Record<string, unknown>;
+		if (typeof p.url !== 'string' || typeof p.reachable !== 'boolean') return null;
+		const runtime = typeof p.runtime === 'string' ? p.runtime : 'custom';
+		const models = stringArrayOrNull(p.models) ?? [];
+		const usable = stringArrayOrNull(p.usable) ?? [];
+		const error = typeof p.error === 'string' ? p.error : null;
+		return { runtime, url: p.url, reachable: p.reachable === true, models, usable, error };
+	};
+	const runtimes = (Array.isArray(obj.runtimes) ? obj.runtimes : [])
+		.flatMap((v) => {
+			const p = probe(v);
+			return p === null ? [] : [p];
+		});
+	const block = obj.shared && typeof obj.shared === 'object' && !Array.isArray(obj.shared) ? (obj.shared as Record<string, unknown>) : null;
+	const shared = block
+		? {
+			runtime: typeof block.runtime === 'string' ? block.runtime : 'custom',
+			url: typeof block.url === 'string' ? block.url : '',
+			model: typeof block.model === 'string' ? block.model : '',
+			set_by: typeof block.set_by === 'string' ? block.set_by : '',
+			reachable: block.reachable === true,
+		}
+		: null;
+	const config = obj.config && typeof obj.config === 'object' && !Array.isArray(obj.config) ? (obj.config as Record<string, unknown>) : {};
+	return {
+		ok: true,
+		value: {
+			ok: true,
+			runtimes,
+			shared,
+			config: {
+				model: typeof config.model === 'string' ? config.model : '',
+				overridden: config.overridden === true,
+			},
+		},
+	};
+}
+
+/** `model save --json` (no version key). A refusal is `{ok:false,error}`, exit 1. */
+export function parseModelSave(stdout: string, stderrTail: string[]): Parse<ModelSaveReport> {
+	const parsed = parseJson(stdout, stderrTail, errorLine);
+	if (!parsed.ok) return { ok: false, error: parsed.error };
+	if (typeof parsed.value !== 'object' || parsed.value === null) return err('model save report is not an object');
+	const obj = parsed.value as Record<string, unknown>;
+	if (obj.ok !== true) {
+		return { ok: false, error: typeof obj.error === 'string' ? obj.error : 'the model save did not answer' };
+	}
+	const runtime = stringOrNull(obj.runtime) ?? '';
+	const url = stringOrNull(obj.url) ?? '';
+	const model = stringOrNull(obj.model) ?? '';
+	return { ok: true, value: { ok: true, runtime, url, model } };
 }
 
 export function parseOrganize(stdout: string, stderrTail: string[]): Parse<OrganizeReport> {

@@ -7,15 +7,17 @@ import { app, BrowserWindow, Menu, Tray, dialog, ipcMain, nativeImage, nativeThe
 import { basename, isAbsolute, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, totalmem, tmpdir } from 'node:os';
 
 import { defaultSpawn, Engine, type EngineResult } from './engine.ts';
 import { Jobs } from './jobs.ts';
-import { IPC } from './ipc.ts';
+import { IPC, type SettingsInfo } from './ipc.ts';
 import { buildTrayMenu, PRODUCT_NAME } from './menu.ts';
 import { WindowController } from './window.ts';
 import { denyNavigation, isOwnFile, windowOpenHandler, windowOptions } from './window-policy.ts';
 import { SettingsController, type SettingsHost } from './settings.ts';
+import { type FilingSaveReport, type SetupSaveReport } from './reports.ts';
+import { OLLAMA_INSTALL_URL } from './setup.ts';
 import { GEOMETRY } from './geometry.ts';
 
 const HERE = import.meta.dirname;
@@ -55,8 +57,21 @@ const fromUs = (senderFrame?: { url?: string } | null): boolean => senderFrame?.
 //   is ever listed. Picked paths live in main's queue only: the page gets counts and names.
 type OpenerHost = (path: string) => Promise<string>; // the OS host: '' means opened
 type PickerHost = () => Promise<string[]>;
+// First-run onboarding seams (main-only, like the two above):
+// - `folderPicker` opens the OS folder picker; it returns the chosen path or null when cancelled.
+// - `externalOpener` opens one fixed URL in the browser (install Ollama).
+// - `memoryBytes` answers the machine's memory for the recommended model size; smoke/shots fix it.
+type FolderPickerHost = () => Promise<string | null>;
+type ExternalOpenerHost = (url: string) => Promise<void>;
+type MemoryBytesHost = () => number;
 let opener: OpenerHost;
 let picker: PickerHost;
+let folderPicker: FolderPickerHost;
+let externalOpener: ExternalOpenerHost;
+let memoryBytes: MemoryBytesHost;
+// A model choice made while its download is still running: remembered here and saved by the still-running
+// modelPull handler the moment the job reports success (never on cancel or failure).
+let pendingPullSave: { runtime: string; url: string; model: string } | null = null;
 const openLog: string[] = [];
 let addQueue: string[] = [];
 let addTotal = 0;
@@ -192,6 +207,17 @@ function makeHosts(): void {
 			void path;
 			return '';
 		};
+		// Onboarding seams under smoke/shots: the picker answers a fixed home-relative path (never a real
+		// folder), the opener records the one link instead of launching a browser, and memory is fixed at
+		// 16 GiB so the recommended model is deterministic (qwen3:8b).
+		folderPicker = async () => {
+			const fake = process.env.FAKE_PICK_FOLDER;
+			return fake === undefined || fake === '' ? null : fake;
+		};
+		externalOpener = async (url) => {
+			openLog.push(url);
+		};
+		memoryBytes = () => 16 * 1024 ** 3;
 		return;
 	}
 	opener = (path) => shell.openPath(path);
@@ -204,6 +230,28 @@ function makeHosts(): void {
 		});
 		return picked.canceled ? [] : picked.filePaths;
 	};
+	folderPicker = async () => {
+		const picked = await dialog.showOpenDialog({
+			title: PRODUCT_NAME,
+			buttonLabel: 'Choose',
+			properties: ['openDirectory'],
+		});
+		return picked.canceled ? null : (picked.filePaths[0] ?? null);
+	};
+	externalOpener = async (url) => {
+		await shell.openExternal(url);
+	};
+	memoryBytes = () => totalmem();
+}
+
+// The `~/` form the config keeps: an absolute path under the home folder becomes `~/…`; anything already
+// home-relative is left alone (the fake picker and the engine both report home-relative paths).
+function toHomePath(path: string): string {
+	const home = homedir();
+	if (path.startsWith('~/') || path === '~') return path;
+	if (path === home) return '~';
+	if (path.startsWith(`${home}/`)) return `~${path.slice(home.length)}`;
+	return path;
 }
 
 function registerIpc(): void {
@@ -212,8 +260,16 @@ function registerIpc(): void {
 		return guard(async () => toIPC(await engine.documents()));
 	});
 
-	ipcMain.handle(IPC.status, async (event) => {
+	ipcMain.handle(IPC.status, async (event, url: unknown, model: unknown) => {
 		if (!fromUs(event.senderFrame)) return null;
+		if (url !== undefined && url !== null && typeof url !== 'string') return { ok: false, error: 'url must be a string' };
+		if (model !== undefined && model !== null && typeof model !== 'string') return { ok: false, error: 'model must be a string' };
+		// The overview asks the cheap read (no args). The onboarding's Ready check asks the same channel WITH the
+		// model+endpoint it just chose, so the engine runs its completion probe on THAT model (review finding 1,
+		// LET-165) — read-only, nothing written before the save.
+		if (typeof url === 'string' && typeof model === 'string' && url !== '' && model !== '') {
+			return guard(async () => toIPC(await engine.statusAnswer(url, model)));
+		}
 		return guard(async () => toIPC(await engine.status()));
 	});
 
@@ -350,17 +406,203 @@ function registerIpc(): void {
 		});
 	});
 
-	// Settings cross the same trust boundary: our own page only. `settings` reports the current truth;
-	// `setSetting` validates name+value through the controller and answers with the new truth.
+	// Settings cross the same trust boundary: our own page only. `settings` reports the current truth
+	// plus `memGb` from the main-only memory host (the onboarding model step names the memory-sized
+	// recommendation with it; the page never measures the machine itself).
 	ipcMain.handle(IPC.settings, async (event) => {
 		if (!fromUs(event.senderFrame)) return null;
-		return settingsController.payload();
+		const info: SettingsInfo = { ...settingsController.payload(), memGb: Math.max(1, Math.round(memoryBytes() / 1024 ** 3)) };
+		return info;
 	});
 
 	ipcMain.handle(IPC.setSetting, async (event, name: unknown, value: unknown) => {
 		if (!fromUs(event.senderFrame)) return null;
 		return settingsController.set(name, value);
 	});
+
+	// ---- first-run onboarding (LET-136): setup show/save and model detect/save/pull ----
+	// Same trust boundary as the rest: the renderer's own page only, no engine string trusted. setup
+	// save's draft goes through the same job bracket a filing save uses, so a setup save and a filing save
+	// never both write config.toml at once. A model download is single-flight in the engine (begin/end), so
+	// a second modelPull is refused there; cancelPull only stops the child, never a page-named path.
+
+	ipcMain.handle(IPC.setupShow, async (event) => {
+		if (!fromUs(event.senderFrame)) return null;
+		return guard(async () => toIPC(await engine.setupShow()));
+	});
+
+	ipcMain.handle(IPC.setupSave, async (event, draft: unknown, check: boolean) => {
+		if (!fromUs(event.senderFrame)) return null;
+		return guard(async () => {
+			if (check) return toIPC(await engine.setupSave(draft, true));
+			jobs.beginSave();
+			try {
+				return toIPC(await engine.setupSave(draft, false));
+			} finally {
+				jobs.endSave();
+			}
+		});
+	});
+
+	ipcMain.handle(IPC.modelDetect, async (event, url: unknown) => {
+		if (!fromUs(event.senderFrame)) return null;
+		if (url !== undefined && url !== null && typeof url !== 'string') return { ok: false, error: 'url must be a string' };
+		const addr = typeof url === 'string' ? url : undefined;
+		return guard(async () => toIPC(await engine.modelDetect(addr)));
+	});
+
+	ipcMain.handle(IPC.modelSave, async (event, runtime: unknown, url: unknown, model: unknown) => {
+		if (!fromUs(event.senderFrame)) return null;
+		if (typeof runtime !== 'string' || typeof url !== 'string' || typeof model !== 'string') {
+			return { ok: false, error: 'runtime, url and model must be strings' };
+		}
+		return guard(async () => toIPC(await engine.modelSave(runtime, url, model)));
+	});
+
+	ipcMain.handle(IPC.modelPull, async (event, model: unknown, url: unknown) => {
+		if (!fromUs(event.senderFrame)) return null;
+		if (typeof model !== 'string') return { ok: false, error: 'model must be a string' };
+		if (url !== undefined && url !== null && typeof url !== 'string') return { ok: false, error: 'url must be a string' };
+		const addr = typeof url === 'string' ? url : undefined;
+		return guard(async () => {
+			const result = await engine.modelPull(model, addr);
+			if (!result.ok) return { ok: false, error: result.error };
+			// A choice made during this very download (runSetup stashed it) is saved here, once the
+			// server confirmed success — the one moment it is safe to write the shared model file.
+			if (result.value.success && pendingPullSave !== null) {
+				const wanted = pendingPullSave;
+				pendingPullSave = null;
+				const saved = await engine.modelSave(wanted.runtime, wanted.url, wanted.model);
+				if (!saved.ok || saved.value.ok !== true) {
+					return { ok: false, error: 'the model finished, but saving it failed; the step can save it again' };
+				}
+			}
+			// A finished-but-failed download is a normal result: the page shows why, then may retry.
+			return { ok: true, success: result.value.success, reason: result.value.error };
+		});
+	});
+
+	ipcMain.handle(IPC.cancelPull, async (event) => {
+		if (!fromUs(event.senderFrame)) return null;
+		return { ok: true, cancelled: engine.cancelPull() };
+	});
+
+	ipcMain.handle(IPC.modelPullStatus, async (event) => {
+		if (!fromUs(event.senderFrame)) return null;
+		// A plain data snapshot (numbers + stage text); the page paints it with textContent, never HTML.
+		return engine.modelPullStatus();
+	});
+
+	// Finishing onboarding records setupDone through the controller (the one place allowed to write it).
+	ipcMain.handle(IPC.setupComplete, async (event) => {
+		if (!fromUs(event.senderFrame)) return null;
+		return settingsController.set('setupDone', true);
+	});
+
+	// The last "continue": the page sends only the choices it collected; main runs the engine writes in a
+	// fixed order (setup -> optional filing owner -> optional model) and then records setupDone. It never
+	// trusts the page to sequence the writes, and a pull that is still running is never saved (the page
+	// would not send a model then). Stops at the first failing step; the page shows that step and may
+	// continue again safely (an unchanged engine save writes nothing).
+	ipcMain.handle(IPC.modelSetup, async (event, input: unknown) => {
+		if (!fromUs(event.senderFrame)) return null;
+		if (input === null || typeof input !== 'object' || Array.isArray(input)) {
+			return { ok: false, error: 'the setup choices are not an object' };
+		}
+		const plan = input as Record<string, unknown>;
+		const chosen = {
+			libraryDir: plan.library_dir,
+			watchFolders: plan.watch_folders,
+			owners: plan.owners,
+			model: plan.model,
+		};
+		return guard(async () => runSetup(chosen));
+	});
+
+	// The library field is read-only until the user chooses a folder: the OS picker runs in main (like the
+	// file picker), and only the chosen path returns, already converted to the `~/` form the config uses.
+	ipcMain.handle(IPC.pickFolder, async (event) => {
+		if (!fromUs(event.senderFrame)) return null;
+		return guard(async () => {
+			const picked = await folderPicker();
+			if (picked === null) return { ok: true, canceled: true };
+			return { ok: true, path: toHomePath(picked) };
+		});
+	});
+
+	// "install Ollama" is a user-clicked link to the fixed download page, opened in their browser. The URL is
+	// a constant (never built from input); this is the one place the desktop opens an external link.
+	ipcMain.handle(IPC.installOllama, async (event) => {
+		if (!fromUs(event.senderFrame)) return null;
+		await externalOpener(OLLAMA_INSTALL_URL);
+		return { ok: true };
+	});
+}
+
+// The single ordered write of first-run setup. Every value is re-validated by the engine (this only runs
+// the calls); the page cannot reorder or skip a step. An engine save that is unchanged reports saved:false
+// and writes nothing, so re-running setup after a stop is safe.
+async function runSetup(
+	chosen: { libraryDir: unknown; watchFolders: unknown; owners: unknown; model: unknown },
+): Promise<{ ok: boolean; step?: string; error?: string }> {
+	const libraryDir = chosen.libraryDir;
+	const watchFolders = chosen.watchFolders;
+	if (typeof libraryDir !== 'string' || !Array.isArray(watchFolders)) {
+		return { ok: false, step: 'setup', error: 'the folders are not valid values' };
+	}
+	const draft = { library_dir: libraryDir, watch_folders: watchFolders };
+	jobs.beginSave();
+	let setup: EngineResult<SetupSaveReport>;
+	try {
+		setup = await engine.setupSave(draft, false);
+	} finally {
+		jobs.endSave();
+	}
+	if (!setup.ok) return { ok: false, step: 'setup', error: `setup: ${setup.error ?? 'the engine gave no answer'}` };
+	if (setup.value.ok !== true) {
+		const first = setup.value.errors?.[0];
+		return { ok: false, step: 'setup', error: `setup: ${first?.message ?? 'the folders were rejected'}` };
+	}
+
+	const owners = Array.isArray(chosen.owners) ? chosen.owners.filter((name) => typeof name === 'string') : [];
+	if (owners.length > 0) {
+		const show = await engine.filingShow();
+		if (!show.ok) return { ok: false, step: 'filing', error: `filing: ${show.error ?? 'the engine gave no answer'}` };
+		const folders = Array.isArray(show.value.folders) ? show.value.folders : [];
+		const existing = Array.isArray(show.value.owners) ? show.value.owners : [];
+		const merged = { folders: folders.slice(), owners: existing.slice() };
+		for (const name of owners) if (!merged.owners.includes(name)) merged.owners.push(name);
+		jobs.beginSave();
+		let filing: EngineResult<FilingSaveReport>;
+		try {
+			filing = await engine.filingSave(merged, false);
+		} finally {
+			jobs.endSave();
+		}
+		if (!filing.ok) return { ok: false, step: 'filing', error: `filing: ${filing.error ?? 'an owner was rejected'}` };
+		if (filing.value.ok !== true) return { ok: false, step: 'filing', error: 'filing: an owner was rejected' };
+	}
+
+	const model = chosen.model && typeof chosen.model === 'object' && !Array.isArray(chosen.model)
+		? (chosen.model as Record<string, unknown>)
+		: null;
+	if (model !== null && typeof model.runtime === 'string' && typeof model.url === 'string' && typeof model.model === 'string') {
+		if (engine.modelPullStatus().running === true) {
+			// The user continued while the download was still running ("you can go on"): never save the
+			// model into the shared file mid-stream. The choice is remembered instead, and the modelPull
+			// handler that is still running performs the save when the job reports success (and never on
+			// a cancel or a failure).
+			pendingPullSave = { runtime: model.runtime, url: model.url, model: model.model };
+		} else {
+			const saved = await engine.modelSave(model.runtime, model.url, model.model);
+			if (!saved.ok) return { ok: false, step: 'model', error: `model: ${saved.error ?? 'the engine refused the model'}` };
+			if (saved.value.ok !== true) return { ok: false, step: 'model', error: 'model: the engine refused the model' };
+		}
+	}
+
+	const recorded = await settingsController.set('setupDone', true);
+	if (recorded === null) return { ok: false, step: 'done', error: 'setupDone was refused' };
+	return { ok: true, step: 'done' };
 }
 
 app.on('before-quit', (event) => {
@@ -431,6 +673,12 @@ window.__drive = {
     return node;
   },
   async click(selector) { this.find(selector).click(); await this.settle(); },
+  btn(label) {
+    const node = [...document.querySelectorAll('.btn')].find((b) => b.textContent.trim() === label);
+    if (!node) throw new Error('missing btn ' + label);
+    return node;
+  },
+  async clickBtn(label) { this.btn(label).click(); await this.settle(); },
   async pick(title) { this.row('#filingRows', title).click(); await this.settle(); },
   async type(selector, text) {
     const input = this.find(selector);
@@ -457,6 +705,15 @@ function freshFakeState(): string {
 	return dir;
 }
 
+// The settings file decides whether boot opens first-run onboarding. Every smoke/shots pass seeds
+// it explicitly: `true` (with the theme of the pass) so the normal screens open as before; `false`
+// (the key absent) so the step screen opens — the plan's "each shot seeds setupDone explicitly".
+// `load()` re-reads it into the controller, so the boot gate sees the seed without restarting main.
+function seedSettings(done: boolean, appearance: 'system' | 'dark' | 'light'): void {
+	writeFileSync(settingsFile, JSON.stringify(done ? { appearance, setupDone: true } : { appearance }));
+	settingsController.load();
+}
+
 async function loaded(browser: BrowserWindow): Promise<void> {
 	await new Promise<void>((resolve) => browser.webContents.once('did-finish-load', () => resolve()));
 }
@@ -480,6 +737,318 @@ async function measureGeometry(browser: BrowserWindow): Promise<string[]> {
 		}
 	}
 	return failures;
+}
+
+/** The first-run onboarding pass (LET-165), driven exactly like a person would: the settings file is
+ * seeded WITHOUT `setupDone`, so the app must open the step screen; the page may only collect choices
+ * (the fake engine's `calls` list proves nothing was written); the LAST continue performs every write in
+ * main; the fake state's calls are then compared with what the steps showed. The state file is read here
+ * only to inspect that list of calls — never any document. */
+async function smokeOnboarding(browser: BrowserWindow): Promise<{ ok: boolean; detail: string; geometry: string[] }> {
+	const dirs: string[] = [];
+	const stateOf = (): { calls: string[]; detects: number } => {
+		try {
+			const raw = JSON.parse(readFileSync(String(process.env.FAKE_STATE_FILE), 'utf8')) as { calls?: string[]; detects?: number };
+			return { calls: raw.calls ?? [], detects: raw.detects ?? 0 };
+		} catch {
+			return { calls: [], detects: 0 };
+		}
+	};
+	// A scenario: fresh fake state, the env the step needs, no setupDone, then a reload so the boot gate
+	// decides again from scratch. `delete` matters: the env of one scenario must not leak into the next.
+	const scenario = async (env: Record<string, string | undefined>): Promise<void> => {
+		dirs.push(freshFakeState());
+		for (const [name, value] of Object.entries(env)) {
+			if (value === undefined) delete process.env[name];
+			else process.env[name] = value;
+		}
+		seedSettings(false, 'system');
+		const reload = loaded(browser);
+		browser.reload();
+		await reload;
+		await drive(browser, '');
+	};
+	const failures: string[] = [];
+	const check = async (name: string, steps: string): Promise<void> => {
+		if ((await drive(browser, steps)) !== true) failures.push(name);
+	};
+	// Steps count from 0: library, folders to watch, folders and owners, model.
+	const walk = async (to: 'model' | 'filing'): Promise<void> => {
+		await drive(browser, `await d.clickBtn('continue');`);
+		await drive(browser, `await d.clickBtn('continue');`);
+		if (to === 'filing') return;
+		await drive(browser, `await d.clickBtn('continue');`);
+	};
+	const wait = async (ms: number): Promise<void> => {
+		await new Promise((resolve) => setTimeout(resolve, ms));
+	};
+
+	// 1) The step screen replaces the sidebar and the four screens; the first step is current, the
+	// folders-and-owners step is still to do (not skipped — it is a step the person uses; only an actual Skip
+	// draws it skipped), and the library field is read-only and shows the engine's recommendation.
+	await scenario({ FAKE_SCENARIO: 'library', FAKE_MODEL_STATE: 'found' });
+	await check('step screen', String.raw`
+		const li = [...document.querySelectorAll('#setupStepsList li')];
+		const current = li.filter((n) => n.getAttribute('aria-current') === 'step');
+		const field = d.find('#libField');
+		return li.length === 4 && current.length === 1 && current[0] === li[0] && li[2].classList.contains('step-rest')
+		 && !d.find('#onboardingScreen').hidden && d.find('#sidebar').hidden
+		 && d.find('#overviewScreen').hidden && d.find('#askScreen').hidden && d.find('#filingScreen').hidden && d.find('#settingsScreen').hidden
+		 && d.find('#stepTitle').textContent === 'library location'
+		 && field.readOnly === true && field.value === '~/Documents/library';
+	`);
+
+	// 2) The four steps at both the design's 720px column and the 360px minimum: rule 6 on every step.
+	const geometry: string[] = [];
+	for (const width of [720, 360]) {
+		browser.setSize(width, width < 480 ? 780 : 820);
+		const reload = loaded(browser);
+		browser.reload();
+		await reload;
+		await drive(browser, '');
+		for (let step = 0; step < 4; step += 1) {
+			const geo = (await drive(browser, GEOMETRY)) as { ok: boolean; failures: string[] };
+			geometry.push(...geo.failures.map((f) => `${String(width)}@${String(step)} ${String(f)}`));
+			if (step < 3) await drive(browser, `await d.clickBtn('continue');`);
+		}
+	}
+
+	// 3) The untouched walk: every step kept what the engine showed, and the last continue saved exactly
+	// that (setup save with the recommended library + watch folders, model save of the memory-sized model,
+	// no filing save because no owner was added), then the app opened the overview and remembers setupDone.
+	await scenario({ FAKE_SCENARIO: 'library', FAKE_MODEL_STATE: 'found' });
+	const nothingWritten = stateOf().calls.length === 0;
+	if (!nothingWritten) failures.push('nothing-written-before-continue');
+	await walk('model');
+	await check('model step found', String.raw`
+		const card = d.find('.model-card');
+		const li2 = document.querySelectorAll('#setupStepsList li')[2];
+	 return d.find('#stepTitle').textContent === 'model'
+		 && card.querySelector('.pill')?.textContent === 'Ollama found'
+		 && d.find('#stepContinueLabel').textContent === 'start filing'
+		 && d.find('#stepContinue').disabled === false
+		 // finding 7: after continuing past the owners step, that step shows done, not skipped.
+		 && li2?.classList.contains('step-done');
+	`);
+	await drive(browser, `await d.clickBtn('start filing');`);
+	const saved = stateOf().calls;
+	const settingsNow = readFileSync(settingsFile, 'utf8');
+	if (!(saved.length === 2 && saved[0] === 'setup save ~/Documents/library ~/Downloads,~/Desktop'
+		&& saved[1] === 'model save ollama qwen3:8b' && !saved.some((c) => c.includes('filing save')))) {
+		failures.push(`untouched-saves ${JSON.stringify(saved)}`);
+	}
+	if (!settingsNow.includes('"setupDone":true')) failures.push('setupDone-not-in-file');
+	await check('lands on overview', String.raw`
+		return d.find('#onboardingScreen').hidden && !d.find('#overviewScreen').hidden && !d.find('#sidebar').hidden;
+	`);
+	const reloadOverview = loaded(browser);
+	browser.reload();
+	await reloadOverview;
+	await check('reloads to overview', String.raw`
+		return d.find('#onboardingScreen').hidden && !d.find('#overviewScreen').hidden;
+	`);
+
+	// 4) The iCloud pick: the note appears only for a folder inside iCloud Drive, and "use the recommended
+	// folder" clears both the path and the note.
+	await scenario({ FAKE_SCENARIO: 'library', FAKE_MODEL_STATE: 'found', FAKE_PICK_FOLDER: '~/Library/Mobile Documents/scans' });
+	await check('icloud pick', String.raw`
+		const hasNote = () => document.querySelector('.icloud-note') !== null;
+		const hasBtn = (label) => [...document.querySelectorAll('.btn')].some((b) => b.textContent.trim() === label);
+		d.btn('choose folder').click(); await d.settle();
+	 return d.find('#libField').value === '~/Library/Mobile Documents/scans' && hasNote() && hasBtn('use the recommended folder');
+	`);
+	await drive(browser, `await d.clickBtn('use the recommended folder');`);
+	await check('recommended clears the note', String.raw`
+		return d.find('#libField').value === '~/Documents/library' && document.querySelector('.icloud-note') === null;
+	`);
+
+	// 5) Back keeps the toggles: turning one folder off, going back to step 1 and forward again must keep
+	// the switch off (the choices live in the page until the last continue).
+	await scenario({ FAKE_SCENARIO: 'library', FAKE_MODEL_STATE: 'found' });
+	await drive(browser, `await d.clickBtn('continue');`);
+	await check('watch rows + muted lines', String.raw`
+		const rows = [...document.querySelectorAll('.watch-row')];
+		const off = (n) => { n.checked = false; n.dispatchEvent(new Event('input', { bubbles: true })); };
+		const paths = rows.map((r) => r.querySelector('.watch-note')?.textContent);
+		const muted = [...document.querySelectorAll('.watch-muted')].map((n) => n.textContent);
+		if (!(rows.length === 2 && JSON.stringify(paths) === JSON.stringify(['~/Downloads', '~/Desktop'])
+		 && rows.every((r) => r.querySelector('.switch')?.checked === true)
+		 && muted.includes('Rag docs never reads its own library, even inside a watched folder. Your originals are never moved or changed.')
+		 && muted.includes('Rag docs starts watching these folders in a later update.'))) return false;
+	 off(rows[0].querySelector('.switch'));
+	 await d.settle();
+	 return [...document.querySelectorAll('.watch-row .switch')][0].checked === false;
+	`);
+	await drive(browser, `d.find('#stepBack').click(); await d.settle();`);
+	await check('back to step 1', String.raw`return d.find('#stepTitle').textContent === 'library location';`);
+	await drive(browser, `await d.clickBtn('continue');`);
+	await check('toggle kept after back', String.raw`return [...document.querySelectorAll('.watch-row .switch')][0].checked === false;`);
+
+	// 6) Owners: an added owner is a row under the field with a 44px remove button, and the last continue
+	// performs the filing save with it.
+	await scenario({ FAKE_SCENARIO: 'library', FAKE_MODEL_STATE: 'found' });
+	await walk('filing');
+	await drive(browser, `
+		if (!document.querySelector('#ownerField')) throw new Error('no owner field on step: ' + d.find('#stepTitle').textContent);
+		await d.type('#ownerField', 'Example Person');
+	`);
+	await drive(browser, `d.btn('add owner').click(); await d.settle();`);
+	await check('owner row', String.raw`
+		const rows = [...document.querySelectorAll('.owner-row')];
+		const remove = rows[0]?.querySelector('.btn');
+		const li2 = document.querySelectorAll('#setupStepsList li')[2];
+	 return rows.length === 1 && rows[0].querySelector('.row-title')?.textContent === 'Example Person'
+		 && remove?.textContent.trim() === 'remove' && remove.getBoundingClientRect().height >= 43.5
+		 // finding 7: while the person is on the owners step, that step carries the current marker.
+		 && li2?.classList.contains('step-current') && li2?.getAttribute('aria-current') === 'step';
+	`);
+	await drive(browser, `await d.clickBtn('continue');`);
+	await drive(browser, `await d.clickBtn('start filing');`);
+	if (!stateOf().calls.some((c) => c.startsWith('filing save'))) failures.push('owner-not-saved');
+
+	// 7) Skip keeps the lists: skipping the owners step sends no owners, so no filing save follows.
+	await scenario({ FAKE_SCENARIO: 'library', FAKE_MODEL_STATE: 'found' });
+	await walk('filing');
+	await drive(browser, `d.btn('skip').click(); await d.settle();`);
+	await drive(browser, `await d.clickBtn('start filing');`);
+	if (stateOf().calls.some((c) => c.includes('filing save'))) failures.push('skip-still-saved-filing');
+
+	// 7b) Skip then Back (LET-165 review round 3): Skip marks the owners step skipped, but Back into that
+	// step starts using it again, so the skip marking must not survive the trip. Adding an owner after
+	// the Back and continuing must really send the filing save (an owner was added), and the step list
+	// must show the owners step done - not the dashed skip from before the Back.
+	await scenario({ FAKE_SCENARIO: 'library', FAKE_MODEL_STATE: 'found' });
+	await walk('filing');
+	await drive(browser, `d.btn('skip').click(); await d.settle();`);
+	await check('skip draws the owners step skipped', String.raw`
+		const li2 = document.querySelectorAll('#setupStepsList li')[2];
+	 return li2?.classList.contains('step-skipped') && li2.getAttribute('aria-current') !== 'step';
+	`);
+	await drive(browser, `d.find('#stepBack').click(); await d.settle();`);
+	await check('back re-opens the owners step', String.raw`
+		const li2 = document.querySelectorAll('#setupStepsList li')[2];
+	 return d.find('#stepTitle').textContent === 'folders and owners'
+		 && li2?.classList.contains('step-current') && li2.getAttribute('aria-current') === 'step';
+	`);
+	await drive(browser, `
+		await d.type('#ownerField', 'Example Person');
+	`);
+	await drive(browser, `d.btn('add owner').click(); await d.settle();`);
+	await drive(browser, `await d.clickBtn('continue');`);
+	await check('back-then-add: owners step is done', String.raw`
+		const li = [...document.querySelectorAll('#setupStepsList li')];
+	 return li[2]?.classList.contains('step-done') && li[2].getAttribute('aria-current') !== 'step'
+		 && li[3]?.getAttribute('aria-current') === 'step';
+	`);
+	await drive(browser, `await d.clickBtn('start filing');`);
+	if (!stateOf().calls.some((c) => c.startsWith('filing save'))) failures.push('skip-then-back-lost-the-owner');
+
+	// 8) Not-found: the step re-checks itself (the fake state counts the detects), and the last continue
+	// is offered as "set up later" instead of a lie.
+	await scenario({ FAKE_SCENARIO: 'library', FAKE_MODEL_STATE: 'not-found' });
+	await walk('model');
+	await check('not-found', String.raw`
+	 return d.find('.model-card').querySelector('.pill')?.textContent === 'no runtime found'
+		 && d.find('#stepContinueLabel').textContent === 'set up later';
+	`);
+	const detectsBefore = stateOf().detects;
+	await wait(3600);
+	if (stateOf().detects < detectsBefore + 1) failures.push('not-found-does-not-recheck');
+
+	// 9) Download: the bar reads the engine's numbers, 42% is reachable, cancel re-detects; a failed pull
+	// shows the engine's sentence with "try again"; a finished pull becomes ready only after the engine's
+	// own completion probe answered (the board's answer 3).
+	await scenario({ FAKE_SCENARIO: 'library', FAKE_MODEL_STATE: 'found-empty', FAKE_PULL: 'hold-42' });
+	await walk('model');
+	await check('download offered', String.raw`
+		const hasBtn = (label) => [...document.querySelectorAll('.btn')].some((b) => b.textContent.trim() === label);
+	 return d.find('.model-card').querySelector('.pill')?.textContent === 'Ollama found' && hasBtn('download qwen3:8b');
+	`);
+	await drive(browser, `d.btn('download qwen3:8b').click();`);
+	const barAt42 = await drive(browser, String.raw`
+		for (let i = 0; i < 90; i += 1) {
+			const p = document.querySelector('.progress');
+			if (p && p.getAttribute('aria-valuenow') === '42') break;
+			await new Promise((r) => setTimeout(r, 100));
+		}
+	 const p = document.querySelector('.progress');
+	 return !!p && p.getAttribute('aria-valuenow') === '42' && d.find('.model-card').querySelector('.pill')?.textContent === 'downloading model';
+	`);
+	if (barAt42 !== true) failures.push('download-bar-42');
+	await drive(browser, `d.btn('cancel download').click(); await d.settle();`);
+	await check('cancel re-detects', String.raw`
+		return document.querySelector('.progress') === null && d.find('.model-card').querySelector('.pill')?.textContent === 'Ollama found';
+	`);
+
+	await scenario({ FAKE_SCENARIO: 'library', FAKE_MODEL_STATE: 'found-empty', FAKE_PULL: 'fail' });
+	await walk('model');
+	await drive(browser, `d.btn('download qwen3:8b').click();`);
+	await check('failed download', String.raw`
+		for (let i = 0; i < 60; i += 1) {
+			if (d.find('.model-card').querySelector('.pill')?.textContent === 'download failed') break;
+		 await new Promise((r) => setTimeout(r, 100));
+		}
+		const card = d.find('.model-card');
+		const hasBtn = (label) => [...card.querySelectorAll('.btn')].some((b) => b.textContent.trim() === label);
+	 return card.querySelector('.pill')?.textContent === 'download failed'
+		 && card.querySelector('.pill')?.classList.contains('danger') && hasBtn('try again')
+		 && card.textContent.includes('no space left on device');
+	`);
+
+	await scenario({ FAKE_SCENARIO: 'library', FAKE_MODEL_STATE: 'found-empty', FAKE_PULL: 'ok' });
+	await walk('model');
+	await drive(browser, `d.btn('download qwen3:8b').click();`);
+	await check('ready after pull', String.raw`
+		for (let i = 0; i < 90; i += 1) {
+			if (d.find('.model-card').querySelector('.pill')?.textContent === 'ready') break;
+			await new Promise((r) => setTimeout(r, 100));
+		}
+		const card = d.find('.model-card');
+	 return card.querySelector('.pill')?.textContent === 'ready' && card.textContent.includes('answered a test question');
+	`);
+
+	// 10) The shared block: the model triage mail chose wins, and continuing saves no model of our own.
+	await scenario({ FAKE_SCENARIO: 'library', FAKE_MODEL_STATE: 'shared' });
+	await walk('model');
+	await check('shared step', String.raw`
+		return d.find('.model-card').querySelector('.pill')?.textContent === 'using the model from triage mail';
+	`);
+	await drive(browser, `await d.clickBtn('start filing');`);
+	if (stateOf().calls.some((c) => c.includes('model save'))) failures.push('shared-saved-a-model');
+
+	// 11) "You can go on": continuing while the download is still running must NOT write the shared file
+	// mid-stream; main saves the choice the moment the job reports success.
+	await scenario({ FAKE_SCENARIO: 'library', FAKE_MODEL_STATE: 'found-empty', FAKE_PULL: 'ok', FAKE_PULL_STEP_MS: '900' });
+	await walk('model');
+	await drive(browser, `d.btn('download qwen3:8b').click();`);
+	await drive(browser, `await d.clickBtn('start filing');`);
+	// The stream is still open when the last continue runs, so main must be waiting for the job: poll the
+	// fake state until the save appears (the pull takes ~4 s of fake streaming).
+	let savedAfterPull = false;
+	for (let i = 0; i < 60 && !savedAfterPull; i += 1) {
+		savedAfterPull = stateOf().calls.some((c) => c.includes('model save'));
+		if (!savedAfterPull) await wait(250);
+	}
+	if (!savedAfterPull) failures.push('continue-during-pull: no model save after success');
+	if (stateOf().calls.filter((c) => c.includes('model save')).length !== 1) failures.push('continue-during-pull: saved twice');
+
+	// 12) Keyboard: every onboarding control is a real button or input, focusable, and only continue may
+	// be disabled.
+	await scenario({ FAKE_SCENARIO: 'library', FAKE_MODEL_STATE: 'found' });
+	await walk('model');
+	await check('keyboard controls', String.raw`
+		const nodes = [...document.querySelectorAll('#onboardingScreen button, #onboardingScreen input')];
+	 const disabled = nodes.filter((n) => n.getAttribute('aria-disabled') === 'true');
+	 return nodes.length >= 4 && nodes.every((n) => (n.tagName === 'BUTTON' || n.tagName === 'INPUT') && n.tabIndex >= 0)
+		 && disabled.every((n) => n.id === 'stepContinue');
+	`);
+
+	for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
+	// The pass sets fake-engine selectors; clear them so nothing after it inherits an onboarding scenario.
+	for (const name of ['FAKE_MODEL_STATE', 'FAKE_PICK_FOLDER', 'FAKE_PULL', 'FAKE_PULL_STEP_MS', 'FAKE_DETECT_FOUND_AFTER', 'FAKE_ANSWERING']) {
+		delete process.env[name];
+	}
+	return { ok: failures.length === 0, detail: failures.join(' | '), geometry };
 }
 
 type SmokeChecks = {
@@ -530,6 +1099,8 @@ type SmokeChecks = {
 	titleNarrow?: boolean;
 	appearanceLive?: boolean;
 	openAtLoginOk?: boolean;
+	onboardingOk: boolean;
+	onboardingDetail?: string;
 		openedPath?: boolean;
 		geometry?: string[];
 		diag?: string;
@@ -537,10 +1108,13 @@ type SmokeChecks = {
 
 async function runSmoke(): Promise<void> {
 	const dir = freshFakeState();
+	// Normal (post-onboarding) smoke: the settings file carries setupDone, so boot opens the four
+	// screens. The onboarding pass below re-seeds without it and reloads.
+	seedSettings(true, 'system');
 	const deadline = setTimeout(() => {
-		console.error('SMOKE FAIL: timed out after 150s');
+		console.error('SMOKE FAIL: timed out after 240s');
 		app.exit(1);
-	}, 150000);
+	}, 240000);
 	let code = 1;
 	try {
 		// Busy pass: the fake model answers "not reachable", so the overview opens with its
@@ -890,7 +1464,8 @@ async function runSmoke(): Promise<void> {
 		await drive(browser, `${OPEN_SETTINGS} await d.click('#appearance [data-value="dark"]');`);
 		const themeDark =
 			nativeTheme.themeSource === 'dark' &&
-			readFileSync(settingsFile, 'utf8') === '{"appearance":"dark"}' &&
+			// setupDone was seeded for this pass, so the finished-setup file keeps the key.
+			readFileSync(settingsFile, 'utf8') === '{"appearance":"dark","setupDone":true}' &&
 			(await drive(browser, `return window.matchMedia('(prefers-color-scheme: dark)').matches;`)) === true;
 		await drive(browser, `await d.click('#appearance [data-value="light"]');`);
 		const themeLight = nativeTheme.themeSource === 'light';
@@ -913,14 +1488,23 @@ async function runSmoke(): Promise<void> {
 		// screens at both widths, with the add panel showing on ask. Failures show up in the SMOKE line.
 		result.geometry = await measureGeometry(browser);
 
+		// First-run onboarding (LET-165): the step screen instead of the four screens, the untouched walk,
+		// owners, and the model step (not-found re-check, 42% + cancel, failure, ready, shared, continuing
+		// during a download). Its layout failures join `geometry`; its own failures name the check.
+		const ob = await smokeOnboarding(browser);
+		result.onboardingOk = ob.ok;
+		result.onboardingDetail = ob.detail;
+		result.geometry.push(...ob.geometry);
+
 		const title = browser.getTitle();
 		const own = isOwnFile(browser.webContents.getURL(), INDEX_URL);
 		const ok = own && title === PRODUCT_NAME && result.libraryRows > 0 && result.answered && result.folderRows > 0 && result.notice && result.moves > 0 && result.filed === 'filed' && result.persisted === true && result.raceSafe === true && result.titleWide === true && result.titleNarrow === true && result.appearanceLive === true && result.openAtLoginOk === true
 			&& result.dangerPill && result.sizeShown && result.searchRows === 2 && result.searchMeta && result.cleared === result.libraryRows && result.addDone && result.addAdded && result.addDuplicate && result.addFailed && result.grew && result.pageCited && result.openButtons === 2 && result.openedPath && result.vehiclesCounts && result.movesToVehicles && result.noUnsorted && result.movesToHousehold && result.sharedShownHousehold && result.sharedRenamedBack && result.applied === 'filed' && (result.geometry ?? []).length === 0
 			&& result.bootOverview && result.overviewFive && result.previewRoute && result.clearRoutes && result.keyboardOk && result.clearOk
+			&& result.onboardingOk === true
 			&& result.addRefreshOk && result.dryRunFailOk && result.dryRunRetryOk && result.filingFailOk && result.filingRetryOk && result.noDatabaseOk && result.outdatedOk && result.stalePreviewOk;
 		if (ok) {
-			console.error(`SMOKE OK: library ${result.libraryRows} rows (big-scan pill + MB sizes), search "loan" -> 2 rows -> cleared, add 3 files -> added/duplicate/failed + library grew, answer cites p. 4 and an open button handed the located path to main, rename Car->Vehicles counts 2 documents and previews moves to Vehicles (none to unsorted), shared owner "Household" re-files; stale dry-run after a save refused; app name centred on ask/filing/settings at 1200px and 360px; appearance live (dark/light/system); open-at-login reflects the real login item; layout checks clean (settings article, library search top, AppBar 132px clear, 44px targets) on ask/filing/settings at 1200px and 360px`);
+			console.error(`SMOKE OK: library ${result.libraryRows} rows (big-scan pill + MB sizes), search "loan" -> 2 rows -> cleared, add 3 files -> added/duplicate/failed + library grew, answer cites p. 4 and an open button handed the located path to main, rename Car->Vehicles counts 2 documents and previews moves to Vehicles (none to unsorted), shared owner "Household" re-files; stale dry-run after a save refused; app name centred on ask/filing/settings at 1200px and 360px; appearance live (dark/light/system); open-at-login reflects the real login item; onboarding steps driven end-to-end (nothing written until the last continue, owners add/skip, model not-found re-check, 42% download + cancel, failed pull, ready, shared, continue during a pull); layout checks clean (settings article, library search top, AppBar 132px clear, 44px targets, onboarding column) on ask/filing/settings at 1200px and 360px and on every setup step at 720px and 360px`);
 			code = 0;
 		} else {
 			console.error(`SMOKE FAIL: own=${own} title=${title} checks=${JSON.stringify(result)}`);
@@ -934,7 +1518,7 @@ async function runSmoke(): Promise<void> {
 	app.exit(code);
 }
 
-type Shot = { name: string; scenario: 'library' | 'no-owners' | 'clear'; width: number; height: number; steps: string; model?: 'down'; scrollTo?: string; scrollToRow?: string; delayMs?: number };
+type Shot = { name: string; scenario: 'library' | 'no-owners' | 'clear'; width: number; height: number; steps: string; model?: 'down'; scrollTo?: string; scrollToRow?: string; delayMs?: number; setup?: boolean; modelState?: 'found' | 'found-empty' | 'not-found' | 'shared'; pick?: string; pull?: 'ok' | 'hold-42' | 'fail'; cancelAfter?: boolean };
 
 const OPEN_FILING = `await d.click('[data-section="filing"]');`;
 const OPEN_OWNERS = `${OPEN_FILING} await d.click('[data-view="owners"]');`;
@@ -970,6 +1554,21 @@ const ADD_RUNNING = `${OPEN_ASK} d.find('#addDocsButton').click();
 const OVER_LIMIT = `${OPEN_ASK} const big = d.row('#libraryRows', 'big-scan.pdf');
   if (big.querySelector('.pill')?.textContent !== 'not indexed: over 50 MB') throw new Error('over-limit: the pill is missing');
   if (!(big.querySelector('.row-preview')?.textContent ?? '').includes(' MB')) throw new Error('over-limit: the size is missing'); ${ON_ASK}`;
+/** First-run onboarding (LET-165): a shot seeded without `setupDone` opens the step screen, so the steps
+ * only walk to the step being photographed with the design's own buttons. `cancelAfter` stops the fake
+ * download once the frame is taken (the bar is photographed at the engine's 42%). */
+const SETUP_WATCH = `await d.clickBtn('continue');`;
+const SETUP_FILING = `${SETUP_WATCH} await d.clickBtn('continue'); await d.type('#ownerField', 'Example Person'); d.btn('add owner').click(); await d.settle();`;
+const SETUP_MODEL = `${SETUP_WATCH} await d.clickBtn('continue'); await d.clickBtn('continue');`;
+const SETUP_PICK_ICLOUD = `d.btn('choose folder').click(); await d.settle();`;
+const SETUP_DOWNLOAD_TO_42 = `d.btn('download qwen3:8b').click();
+  for (let i = 0; i < 90; i += 1) {
+    const bar = document.querySelector('.progress');
+    if (bar && bar.getAttribute('aria-valuenow') === '42') break;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  const bar = document.querySelector('.progress');
+  if (!bar || bar.getAttribute('aria-valuenow') !== '42') throw new Error('the download bar never reached 42%: ' + (bar ? bar.outerHTML.slice(0, 160) : 'no bar') + ' card=' + (document.querySelector('.model-card')?.textContent ?? '').slice(0, 160));`;
 const SHOTS: Shot[] = [
 	{ name: 'ask', scenario: 'library', width: 1200, height: 820, steps: ASK_STEPS },
 	{ name: 'ask-search', scenario: 'library', width: 1200, height: 820, steps: SEARCH_LOAN },
@@ -993,6 +1592,17 @@ const SHOTS: Shot[] = [
 	{ name: 'overview-busy', scenario: 'library', width: 1200, height: 820, steps: `${RENAME_AND_ADD} await d.click('[data-section="overview"]');`, model: 'down' },
 	{ name: 'overview-clear', scenario: 'clear', width: 1200, height: 820, steps: '' },
 	{ name: 'overview-small', scenario: 'library', width: 360, height: 780, steps: `${RENAME_AND_ADD} await d.click('[data-section="overview"]');`, model: 'down', scrollTo: '#appBar' },
+	// The four steps as a first-run user sees them, at the design's 720px column and the 360px minimum.
+	{ name: 'setup-library', scenario: 'library', width: 720, height: 820, steps: '', setup: true, modelState: 'found' },
+	{ name: 'setup-library-icloud', scenario: 'library', width: 720, height: 820, steps: SETUP_PICK_ICLOUD, setup: true, modelState: 'found', pick: '~/Library/Mobile Documents/scans' },
+	{ name: 'setup-sources', scenario: 'library', width: 720, height: 820, steps: SETUP_WATCH, setup: true, modelState: 'found' },
+	{ name: 'setup-filing', scenario: 'library', width: 720, height: 820, steps: SETUP_FILING, setup: true, modelState: 'found' },
+	{ name: 'setup-model-found', scenario: 'library', width: 720, height: 820, steps: SETUP_MODEL, setup: true, modelState: 'found' },
+	{ name: 'setup-model-not-found', scenario: 'library', width: 720, height: 820, steps: SETUP_MODEL, setup: true, modelState: 'not-found' },
+	{ name: 'setup-model-downloading', scenario: 'library', width: 720, height: 820, steps: `${SETUP_MODEL} ${SETUP_DOWNLOAD_TO_42}`, setup: true, modelState: 'found-empty', pull: 'hold-42', cancelAfter: true },
+	{ name: 'setup-model-shared', scenario: 'library', width: 720, height: 820, steps: SETUP_MODEL, setup: true, modelState: 'shared' },
+	{ name: 'setup-library-icloud-small', scenario: 'library', width: 360, height: 780, steps: SETUP_PICK_ICLOUD, setup: true, modelState: 'found', pick: '~/Library/Mobile Documents/scans' },
+	{ name: 'setup-model-not-found-small', scenario: 'library', width: 360, height: 780, steps: SETUP_MODEL, setup: true, modelState: 'not-found' },
 ];
 
 async function runShots(): Promise<void> {
@@ -1013,6 +1623,21 @@ async function runShots(): Promise<void> {
 				process.env.FAKE_SCENARIO = shot.scenario;
 				if (shot.model === 'down') process.env.FAKE_MODEL = 'down'; else delete process.env.FAKE_MODEL;
 				if (shot.delayMs) process.env.FAKE_ADD_DELAY_MS = String(shot.delayMs); else delete process.env.FAKE_ADD_DELAY_MS;
+				// Every shot seeds the settings file explicitly: `true` opens the four screens as before,
+				// `false` (a `setup:` shot) is what makes the boot gate open the step screen. The stored
+				// appearance stays 'system' (as an unseeded file defaults to), so the settings screen's own
+				// control paints exactly as the committed baseline does; the pass's theme comes from
+				// nativeTheme below. The model-step env is the fake engine's own selector, and it must not
+				// leak between shots.
+				seedSettings(shot.setup !== true, 'system');
+				if (shot.modelState) process.env.FAKE_MODEL_STATE = shot.modelState; else delete process.env.FAKE_MODEL_STATE;
+				if (shot.pick) process.env.FAKE_PICK_FOLDER = shot.pick; else delete process.env.FAKE_PICK_FOLDER;
+				if (shot.pull) process.env.FAKE_PULL = shot.pull; else delete process.env.FAKE_PULL;
+				delete process.env.FAKE_PULL_STEP_MS;
+				delete process.env.FAKE_DETECT_FOUND_AFTER;
+				// `load()` inside seedSettings applies the stored appearance, so re-assert the pass's theme
+				// after seeding it (order matters: the file says system, the window must still be dark/light).
+				nativeTheme.themeSource = mode;
 				browser.setSize(shot.width, shot.height);
 				const reload = loaded(browser);
 				browser.reload();
@@ -1037,6 +1662,9 @@ async function runShots(): Promise<void> {
 				}
 				const image = await browser.webContents.capturePage();
 				writeFileSync(join(out, `${shot.name}-${mode}.png`), image.toPNG());
+				// A download shot is taken mid-stream: cancel the child afterwards so it cannot keep
+				// writing into the next shot's fake state.
+				if (shot.cancelAfter) await driveNow(browser, `d.btn('cancel download').click(); await d.settle();`);
 				// Stop a queue that is still running so it can't touch the next shot.
 				if (shot.delayMs) await driveNow(browser, `d.find('#addCancel').click(); await d.settle();`);
 				rmSync(dir, { recursive: true, force: true });

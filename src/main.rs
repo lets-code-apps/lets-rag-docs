@@ -14,8 +14,10 @@ mod filing;
 mod index;
 mod locate;
 mod mcp;
+mod model_setup;
 mod organize;
 mod search;
+mod setup;
 mod shared_model;
 mod status;
 
@@ -64,6 +66,61 @@ enum Filing {
         json: bool,
     },
     /// Read a draft from stdin, validate it, then write the two lists unless --check is set
+    Save {
+        /// Validate without writing
+        #[arg(long)]
+        check: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum Model {
+    /// Probe the local model servers and list what they can run (`model detect --json`)
+    Detect {
+        /// Probe this one local server instead of the two defaults
+        #[arg(long, value_name = "URL")]
+        url: Option<String>,
+        /// Machine-readable output; there is no text mode for the app contract
+        #[arg(long)]
+        json: bool,
+    },
+    /// Ask Ollama to download a model, streaming NDJSON progress lines
+    Pull {
+        /// Pull from this one local server instead of the Ollama default
+        #[arg(long, value_name = "URL")]
+        url: Option<String>,
+        /// The model to download (after `--`, so a name cannot be read as a flag)
+        model: String,
+        /// Progress is always line-delimited JSON; the flag is accepted for symmetry
+        #[arg(long)]
+        json: bool,
+    },
+    /// Record the choice in the shared `model.toml` (`model save --json --runtime=… --url=… --model=…`)
+    Save {
+        /// One of ollama, lmstudio or custom
+        #[arg(long)]
+        runtime: String,
+        /// A local model server url
+        #[arg(long, value_name = "URL")]
+        url: String,
+        /// The model name, as the server lists it
+        #[arg(long)]
+        model: String,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum Setup {
+    /// Print the effective `[paths] library_dir` and `[watch] folders` (plus recommendations) as JSON
+    Show {
+        /// Machine-readable output; required, there is no text mode for this command
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read a draft from stdin, validate it, then write the two fields unless --check is set
     Save {
         /// Validate without writing
         #[arg(long)]
@@ -136,11 +193,33 @@ enum Command {
         /// Machine-readable output; required, there is no text mode for this command
         #[arg(long)]
         json: bool,
+        /// Probe the model itself with one tiny completion (`--answer`): what the
+        /// onboarding's Ready check uses; the overview keeps the cheap listing probe
+        #[arg(long)]
+        answer: bool,
+        /// Ask about a specific runtime address (`--url=ADDR`): the onboarding's Ready check
+        /// probes the model+endpoint the user has just chosen, which is not saved yet, instead
+        /// of the model `config.toml` would use. Read-only: nothing is written.
+        #[arg(long)]
+        url: Option<String>,
+        /// Ask about a specific model id (`--model=ID`), same reason as `--url`.
+        #[arg(long)]
+        model: Option<String>,
     },
     /// Show or change `[classify] folders` and `owners` through the engine
     Filing {
         #[command(subcommand)]
         command: Filing,
+    },
+    /// Show or change `[paths] library_dir` and `[watch] folders` through the engine
+    Setup {
+        #[command(subcommand)]
+        command: Setup,
+    },
+    /// Probe, download, and record the local model (first-run onboarding): `model …`
+    Model {
+        #[command(subcommand)]
+        command: Model,
     },
     /// Serve `search_docs` to an MCP client over stdio
     Mcp,
@@ -162,10 +241,8 @@ async fn main() -> anyhow::Result<()> {
             .as_deref()
             .unwrap_or(DEFAULT_CONFIG_PATH.as_ref()),
     );
-    let config = Config::load_with_shared(
-        &path,
-        &shared_model::read(&expand_home(Path::new(shared_model::DEFAULT_PATH))),
-    )?;
+    let shared_path = expand_home(Path::new(shared_model::DEFAULT_PATH));
+    let config = Config::load_with_shared(&path, &shared_model::read(&shared_path))?;
     tracing::debug!(?config, "config loaded from {}", path.display());
     match cli.command {
         Command::Ingest => ingest(&config).await,
@@ -179,10 +256,31 @@ async fn main() -> anyhow::Result<()> {
             organize::run(&config, mode.dry_run, mode.apply, json).await
         }
         Command::Documents { json } => documents::run(&config, json),
-        Command::Status { json } => status::run(&config, json).await,
+        Command::Status {
+            json,
+            answer,
+            url,
+            model,
+        } => status::run(&config, json, answer, url, model).await,
+        Command::Model { command } => match command {
+            Model::Detect { url, json } => {
+                model_setup::detect_cmd(&config, &path, &shared_path, url, json).await
+            }
+            Model::Pull { url, model, json } => model_setup::pull(url, model, json).await,
+            Model::Save {
+                runtime,
+                url,
+                model,
+                json,
+            } => model_setup::save_cmd(&shared_path, runtime, url, model, json),
+        },
         Command::Filing { command } => match command {
             Filing::Show { json } => filing::show(&config, json),
             Filing::Save { check } => filing::save(&config, &path, check),
+        },
+        Command::Setup { command } => match command {
+            Setup::Show { json } => setup::show(&config, &path, json),
+            Setup::Save { check } => setup::save(&config, &path, check),
         },
         Command::Mcp => mcp::run(&config).await,
         Command::Ask { question, json } => ask::run(&config, &question, json).await,
@@ -322,10 +420,24 @@ mod tests {
             .is_ok(),
             "`status --json` parses"
         );
+        // The onboarding's completion probe: `--answer` with the just-chosen endpoint and model.
+        // It must parse (read-only override; nothing is written), so the desktop can build it.
+        assert!(
+            Cli::try_parse_from(vec![
+                "lets-rag-docs".to_string(),
+                "status".to_string(),
+                "--json".to_string(),
+                "--answer".to_string(),
+                "--url=http://127.0.0.1:11434/v1".to_string(),
+                "--model=qwen3:8b".to_string()
+            ])
+            .is_ok(),
+            "`status --json --answer --url=.. --model=..` parses"
+        );
         // Without --json the clap side still parses (the flag is optional there); the command
         // refuses at run time, before touching config, with a non-zero exit.
         let config = Config::default();
-        let result = super::status::run(&config, false).await;
+        let result = super::status::run(&config, false, false, None, None).await;
         assert!(
             result.is_err(),
             "status without --json is refused, not printed by hand"

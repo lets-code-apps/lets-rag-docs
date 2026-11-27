@@ -78,3 +78,9 @@ script = "ocr.py"
 # touching it, `ingest` and `organize` skip it, and `documents --json` reports the number so the
 # app can mark such a row. A file over the limit is still listed, never OCR'd or embedded.
 max_file_mb = 50
+
+[watch]
+# Folders the first-run onboarding saves for the folder watcher (a follow-up: watching itself
+# is not implemented yet). User-picked source folders, in `~/` form, e.g. ["~/Downloads", "~/Desktop"].
+# Left empty by default so nothing is ever watched until you choose it. This app only stores them.
+folders = []

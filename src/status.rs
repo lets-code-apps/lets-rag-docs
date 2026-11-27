@@ -7,9 +7,11 @@
 //! documents: `last_sync` is the database file's mtime, and the probe is one local GET.
 
 use serde::Serialize;
+use serde_json::{Value, json};
 
 use crate::ask::check_base_url;
 use crate::config::{Config, LlmConfig};
+use crate::model_setup::openai_path;
 
 #[derive(Serialize)]
 struct Report {
@@ -26,15 +28,26 @@ struct Model {
     /// Whether the configured model answers right now. `false` is data: the overview
     /// shows "model unreachable" and the rest of the app keeps working.
     reachable: bool,
+    /// Whether the model itself completed a tiny test request (`--answer`), not just
+    /// whether the port lists models. `null`: not probed — the overview keeps the cheap
+    /// `reachable` check, while the onboarding's Ready state must depend on this one
+    /// (board decision 2026-11-27: a model is "ready" only if it actually answers).
+    answering: Option<bool>,
 }
 
-pub async fn run(config: &Config, json: bool) -> anyhow::Result<()> {
+pub async fn run(
+    config: &Config,
+    json: bool,
+    answer: bool,
+    url: Option<String>,
+    model: Option<String>,
+) -> anyhow::Result<()> {
     if !json {
         return Err(anyhow::anyhow!(
             "status: pass --json (this command reports the model and last sync for machines only)"
         ));
     }
-    let report = collect(config).await?;
+    let report = collect(config, answer, url, model).await?;
     println!("{}", serde_json::to_string(&report)?);
     Ok(())
 }
@@ -43,16 +56,63 @@ pub async fn run(config: &Config, json: bool) -> anyhow::Result<()> {
 /// so it must not inherit `llm.timeout_seconds` (minutes, meant for generation).
 const PROBE_TIMEOUT_SECONDS: u64 = 3;
 
+/// The budget for `--answer`'s tiny completion: loading a freshly pulled model takes
+/// seconds, so this is deliberately longer than the 2 s listing probe — but still
+/// bounded: "is this model answering" must never hang the app waiting on a server
+/// that only accepts the request and never answers.
+const ANSWER_TIMEOUT_SECONDS: u64 = 30;
+
 /// The two facts. `Report` is built from values, never from the clock or the network,
-/// so the shape-lock test fixes both directly (the seam).
-async fn collect(config: &Config) -> anyhow::Result<Report> {
+/// so the shape-lock test fixes both directly (the seam). `url`/`model` override the
+/// configured `[llm]` for this one call: the onboarding's Ready check must ask about the
+/// runtime+model the user has *just chosen* (which is not yet saved to config.toml), not the
+/// model the overview would use. Absent overrides, the probes fall back to `config.llm`, so
+/// the overview's cheap read is unchanged.
+async fn collect(
+    config: &Config,
+    answer: bool,
+    url: Option<String>,
+    model: Option<String>,
+) -> anyhow::Result<Report> {
+    let effective: LlmConfig = effective_llm(&config.llm, url, model);
     Ok(Report {
         version: 1,
         model: Model {
-            reachable: reachable(&config.llm).await,
+            reachable: reachable(&effective).await,
+            // Only asked for when `--answer` is on the command line: a real completion
+            // costs more than the 2 s listing the overview polls, so the overview leaves
+            // it `null` and the onboarding's Ready check pays for it once.
+            answering: if answer {
+                Some(answering(&effective).await)
+            } else {
+                None
+            },
         },
         last_sync: last_sync(config),
     })
+}
+
+/// The `[llm]` the probes should ask, with the onboarding's chosen url/model substituted.
+/// Nothing is written anywhere: this only redirects this call. A blank override leaves the
+/// configured value in place (an empty `--model=` is the configured model, not a no-op).
+fn effective_llm(base: &LlmConfig, url: Option<String>, model: Option<String>) -> LlmConfig {
+    match (url.is_none(), model.is_none()) {
+        (true, true) => base.clone(),
+        _ => LlmConfig {
+            base_url: url
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| base.base_url.clone()),
+            model: model
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| base.model.clone()),
+            max_tokens: base.max_tokens,
+            timeout_seconds: base.timeout_seconds,
+            // The override url still obeys the same local-only rule `check_base_url` enforces.
+            allow_remote: base.allow_remote,
+        },
+    }
 }
 
 /// Ask the OpenAI-compatible endpoint what it has: `GET {base_url}/models` is the cheapest
@@ -75,6 +135,97 @@ async fn reachable(llm: &LlmConfig) -> bool {
             Ok(response) => response.status().is_success(),
         },
     }
+}
+
+/// Does the model itself answer? One tiny completion request (`max_tokens: 1` on a
+/// one-word prompt) against the effective `[llm] model` — the smallest real check that
+/// proves the model generates, not just that a port lists models. The onboarding's
+/// Ready state depends on this (board decision 2026-11-27); a refusal under the local
+/// rule, an empty model, a timeout or a non-2xx answer is `false`, never an error
+/// (same data-not-error discipline as `reachable`).
+async fn answering(llm: &LlmConfig) -> bool {
+    if check_base_url(llm).is_err() {
+        return false;
+    }
+    if llm.model.trim().is_empty() {
+        return false;
+    }
+    // The desktop hands this probe the runtime root (`http://127.0.0.1:11434`, exactly as
+    // `model detect` reports it), while an `[llm] base_url` in config.toml already names
+    // `/v1`; `openai_path` adds the `/v1` exactly once, so the probe never asks
+    // `<root>/chat/completions` (a 404 on Ollama) nor `<root>/v1/v1/...`
+    // (LET-165 review round 3: the runtime-root form made every successful download read as
+    // not answering).
+    let url: String = openai_path(llm.base_url.as_str(), "chat/completions");
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(ANSWER_TIMEOUT_SECONDS))
+        .build();
+    match client {
+        Err(_) => false,
+        Ok(client) => match client
+            .post(&url)
+            .json(&json!({
+                "model": llm.model,
+                "messages": [{"role": "user", "content": "ping"}],
+                "max_tokens": 1,
+            }))
+            .send()
+            .await
+        {
+            Err(_) => false,
+            Ok(response) => {
+                if !response.status().is_success() {
+                    return false;
+                }
+                // A 2xx status is not proof the model answered: a proxy that accepts the
+                // request and returns an empty or malformed body never generated anything.
+                // Read the body and require an actual completion (review finding 1, LET-165).
+                let body = response.text().await.unwrap_or(String::new());
+                completion_answered(body)
+            }
+        },
+    }
+}
+
+/// Does a completion body carry a real answer? Only the OpenAI-compatible shape the probe
+/// asks for counts: `choices[].message.content` (or a top-level `message.content`, which Ollama
+/// returns when the base url is its own native endpoint) holding a non-empty string. An empty
+/// body, a non-JSON body, or a 2xx error object is NOT an answer - the status code alone is
+/// not enough to claim a model is "ready".
+fn completion_answered(body: String) -> bool {
+    let value: Value = match serde_json::from_str::<Value>(body.as_str()) {
+        Err(_) => return false,
+        Ok(value) => value,
+    };
+    let answered = |node: Option<&Value>| -> bool {
+        match node.and_then(Value::as_str) {
+            None => false,
+            Some(text) => !text.trim().is_empty(),
+        }
+    };
+    // OpenAI-compatible: at least one choice with a non-empty message content (or a direct
+    // `text` for completion-style servers).
+    if let Some(choices) = value.get("choices").and_then(Value::as_array) {
+        for choice in choices {
+            if answered(
+                choice
+                    .get("message")
+                    .and_then(|message| message.get("content")),
+            ) {
+                return true;
+            }
+            if answered(choice.get("text")) {
+                return true;
+            }
+        }
+    }
+    // Ollama native completion: `{ "message": { "content": "..." } }`.
+    if let Some(message) = value.get("message")
+        && answered(message.get("content"))
+    {
+        return true;
+    }
+    false
 }
 
 /// The library's own clock: mtime of the database file, no query run against it. The formatting
@@ -145,7 +296,7 @@ fn civil_from_days(days: i64) -> (i64, u8, u8) {
 
 /// A UTC RFC 3339 timestamp from whole seconds since the Unix epoch, with no date crate:
 /// the std clock gives seconds, this gives the eleven numbers of `YYYY-MM-DDThh:mm:ssZ`.
-fn rfc3339_utc(secs: u64) -> String {
+pub(crate) fn rfc3339_utc(secs: u64) -> String {
     let days: i64 = (secs / 86_400) as i64;
     let in_day = secs % 86_400;
     let (year, month, day) = civil_from_days(days);
@@ -240,6 +391,152 @@ mod tests {
         assert!(!reachable(&llm("http://8.8.8.8/v1")).await);
     }
 
+    #[tokio::test]
+    async fn answering_on_completion_2xx() {
+        // `--answer` asks the model a one-word question and counts a 2xx completion as an
+        // answer: this is the proof the onboarding's Ready state depends on (board 2026-11-27).
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "choices": [{"message": {"role": "assistant", "content": "pong"}}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        assert!(answering(&llm(&format!("{}/v1", server.uri()))).await);
+    }
+
+    #[tokio::test]
+    async fn answering_probes_a_runtime_root_url_once() {
+        // LET-165 review round 3: onboarding hands `--url` the runtime root, exactly as `model
+        // detect` reports it (no `/v1`). The probe must find the model at `<root>/v1/chat/completions`
+        // - and only once: a doubled `/v1/v1/...` or the bare `<root>/chat/completions` (a 404 on
+        // Ollama) would make a finished download read as not answering, so every Ready check failed.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "choices": [{"message": {"role": "assistant", "content": "pong"}}]
+            })))
+            // expect(2): both shapes - the bare root and the explicit /v1 - land on the SAME
+            // path exactly once each. Any other spelling (a root `/chat/completions`, a doubled
+            // `/v1/v1/`) matches no mock, arrives as a 404 no-match, and the probe answers false.
+            .expect(2)
+            .mount(&server)
+            .await;
+        // The root url, as `model detect` reports it: this is the shape that used to be broken.
+        let root: String = server.uri();
+        assert!(answering(&llm(root.as_str())).await);
+        // The same server addressed with an explicit /v1 must not double it.
+        assert!(answering(&llm(&format!("{}/v1", root))).await);
+    }
+
+    #[tokio::test]
+    async fn answering_false_on_refusal_or_empty_model_or_public_host() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        assert!(!answering(&llm(&format!("{}/v1", server.uri()))).await);
+
+        // An empty model is never asked for: no request would name a model to run.
+        let mut blank = llm("http://127.0.0.1:11434/v1");
+        blank.model = String::new();
+        assert!(!answering(&blank).await);
+
+        // The privacy rule applies to the completion probe too: a public host is `false`
+        // without ever sending the prompt.
+        assert!(!answering(&llm("http://8.8.8.8/v1")).await);
+    }
+
+    #[tokio::test]
+    async fn answering_false_on_empty_or_malformed_200() {
+        // A 2xx status is not proof the model generated anything (review finding 1, LET-165): an
+        // empty body and a non-JSON body both answer `false`, so the Ready check cannot be fooled
+        // by a proxy that accepts the request and returns nothing.
+        let empty = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(""))
+            .mount(&empty)
+            .await;
+        assert!(
+            !answering(&llm(&format!("{}/v1", empty.uri()))).await,
+            "an empty 200 body is not an answer"
+        );
+
+        let malformed = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("ok, but not JSON"))
+            .mount(&malformed)
+            .await;
+        assert!(
+            !answering(&llm(&format!("{}/v1", malformed.uri()))).await,
+            "a non-JSON 200 body is not an answer"
+        );
+    }
+
+    #[test]
+    fn effective_llm_probes_the_selected_model_not_the_configured_one() {
+        // Review finding 1: after a download the Ready check must ask the model just chosen at its
+        // own endpoint, even when `config.toml` still names an old model. The override carries the
+        // new pair; with no override the configured pair stands (the overview's cheap read unchanged).
+        let mut configured = llm("http://127.0.0.1:11434/v1");
+        configured.model = "old-model:1".to_string();
+
+        let eff = effective_llm(
+            &configured,
+            Some("http://127.0.0.1:1234/v1".to_string()),
+            Some("qwen3:8b".to_string()),
+        );
+        assert_eq!(
+            eff.model,
+            "qwen3:8b".to_string(),
+            "the just-chosen model is the one probed"
+        );
+        assert_eq!(
+            eff.base_url, "http://127.0.0.1:1234/v1",
+            "at the just-chosen endpoint"
+        );
+
+        let same = effective_llm(&configured, None, None);
+        assert_eq!(
+            same.model,
+            "old-model:1".to_string(),
+            "no override keeps the configured model"
+        );
+
+        // A blank override is ignored: it keeps the configured value rather than probing an empty model.
+        assert_eq!(
+            effective_llm(&configured, None, Some("".to_string())).model,
+            "old-model:1".to_string(),
+            "an empty --model= is the configured model, not a no-op"
+        );
+    }
+
+    #[test]
+    fn completion_answered_needs_a_real_completion_body() {
+        // The pure shape check behind the probe: a completion with content answers, everything else
+        // (empty, error object, blank content) does not.
+        assert!(completion_answered(
+            "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"pong\"}}]}"
+                .to_string()
+        ));
+        assert!(!completion_answered("".to_string()), "empty body");
+        assert!(
+            !completion_answered("{\"error\":{\"message\":\"no such model\"}}".to_string()),
+            "a 2xx error object"
+        );
+        assert!(
+            !completion_answered("{\"choices\":[{\"message\":{\"content\":\"\"}}]}".to_string()),
+            "a blank completion"
+        );
+    }
+
     #[test]
     fn last_sync_is_db_mtime() {
         let dir = tempfile::tempdir().unwrap();
@@ -309,7 +606,10 @@ mod tests {
         // The seam: build the Report from fixed values, never the clock or the network.
         let report = Report {
             version: 1,
-            model: Model { reachable: true },
+            model: Model {
+                reachable: true,
+                answering: None,
+            },
             last_sync: Some("2024-02-29T00:00:00Z".to_string()),
         };
         let json: String = serde_json::to_string(&report).unwrap();

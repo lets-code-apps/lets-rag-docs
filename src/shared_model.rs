@@ -91,15 +91,13 @@ pub fn write(path: &Path, model: &SharedModel) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[allow(dead_code)] // used by onboarding and settings (LET-136, LET-137)
-fn write_synced(path: &Path, text: &str) -> std::io::Result<()> {
+pub fn write_synced(path: &Path, text: &str) -> std::io::Result<()> {
     let mut file = fs::File::create(path)?;
     file.write_all(text.as_bytes())?;
     file.sync_all()
 }
 
-#[allow(dead_code)] // used by onboarding and settings (LET-136, LET-137)
-fn validate(model: &SharedModel) -> anyhow::Result<()> {
+pub fn validate(model: &SharedModel) -> anyhow::Result<()> {
     if !RUNTIMES.contains(&model.runtime.as_deref().unwrap_or("")) {
         bail!("runtime must be one of {RUNTIMES:?}");
     }

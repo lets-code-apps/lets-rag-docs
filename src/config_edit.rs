@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process;
 
 use anyhow::{Context, anyhow};
+use serde::Deserialize;
 use toml::de::DeTable;
 
 use crate::config::Config;
@@ -26,7 +27,7 @@ fn render(list: &[String]) -> String {
 
     let quoted: Vec<String> = list
         .iter()
-        .map(|name| format!("\"{name}\"", name = name).to_string())
+        .map(|name| toml_string(name.as_str()).to_string())
         .collect();
 
     let mut lines: Vec<String> = Vec::new();
@@ -53,6 +54,16 @@ fn render(list: &[String]) -> String {
     let joined = lines.join(",\n");
     let result: String = "[\n".to_string() + joined.as_str() + ",\n]";
     result
+}
+
+/// A TOML basic string with the value inside, escaped the way TOML reads it back: a backslash
+/// and a double quote are each escaped. Names and paths are hostile input, so a `"` or `\` in one
+/// can never break out of the string or corrupt the file. Control characters are refused by the
+/// callers' validation before this ever runs, so they need no escaping here.
+fn toml_string(value: &str) -> String {
+    let escaped: String = value.replace("\\", "\\\\").replace("\"", "\\\"");
+    let out: String = "\"".to_string() + escaped.as_str() + "\"";
+    out
 }
 
 /// Rewrite `text` with the requested lists and report whether the bytes change.
@@ -243,7 +254,14 @@ pub(crate) fn write_lists(
     if !changed {
         return Ok(false);
     }
+    write_atomic(path, &new)
+}
 
+/// The atomic-write tail shared by `write_lists` and `write_setup`: create the parent folder,
+/// preserve the file's mode, then write a fresh temp file in the same folder and `rename` it over
+/// the target (atomic on one filesystem: a reader sees the old bytes or the new ones, never half).
+/// The temp name carries the pid and an attempt counter; a collision just tries the next name.
+pub(crate) fn write_atomic(path: &Path, new_text: &str) -> anyhow::Result<bool> {
     let dir: &Path = path
         .parent()
         .filter(|d| !d.as_os_str().is_empty())
@@ -282,7 +300,7 @@ pub(crate) fn write_lists(
             Ok(file) => file,
         };
 
-        if let Err(e) = file.write_all(new.as_bytes()) {
+        if let Err(e) = file.write_all(new_text.as_bytes()) {
             _ = std::fs::remove_file(temp.as_os_str());
             return Err(e).context("cannot write temporary config file");
         }
@@ -300,11 +318,333 @@ pub(crate) fn write_lists(
     Err(anyhow!("could not create a temporary config file"))
 }
 
+/// The onboarding write behind `setup save`: replace only the `[paths] library_dir` value span
+/// and the `[watch] folders` value span, keeping every comment and every other byte, then rename
+/// a fresh file into place (via `write_atomic`). Same discipline as `patch_file`: an inline or
+/// dotted `paths`/`watch`, or a comment inside the old `folders` array, is refused with a clear
+/// message rather than guessed at. Re-parsing the result verifies it holds exactly what was asked.
+pub(crate) fn patch_setup(
+    text: String,
+    library_dir: String,
+    watch_folders: &[String],
+) -> anyhow::Result<(String, bool)> {
+    let parsed = DeTable::parse(text.as_str())
+        .context("the config file is not valid TOML: edit it by hand")?;
+    let root = parsed.get_ref();
+
+    let mut new_text = text.to_string();
+    let mut have_paths = false;
+    let mut have_watch = false;
+    let mut edits: Vec<(usize, usize, String)> = Vec::new();
+
+    for (key, value) in root.iter() {
+        let name = key.get_ref().as_ref();
+        if name != "paths" && name != "watch" {
+            continue;
+        }
+
+        let section = if name == "paths" {
+            have_paths = true;
+            "paths"
+        } else {
+            have_watch = true;
+            "watch"
+        };
+
+        let value_span = value.span();
+        let slice = &text[value_span.start..value_span.end];
+        if slice.trim_start().starts_with("{") {
+            return Err(anyhow!(
+                "`{section}` is an inline table: edit config.toml by hand",
+                section = section,
+            ));
+        }
+
+        let table = value.get_ref().as_table();
+        if table.is_none() {
+            return Err(anyhow!(
+                "`{section}` is not a table: edit config.toml by hand",
+                section = section,
+            ));
+        }
+        let table = table.unwrap();
+
+        let header_start = key.span().start;
+        let insert_at: usize = match text[header_start..].find("\n") {
+            Some(offset) => header_start + offset,
+            None => text.len(),
+        };
+
+        let mut have_value = false;
+        for (child_key, child_value) in table.iter() {
+            let child = child_key.get_ref().as_ref();
+            let child_start = child_key.span().start;
+            if child_start > 0 && text[..child_start].trim_end().ends_with(".") {
+                return Err(anyhow!(
+                    "`{section}` uses dotted keys: edit config.toml by hand",
+                    section = section,
+                ));
+            }
+            if section == "paths" && child == "library_dir" {
+                have_value = true;
+                let old_span = child_value.span();
+                let raw: String = text[old_span.start..old_span.end].to_string();
+                if !(raw.starts_with("\"") || raw.starts_with("'")) {
+                    return Err(anyhow!(
+                        "`library_dir` is not a string: edit config.toml by hand"
+                    ));
+                }
+                edits.push((
+                    old_span.start,
+                    old_span.end,
+                    toml_string(library_dir.as_str()).to_string(),
+                ));
+            } else if section == "watch" && child == "folders" {
+                have_value = true;
+                let old_span = child_value.span();
+                if !child_value.get_ref().is_array() {
+                    return Err(anyhow!(
+                        "`folders` is not an array: edit config.toml by hand"
+                    ));
+                }
+                if text[old_span.start..old_span.end].contains("#") {
+                    return Err(anyhow!(
+                        "the `folders` list has a comment inside it: edit config.toml by hand"
+                    ));
+                }
+                edits.push((old_span.start, old_span.end, render(watch_folders)));
+            }
+        }
+
+        if section == "paths" && !have_value {
+            edits.push((
+                insert_at,
+                insert_at,
+                format!(
+                    "\nlibrary_dir = {value}",
+                    value = toml_string(library_dir.as_str())
+                )
+                .to_string(),
+            ));
+        }
+        if section == "watch" && !have_value {
+            edits.push((
+                insert_at,
+                insert_at,
+                format!("\nfolders = {list}", list = render(watch_folders)).to_string(),
+            ));
+        }
+    }
+
+    if !have_paths {
+        let sep = if text.is_empty() || text.ends_with("\n") {
+            ""
+        } else {
+            "\n"
+        };
+        let section = format!(
+            "{sep}[paths]\nlibrary_dir = {value}\n",
+            value = toml_string(library_dir.as_str()),
+        )
+        .to_string();
+        edits.push((text.len(), text.len(), section.to_string()));
+    }
+    if !have_watch {
+        let sep = if text.is_empty() || text.ends_with("\n") {
+            ""
+        } else {
+            "\n"
+        };
+        let section = format!(
+            "{sep}[watch]\nfolders = {list}\n",
+            list = render(watch_folders),
+        )
+        .to_string();
+        edits.push((text.len(), text.len(), section.to_string()));
+    }
+
+    edits.sort_by_key(|left| std::cmp::Reverse(left.0));
+    for (start, end, replacement) in edits {
+        new_text.replace_range(start..end, replacement.as_str());
+    }
+
+    // Verify the rewritten file still parses and holds exactly the requested values (raw,
+    // unexpanded), the same discipline as patch_file verifying the lists.
+    let verified: VerifySetup =
+        toml::from_str(new_text.as_str()).context("the rewritten config does not parse")?;
+    if verified.paths.library_dir != Some(library_dir) {
+        return Err(anyhow!(
+            "the rewritten config did not hold exactly the requested library_dir"
+        ));
+    }
+    if verified.watch.folders != Some(watch_folders.to_vec()) {
+        return Err(anyhow!(
+            "the rewritten config did not hold exactly the requested watch folders"
+        ));
+    }
+
+    let changed = new_text != text;
+    Ok((new_text, changed))
+}
+
+/// Write `[paths] library_dir` and `[watch] folders` to `path`, keeping comments and every other
+/// byte identical (via `patch_setup`). Returns whether the bytes changed (`false`: already as asked,
+/// nothing written). A missing file is an empty base: the sections are created.
+pub(crate) fn write_setup(
+    path: &Path,
+    library_dir: String,
+    watch_folders: &[String],
+) -> anyhow::Result<bool> {
+    let old: String = match std::fs::read_to_string(path.as_os_str()) {
+        Ok(text) => text,
+        Err(e) if e.kind() == ErrorKind::NotFound => "".to_string(),
+        Err(e) => return Err(e).context(format!("cannot read {}", path.display()).to_string()),
+    };
+    let (new, changed) = patch_setup(old.to_string(), library_dir.to_string(), watch_folders)?;
+    if !changed {
+        return Ok(false);
+    }
+    write_atomic(path, &new)
+}
+
+/// Re-parse target for `patch_setup`: the two values it wrote, kept raw (never expanded), so a
+/// `~` path verifies against the exact string that was requested.
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct VerifySetup {
+    #[serde(default)]
+    paths: VerifyPaths,
+    #[serde(default)]
+    watch: VerifyWatch,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct VerifyPaths {
+    library_dir: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct VerifyWatch {
+    folders: Option<Vec<String>>,
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
 
-    use super::{patch_file, render, write_lists};
+    use super::{patch_file, render, toml_string, write_lists};
+    use super::{patch_setup, write_setup};
+    use crate::config::Config;
+
+    #[test]
+    fn toml_string_escapes_quotes_and_backslashes() {
+        assert_eq!(toml_string("plain"), "\"plain\"".to_string());
+        assert_eq!(toml_string("a\"b"), "\"a\\\"b\"".to_string());
+        assert_eq!(toml_string("a\\b"), "\"a\\\\b\"".to_string());
+    }
+
+    #[test]
+    fn setup_creates_missing_sections() {
+        let before: String = "# only a comment\n".to_string();
+        let folders: Vec<String> = vec!["~/Downloads".to_string(), "~/Desktop".to_string()];
+        let (after, changed) =
+            patch_setup(before, "~/Documents/library".to_string(), &folders).unwrap();
+        assert!(changed);
+        assert!(after.contains("[paths]"));
+        assert!(after.contains("library_dir = \"~/Documents/library\""));
+        assert!(after.contains("[watch]"));
+        assert!(after.contains("folders = ["));
+        assert!(after.contains("\"~/Downloads\""));
+    }
+
+    #[test]
+    fn setup_replaces_library_dir_keeps_comments() {
+        let before: String =
+            "[paths]\n# keep me\nocr_dir = \"data/ocr\"\nlibrary_dir = \"old\"\n".to_string();
+        let folders: Vec<String> = vec!["~/Downloads".to_string()];
+        let (after, changed) =
+            patch_setup(before, "~/Documents/library".to_string(), &folders).unwrap();
+        assert!(changed);
+        assert!(after.contains("# keep me"));
+        assert!(after.contains("ocr_dir = \"data/ocr\""));
+        assert!(after.contains("library_dir = \"~/Documents/library\""));
+        assert!(!after.contains("library_dir = \"old\""));
+    }
+
+    #[test]
+    fn setup_idempotent_reports_unchanged() {
+        // The exact bytes `patch_setup` itself writes for these values: saving the same thing
+        // again changes nothing.
+        let before: String =
+            "[paths]\nlibrary_dir = \"~/Documents/library\"\n[watch]\nfolders = [\n  \"~/Downloads\",\n]\n".to_string();
+        let folders: Vec<String> = vec!["~/Downloads".to_string()];
+        let (after, changed) =
+            patch_setup(before.clone(), "~/Documents/library".to_string(), &folders).unwrap();
+        assert!(!changed);
+        assert_eq!(after, before);
+    }
+
+    #[test]
+    fn setup_escapes_quotes_and_backslashes() {
+        let before: String = "[paths]\nlibrary_dir = \"x\"\n".to_string();
+        // A hostile value: a backslash then a quote. patch_setup returns an error if the rewritten
+        // file does not re-parse to exactly these values, so success proves the escaping round-trips.
+        let folders: Vec<String> = vec!["~/a\\\"b".to_string()];
+        let (after, changed) = patch_setup(before, "a\\\"b".to_string(), &folders).unwrap();
+        assert!(changed);
+        assert!(
+            toml::from_str::<Config>(after.as_str()).is_ok(),
+            "the escaping is valid TOML"
+        );
+        assert!(
+            after.contains("\\\""),
+            "the quote is escaped in the file, not left bare"
+        );
+    }
+
+    #[test]
+    fn setup_refuses_inline_table_and_commented_array() {
+        let empty: Vec<String> = vec![];
+        assert!(
+            patch_setup(
+                "paths = { library_dir = \"x\" }".to_string(),
+                "y".to_string(),
+                &empty
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("inline")
+        );
+        assert!(
+            patch_setup(
+                "[watch]\nfolders = [\n  \"x\", # keep me\n]\n".to_string(),
+                "y".to_string(),
+                &empty,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("comment")
+        );
+    }
+
+    #[test]
+    fn write_setup_leaves_no_temp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("config.toml");
+        let folders: Vec<String> = vec!["~/Downloads".to_string(), "~/Desktop".to_string()];
+        let first = write_setup(&file, "~/Documents/library".to_string(), &folders).unwrap();
+        assert!(first);
+        let names: Vec<String> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(names, vec!["config.toml".to_string()]);
+
+        let second = write_setup(&file, "~/Documents/library".to_string(), &folders).unwrap();
+        assert!(!second, "the same bytes are not written twice");
+    }
 
     #[test]
     fn render_matches_the_example_shape() {

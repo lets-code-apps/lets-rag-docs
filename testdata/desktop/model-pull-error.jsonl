@@ -1,0 +1,3 @@
+{"stage":"pulling manifest"}
+{"completed":1024,"stage":"downloading","total":2048}
+{"error":"manifest not found","stage":"error"}

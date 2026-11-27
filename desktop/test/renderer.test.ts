@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
@@ -143,4 +144,29 @@ test('the settings article sits right after the sidebar, not centred', () => {
 	const body = css.match(/\.settings-body \{([^}]*)\}/);
 	assert.ok(body);
 	assert.doesNotMatch(body[1], /margin: 0 auto/);
+});
+
+test('the onboarding styles do not re-skin the screens that were already there', () => {
+	// A new bare `.name` rule wins over an older one of the same name, so an onboarding rule that reuses a
+	// class the filing/ask/settings screens already style silently re-types them — the `.subhead` duplicate
+	// re-typed the filing preview's "what will move" heading and turned filing-preview-dark/light red in CI.
+	const css = readFileSync(join(RENDERER, 'app.css'), 'utf8');
+	const start = css.indexOf('/* ---- first-run onboarding');
+	const end = css.indexOf('/* ---- Smallest window');
+	assert.ok(start > 0 && end > start, 'onboarding style block not found in app.css');
+	const bare = (text: string) => [...text.matchAll(/^(\.[a-z][a-z0-9-]+) \{$/gm)].map((match) => match[1]);
+	const earlier = new Set(bare(css.slice(0, start)));
+	for (const name of bare(css.slice(start, end))) {
+		assert.equal(earlier.has(name), false, `${name} is already styled earlier in app.css; the onboarding rule would re-skin that screen`);
+	}
+});
+
+test('every renderer file parses as plain JavaScript, not TypeScript', () => {
+	// The renderer ships as plain .js (index.html loads it directly), so a stray type annotation is a
+	// runtime SyntaxError the page swallows as "page never settled". `tsc` only checks src/, so this is
+	// the guard: node's own parser must accept every renderer script.
+	for (const file of readdirSync(RENDERER).filter((name) => name.endsWith('.js'))) {
+		const result = spawnSync(process.execPath, ['--check', join(RENDERER, file)], { encoding: 'utf8' });
+		assert.equal(result.status, 0, `renderer/${file} is not valid JavaScript: ${result.stderr}`);
+	}
 });
