@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { join } from 'node:path';
+import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 
 import {
@@ -88,4 +90,14 @@ test('buildSetupSaveDraft accepts absolute or home-relative paths and refuses th
 	assert.equal(buildSetupSaveDraft('~/L', ['relative']), null, 'a relative watch folder');
 	const many = Array.from({ length: 21 }, (_, i) => `~/f${i}`);
 	assert.equal(buildSetupSaveDraft('~/L', many), null, 'at most 20 folders, like the engine');
+});
+
+test('the pull-error fixture is a stream that ends in the engine\'s own sentence', () => {
+	// `model pull` always finishes with either a success line or an error line; the page shows that
+	// sentence and offers "try again". The fixture is the byte stream the engine produces.
+	const text = readFileSync(join(import.meta.dirname, '..', '..', 'testdata', 'desktop', 'model-pull-error.jsonl'), 'utf8');
+	const lines = text.trim().split('\n').map((line) => parsePullLine(line));
+	assert.deepEqual(lines.map((line) => line?.stage), ['pulling manifest', 'downloading', 'error']);
+	assert.equal(lines[2]?.text, 'manifest not found');
+	assert.equal(pullProgress('qwen3:8b', lines[1] ?? ({} as never)).pct, 50, 'the bar advanced before the error');
 });

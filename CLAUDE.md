@@ -87,8 +87,10 @@ and the fake engine replay them byte for byte):** `search --json --limit N -- <q
 `documents --json` → `{version, max_file_mb, status, documents:[{...,bytes,pages,skipped,dataless}]}` where
 an over-limit original (`skipped:"over_limit"`, never indexed) still shows its size and `dataless:true` marks an
 iCloud-only file (macOS `SF_DATALESS` in `st_flags`, read via `symlink_metadata`, never downloaded);
-`status --json` → `{version, model:{reachable}, last_sync:"<RFC3339 UTC>"|null}` — the engine probes `GET {base_url}/models`
-with a 3 s timeout (a dead model is data: `reachable:false`, not an error), and `last_sync` is the database file's mtime;
+`status --json` → `{version, model:{reachable, answering}, last_sync:"<RFC3339 UTC>"|null}` — the engine probes `GET {base_url}/models`
+with a 3 s timeout (a dead model is data: `reachable:false`, not an error); `answering` is a tiny completion through
+`POST {base_url}/chat/completions` and is `null` when that probe did not run, so the desktop's "ready" can rest only on
+a model that actually answered, never on a port that merely replies; and `last_sync` is the database file's mtime;
 `add --json -- <file>` → `{version, status, source, file, type, date, chunks, duplicate_of}` (an
 original over `[ocr] max_file_mb` (default 50) is refused before hashing/copy/OCR);
 `locate --json -- <path>` → `{version, status, kind, path}` with `status:"ok"` only for one
@@ -96,6 +98,19 @@ canonical contained path — this is the only path the app may open;
 `filing save` stdin accepts `renames:[{list:"folders"|"owners", from, to}]` (rows re-file to the
 new name in the same save, DB rows move in one transaction via `db::rename`) and `shared_owner`
 (a string; refused if it isn't safe).
+`setup show --json` → `{version, library_dir, library_dir_set, recommended_library_dir, watch_folders,
+watch_folders_set, recommended_watch_folders}` (paths in `~/` form; a `*_set:false` flag means the value is the
+recommendation, nobody wrote it); `setup save [--check]` reads `{library_dir, watch_folders}` on stdin and answers
+`{version, ok, saved, errors:[{field,message}]}` (a rejected draft is exit 0 data, as with `filing save`; an
+unchanged draft or `--check` writes nothing; the library is refused inside `docs_dir`/`ocr_dir` through the
+same separation check `organize` uses).
+`model detect --json [--url=<addr>]` → `{ok, runtimes:[{runtime,url,reachable,models,usable,error}],
+shared:{runtime,url,model,set_by,reachable}|null, config:{model,overridden}}` (Ollama + LM Studio probed together,
+2 s each, no redirects; `usable` drops `embed` ids; `overridden` is this app's own `[llm] base_url|model` winning
+over the shared file); `model pull --json [--url=<addr>] -- <model>` streams NDJSON, one flushed stdout line per
+update (`pulling manifest` / `downloading` with `total`+`completed` / `success` / `error` with `error` / `other`) and
+exits non-zero unless a `success` line arrived; `model save --json --runtime=<r> --url=<u> --model=<m>` writes the
+shared `~/.config/lets-code/model.toml` with `set_by:"rag docs"` and answers `{ok, runtime, url, model}`.
 
 **Eval** `evals/rag.jsonl` lines: `{"id", "lang", "question", "expect", "source"}`. Pass = the
 expected `source` is among the first 5 distinct sources. **Baseline 2026-10-26: 10/10**
@@ -108,7 +123,10 @@ expected `source` is among the first 5 distinct sources. **Baseline 2026-10-26: 
 `~/.config/lets-rag-docs/config.toml`, with a commented `config.example.toml` in the repo:
 `[qdrant] url, collection`, `[embed] url`, `[paths] ocr_dir, evals`, `[llm] base_url, model,
 max_tokens, timeout_seconds, allow_remote` (default model `qwen3:30b-a3b`, which is already
-installed in Ollama; strip Qwen3 `<think>` blocks from answers). Both Let's Code apps also read a shared
+installed in Ollama; strip Qwen3 `<think>` blocks from answers), `[watch] folders` (a list of
+`~/`-form or absolute folders, default `[]`, never expanded — first-run onboarding saves it, the watching
+itself is a follow-up task, so an empty default is what keeps a later update from silently reading folders).
+Both Let's Code apps also read a shared
 `~/.config/lets-code/model.toml` for the model (`guide/MODEL.md`); an app's own `[llm] base_url` or
 `model` beats that file for that app, entirely.
 
@@ -219,7 +237,21 @@ desktop/                 # Electron menu-bar app (Node/TS), ask, filing and sett
     unreachable, re-sort waiting, no known owner, not indexed, only in iCloud) each routing to the existing screens;
     the re-sort item shares ONE dry-run memo with filing (per save-generation, dropped on save/apply). Engine side:
     `status --json` (new `src/status.rs`, reqwest 3 s probe, db-mtime text) and `dataless` in `documents --json`;
-    fake engine speaks both (FAKE_MODEL=down, scenario `clear`); 44 screenshots.
+    fake engine speaks both (FAKE_MODEL=down, scenario `clear`); 44 screenshots (64 since #25's onboarding shots).
+    **First-run onboarding (#25, 2026-11-27, LET-136):** four steps drawn in place of the sidebar while
+    `settings.json` lacks `setupDone` — library location, folders to watch, folders and owners (drawn skipped),
+    model. The page only collects choices; main performs every write at the last "continue" in one fixed order
+    (`setup save` → `filing save` only when an owner was added → `model save` only when a model was chosen and the
+    shared block is not kept) and then records `setupDone`, so quitting mid-onboarding leaves no half setup.
+    Engine side (new `src/setup.rs`, `src/model_setup.rs`, mirroring `filing.rs`/`config_edit.rs` and lets-triage-mail
+    PR #26 for the model step, JSON shapes identical so both apps share one `model.toml`): `setup show/save`,
+    `model detect/pull/save`, and `status --json` gained `model.answering` (a tiny real completion, so "Ready"
+    depends on the model answering, not on a port replying — the board's answer, the same thing triage mail's #26
+    did). `[watch] folders` is saved by setup; watching the folders is a follow-up task, and the step says so.
+    Desktop: 11 new channels (26 handlers), the OS folder picker + `shell.openExternal` (one, fixed Ollama URL) +
+    `memoryBytes` host seams, `PullJob` single-flight download with one `SIGTERM` cancel, geometry rule 6 (720px
+    column, no sideways scroll at 360px), and 20 new shots (library, iCloud pick, watch, owners, model found/not-found/
+    downloading/shared, plus two 360px views): 64 screenshots.
 10. Later: synthetic sample docs + public eval set, reranking (bge-reranker-v2-m3). (Page markers landed with #15: `ocr.py` emits `\f`, `chunk::paged_chunks` tracks the page, `chunk_cases.json` still locks the old chunk text and byte counts.)
 
 ## Environment

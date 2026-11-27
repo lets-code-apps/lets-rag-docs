@@ -258,3 +258,17 @@ test('model save parses the choice; a refusal (remote url / bad runtime) is a cl
 	assert.ok(!refused.ok);
 	assert.match(refused.error, /local network/, 'the local-only rule reaches the page');
 });
+
+test('the other two detect fixtures are data too: nothing reachable, and the shared block', () => {
+	// Both shapes decide what the onboarding step says, so both are locked as fixtures and parsed here.
+	const none = parseModelDetect(read('model-detect-not-found.json'), []);
+	assert.ok(none.ok);
+	assert.equal(none.value.runtimes.length, 2);
+	assert.ok(none.value.runtimes.every((r) => r.reachable === false), 'nothing reachable is a valid report');
+	assert.equal(none.value.shared, null);
+	const shared = parseModelDetect(read('model-detect-shared.json'), []);
+	assert.ok(shared.ok);
+	assert.equal(shared.value.shared?.model, 'qwen3:8b');
+	assert.equal(shared.value.shared?.set_by, 'triage mail', 'the step follows the other app only when it wrote the file');
+	assert.equal(shared.value.shared?.reachable, true, 'a shared block that cannot be reached is not a choice');
+});

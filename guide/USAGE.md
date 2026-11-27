@@ -47,8 +47,23 @@ lets-rag-docs eval                        # did the right document come back? (e
 lets-rag-docs ask "when does the warranty end"      # answer with citations from a local LLM
 lets-rag-docs organize --dry-run          # planned copies and moves in library/; changes nothing
 lets-rag-docs organize --apply            # copy originals into the library and re-embed the copies
+lets-rag-docs setup show                  # the library folder and folders to watch: written value or recommendation
+lets-rag-docs setup save                  # write them (reads a JSON draft on stdin; --check validates without writing)
+lets-rag-docs model detect                # which local model runtime answers, and what it can actually use
+lets-rag-docs model pull --json -- qwen3:8b  # download one model through the runtime, one progress line per update
+lets-rag-docs model save --json --runtime=ollama --url=http://127.0.0.1:11434 --model=qwen3:8b
 lets-rag-docs mcp                         # MCP server over stdio
 ```
+
+`setup` and `model` are the commands the desktop's first-run onboarding drives (see `desktop/README.md`):
+`setup show/save` own `[paths] library_dir` and `[watch] folders`, and `model detect/pull/save` read, download
+and save the shared model choice in `~/.config/lets-code/model.toml` (`set_by = "rag docs"`). They speak JSON
+in the same shapes lets-triage-mail uses, so the two apps share one model file. `status --json` also answers
+`model.answering`: a tiny real completion through the model, not just a port that replies.
+
+`[watch] folders` is saved by setup, but reading those folders is **not implemented yet** — it is a follow-up
+task. Until it lands, the list is only a saved intention; nothing watches, copies or indexes anything from it,
+and the default is empty so no folder is read by accident.
 
 `ingest` drops the collection and rebuilds it from `data/ocr/`, so never run `add` and `ingest` at
 the same time: a rebuild that lands in the middle of an `add` can drop the document `add` is
