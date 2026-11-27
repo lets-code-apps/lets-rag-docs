@@ -783,14 +783,15 @@ async function smokeOnboarding(browser: BrowserWindow): Promise<{ ok: boolean; d
 		await new Promise((resolve) => setTimeout(resolve, ms));
 	};
 
-	// 1) The step screen replaces the sidebar and the four screens; the first step is current and the
-	// middle step is drawn skipped; the library field is read-only and shows the engine's recommendation.
+	// 1) The step screen replaces the sidebar and the four screens; the first step is current, the
+	// folders-and-owners step is still to do (not skipped — it is a step the person uses; only an actual Skip
+	// draws it skipped), and the library field is read-only and shows the engine's recommendation.
 	await scenario({ FAKE_SCENARIO: 'library', FAKE_MODEL_STATE: 'found' });
 	await check('step screen', String.raw`
 		const li = [...document.querySelectorAll('#setupStepsList li')];
 		const current = li.filter((n) => n.getAttribute('aria-current') === 'step');
 		const field = d.find('#libField');
-		return li.length === 4 && current.length === 1 && current[0] === li[0] && li[2].classList.contains('step-skipped')
+		return li.length === 4 && current.length === 1 && current[0] === li[0] && li[2].classList.contains('step-rest')
 		 && !d.find('#onboardingScreen').hidden && d.find('#sidebar').hidden
 		 && d.find('#overviewScreen').hidden && d.find('#askScreen').hidden && d.find('#filingScreen').hidden && d.find('#settingsScreen').hidden
 		 && d.find('#stepTitle').textContent === 'library location'
@@ -821,10 +822,13 @@ async function smokeOnboarding(browser: BrowserWindow): Promise<{ ok: boolean; d
 	await walk('model');
 	await check('model step found', String.raw`
 		const card = d.find('.model-card');
-		return d.find('#stepTitle').textContent === 'model'
+		const li2 = document.querySelectorAll('#setupStepsList li')[2];
+	 return d.find('#stepTitle').textContent === 'model'
 		 && card.querySelector('.pill')?.textContent === 'Ollama found'
 		 && d.find('#stepContinueLabel').textContent === 'start filing'
-		 && d.find('#stepContinue').disabled === false;
+		 && d.find('#stepContinue').disabled === false
+		 // finding 7: after continuing past the owners step, that step shows done, not skipped.
+		 && li2?.classList.contains('step-done');
 	`);
 	await drive(browser, `await d.clickBtn('start filing');`);
 	const saved = stateOf().calls;
@@ -892,8 +896,11 @@ async function smokeOnboarding(browser: BrowserWindow): Promise<{ ok: boolean; d
 	await check('owner row', String.raw`
 		const rows = [...document.querySelectorAll('.owner-row')];
 		const remove = rows[0]?.querySelector('.btn');
+		const li2 = document.querySelectorAll('#setupStepsList li')[2];
 	 return rows.length === 1 && rows[0].querySelector('.row-title')?.textContent === 'Example Person'
-		 && remove?.textContent.trim() === 'remove' && remove.getBoundingClientRect().height >= 43.5;
+		 && remove?.textContent.trim() === 'remove' && remove.getBoundingClientRect().height >= 43.5
+		 // finding 7: while the person is on the owners step, that step carries the current marker.
+		 && li2?.classList.contains('step-current') && li2?.getAttribute('aria-current') === 'step';
 	`);
 	await drive(browser, `await d.clickBtn('continue');`);
 	await drive(browser, `await d.clickBtn('start filing');`);
