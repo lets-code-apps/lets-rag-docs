@@ -1115,12 +1115,12 @@ function obBuildWatch() {
 function obBuildFiling() {
   const body = el('div', 'step-content');
   const folders = el('div', 'step-section');
-  folders.append(el('span', 'subhead', 'folders'));
+  folders.append(el('span', 'step-subhead', 'folders'));
   folders.append(el('p', 'folders-list', (ob.filing?.folders ?? []).join(', ')));
   folders.append(el('span', 'model-note', 'The default list. Rename or add folders later in filing.'));
   body.append(folders);
   const owners = el('div', 'step-section');
-  owners.append(el('span', 'subhead', 'owners'));
+  owners.append(el('span', 'step-subhead', 'owners'));
   owners.append(obField('owner name', 'ownerField', { placeholder: 'e.g. Jan Kowalski', helper: 'Whose documents these are: a family member or one of your own companies.' }).wrap);
   const btns = el('div', 'step-btns');
   const add = el('button', 'btn secondary');

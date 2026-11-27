@@ -1286,7 +1286,9 @@ the 100%-wide wrap, so the narrow (360px) pane never grows a sideways scrollbar.
   min-height: 44px;
 }
 
-.subhead {
+/* .step-subhead, not .subhead: the filing screen already styles its "what will move" h2 with .subhead
+   (20px, 600) and a later rule of the same name silently re-skins it — that broke the filing-preview shots. */
+.step-subhead {
   margin: 0;
   font-size: 13px;
   font-weight: 500;
