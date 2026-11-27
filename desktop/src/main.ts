@@ -764,10 +764,11 @@ async function smokeOnboarding(browser: BrowserWindow): Promise<{ ok: boolean; d
 	const check = async (name: string, steps: string): Promise<void> => {
 		if ((await drive(browser, steps)) !== true) failures.push(name);
 	};
+	// Steps count from 0: library, folders to watch, folders and owners, model.
 	const walk = async (to: 'model' | 'filing'): Promise<void> => {
 		await drive(browser, `await d.clickBtn('continue');`);
-		if (to === 'filing') return;
 		await drive(browser, `await d.clickBtn('continue');`);
+		if (to === 'filing') return;
 		await drive(browser, `await d.clickBtn('continue');`);
 	};
 	const wait = async (ms: number): Promise<void> => {
@@ -875,7 +876,10 @@ async function smokeOnboarding(browser: BrowserWindow): Promise<{ ok: boolean; d
 	// performs the filing save with it.
 	await scenario({ FAKE_SCENARIO: 'library', FAKE_MODEL_STATE: 'found' });
 	await walk('filing');
-	await drive(browser, `await d.type('#ownerField', 'Example Person');`);
+	await drive(browser, `
+		if (!document.querySelector('#ownerField')) throw new Error('no owner field on step: ' + d.find('#stepTitle').textContent);
+		await d.type('#ownerField', 'Example Person');
+	`);
 	await drive(browser, `d.btn('add owner').click(); await d.settle();`);
 	await check('owner row', String.raw`
 		const rows = [...document.querySelectorAll('.owner-row')];
@@ -884,7 +888,6 @@ async function smokeOnboarding(browser: BrowserWindow): Promise<{ ok: boolean; d
 		 && remove?.textContent.trim() === 'remove' && remove.getBoundingClientRect().height >= 43.5;
 	`);
 	await drive(browser, `await d.clickBtn('continue');`);
-	await walk('model');
 	await drive(browser, `await d.clickBtn('start filing');`);
 	if (!stateOf().calls.some((c) => c.startsWith('filing save'))) failures.push('owner-not-saved');
 
@@ -974,7 +977,13 @@ async function smokeOnboarding(browser: BrowserWindow): Promise<{ ok: boolean; d
 	await walk('model');
 	await drive(browser, `d.btn('download qwen3:8b').click();`);
 	await drive(browser, `await d.clickBtn('start filing');`);
-	const savedAfterPull = stateOf().calls.some((c) => c.includes('model save'));
+	// The stream is still open when the last continue runs, so main must be waiting for the job: poll the
+	// fake state until the save appears (the pull takes ~4 s of fake streaming).
+	let savedAfterPull = false;
+	for (let i = 0; i < 60 && !savedAfterPull; i += 1) {
+		savedAfterPull = stateOf().calls.some((c) => c.includes('model save'));
+		if (!savedAfterPull) await wait(250);
+	}
 	if (!savedAfterPull) failures.push('continue-during-pull: no model save after success');
 	if (stateOf().calls.filter((c) => c.includes('model save')).length !== 1) failures.push('continue-during-pull: saved twice');
 
@@ -990,6 +999,10 @@ async function smokeOnboarding(browser: BrowserWindow): Promise<{ ok: boolean; d
 	`);
 
 	for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
+	// The pass sets fake-engine selectors; clear them so nothing after it inherits an onboarding scenario.
+	for (const name of ['FAKE_MODEL_STATE', 'FAKE_PICK_FOLDER', 'FAKE_PULL', 'FAKE_PULL_STEP_MS', 'FAKE_DETECT_FOUND_AFTER', 'FAKE_ANSWERING']) {
+		delete process.env[name];
+	}
 	return { ok: failures.length === 0, detail: failures.join(' | '), geometry };
 }
 
@@ -1460,7 +1473,7 @@ async function runSmoke(): Promise<void> {
 	app.exit(code);
 }
 
-type Shot = { name: string; scenario: 'library' | 'no-owners' | 'clear'; width: number; height: number; steps: string; model?: 'down'; scrollTo?: string; scrollToRow?: string; delayMs?: number };
+type Shot = { name: string; scenario: 'library' | 'no-owners' | 'clear'; width: number; height: number; steps: string; model?: 'down'; scrollTo?: string; scrollToRow?: string; delayMs?: number; setup?: boolean; modelState?: 'found' | 'found-empty' | 'not-found' | 'shared'; pick?: string; pull?: 'ok' | 'hold-42' | 'fail'; cancelAfter?: boolean };
 
 const OPEN_FILING = `await d.click('[data-section="filing"]');`;
 const OPEN_OWNERS = `${OPEN_FILING} await d.click('[data-view="owners"]');`;
@@ -1496,6 +1509,21 @@ const ADD_RUNNING = `${OPEN_ASK} d.find('#addDocsButton').click();
 const OVER_LIMIT = `${OPEN_ASK} const big = d.row('#libraryRows', 'big-scan.pdf');
   if (big.querySelector('.pill')?.textContent !== 'not indexed: over 50 MB') throw new Error('over-limit: the pill is missing');
   if (!(big.querySelector('.row-preview')?.textContent ?? '').includes(' MB')) throw new Error('over-limit: the size is missing'); ${ON_ASK}`;
+/** First-run onboarding (LET-165): a shot seeded without `setupDone` opens the step screen, so the steps
+ * only walk to the step being photographed with the design's own buttons. `cancelAfter` stops the fake
+ * download once the frame is taken (the bar is photographed at the engine's 42%). */
+const SETUP_WATCH = `await d.clickBtn('continue');`;
+const SETUP_FILING = `${SETUP_WATCH} await d.clickBtn('continue'); await d.type('#ownerField', 'Example Person'); d.btn('add owner').click(); await d.settle();`;
+const SETUP_MODEL = `${SETUP_WATCH} await d.clickBtn('continue'); await d.clickBtn('continue');`;
+const SETUP_PICK_ICLOUD = `d.btn('choose folder').click(); await d.settle();`;
+const SETUP_DOWNLOAD_TO_42 = `d.btn('download qwen3:8b').click();
+  for (let i = 0; i < 90; i += 1) {
+    const bar = document.querySelector('.progress');
+    if (bar && bar.getAttribute('aria-valuenow') === '42') break;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  const bar = document.querySelector('.progress');
+  if (!bar || bar.getAttribute('aria-valuenow') !== '42') throw new Error('the download bar never reached 42%: ' + (bar ? bar.outerHTML.slice(0, 160) : 'no bar') + ' card=' + (document.querySelector('.model-card')?.textContent ?? '').slice(0, 160));`;
 const SHOTS: Shot[] = [
 	{ name: 'ask', scenario: 'library', width: 1200, height: 820, steps: ASK_STEPS },
 	{ name: 'ask-search', scenario: 'library', width: 1200, height: 820, steps: SEARCH_LOAN },
@@ -1519,6 +1547,17 @@ const SHOTS: Shot[] = [
 	{ name: 'overview-busy', scenario: 'library', width: 1200, height: 820, steps: `${RENAME_AND_ADD} await d.click('[data-section="overview"]');`, model: 'down' },
 	{ name: 'overview-clear', scenario: 'clear', width: 1200, height: 820, steps: '' },
 	{ name: 'overview-small', scenario: 'library', width: 360, height: 780, steps: `${RENAME_AND_ADD} await d.click('[data-section="overview"]');`, model: 'down', scrollTo: '#appBar' },
+	// The four steps as a first-run user sees them, at the design's 720px column and the 360px minimum.
+	{ name: 'setup-library', scenario: 'library', width: 720, height: 820, steps: '', setup: true, modelState: 'found' },
+	{ name: 'setup-library-icloud', scenario: 'library', width: 720, height: 820, steps: SETUP_PICK_ICLOUD, setup: true, modelState: 'found', pick: '~/Library/Mobile Documents/scans' },
+	{ name: 'setup-sources', scenario: 'library', width: 720, height: 820, steps: SETUP_WATCH, setup: true, modelState: 'found' },
+	{ name: 'setup-filing', scenario: 'library', width: 720, height: 820, steps: SETUP_FILING, setup: true, modelState: 'found' },
+	{ name: 'setup-model-found', scenario: 'library', width: 720, height: 820, steps: SETUP_MODEL, setup: true, modelState: 'found' },
+	{ name: 'setup-model-not-found', scenario: 'library', width: 720, height: 820, steps: SETUP_MODEL, setup: true, modelState: 'not-found' },
+	{ name: 'setup-model-downloading', scenario: 'library', width: 720, height: 820, steps: `${SETUP_MODEL} ${SETUP_DOWNLOAD_TO_42}`, setup: true, modelState: 'found-empty', pull: 'hold-42', cancelAfter: true },
+	{ name: 'setup-model-shared', scenario: 'library', width: 720, height: 820, steps: SETUP_MODEL, setup: true, modelState: 'shared' },
+	{ name: 'setup-library-icloud-small', scenario: 'library', width: 360, height: 780, steps: SETUP_PICK_ICLOUD, setup: true, modelState: 'found', pick: '~/Library/Mobile Documents/scans' },
+	{ name: 'setup-model-not-found-small', scenario: 'library', width: 360, height: 780, steps: SETUP_MODEL, setup: true, modelState: 'not-found' },
 ];
 
 async function runShots(): Promise<void> {
@@ -1539,6 +1578,15 @@ async function runShots(): Promise<void> {
 				process.env.FAKE_SCENARIO = shot.scenario;
 				if (shot.model === 'down') process.env.FAKE_MODEL = 'down'; else delete process.env.FAKE_MODEL;
 				if (shot.delayMs) process.env.FAKE_ADD_DELAY_MS = String(shot.delayMs); else delete process.env.FAKE_ADD_DELAY_MS;
+				// Every shot seeds the settings file explicitly: `true` opens the four screens as before,
+				// `false` (a `setup:` shot) is what makes the boot gate open the step screen. The model-step
+				// env is the fake engine's own selector, and it must not leak between shots.
+				seedSettings(shot.setup !== true, mode);
+				if (shot.modelState) process.env.FAKE_MODEL_STATE = shot.modelState; else delete process.env.FAKE_MODEL_STATE;
+				if (shot.pick) process.env.FAKE_PICK_FOLDER = shot.pick; else delete process.env.FAKE_PICK_FOLDER;
+				if (shot.pull) process.env.FAKE_PULL = shot.pull; else delete process.env.FAKE_PULL;
+				delete process.env.FAKE_PULL_STEP_MS;
+				delete process.env.FAKE_DETECT_FOUND_AFTER;
 				browser.setSize(shot.width, shot.height);
 				const reload = loaded(browser);
 				browser.reload();
@@ -1563,6 +1611,9 @@ async function runShots(): Promise<void> {
 				}
 				const image = await browser.webContents.capturePage();
 				writeFileSync(join(out, `${shot.name}-${mode}.png`), image.toPNG());
+				// A download shot is taken mid-stream: cancel the child afterwards so it cannot keep
+				// writing into the next shot's fake state.
+				if (shot.cancelAfter) await driveNow(browser, `d.btn('cancel download').click(); await d.settle();`);
 				// Stop a queue that is still running so it can't touch the next shot.
 				if (shot.delayMs) await driveNow(browser, `d.find('#addCancel').click(); await d.settle();`);
 				rmSync(dir, { recursive: true, force: true });

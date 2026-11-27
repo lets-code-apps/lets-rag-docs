@@ -456,9 +456,13 @@ async function modelPullCmd() {
   }
   if (mode === 'hold-42') {
     // Stop at 42% and wait for main's SIGTERM (the page's cancel button); the stream ends without
-    // a success line, exactly as a cancelled real pull does.
+    // a success line, exactly as a cancelled real pull does. The interval is not decoration: with no
+    // pending I/O left, node exits on its own ("unsettled top-level await") and the hold becomes a
+    // premature failure instead of a download that really is still running.
+    const busy = setInterval(() => { }, 1000);
     await new Promise((resolve) => {
       process.on('SIGTERM', () => {
+        clearInterval(busy);
         resolve();
       });
     });

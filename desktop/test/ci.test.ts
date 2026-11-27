@@ -33,6 +33,11 @@ test('the baseline is copied before the shots overwrite it', () => {
 	assert.ok(workflow.indexOf('cp -R screenshots') < workflow.indexOf('npm run shots'));
 });
 
+test('the workflow requires all 64 shots (44 screens plus the 20 first-run steps)', () => {
+	assert.ok(workflow.includes("grep -q '^SHOTS OK: 64'"), 'the shot count guard must be 64');
+	assert.equal(workflow.includes("'^SHOTS OK: 44'"), false, 'the old 44-shot guard is stale');
+});
+
 test('the artifact upload uses path (not the invalid files key) and the comment step has a token + run link', () => {
 	// upload-artifact@v4 reads `path:`; `files:` is not an input and made the upload fail silently.
 	assert.ok(workflow.includes('path:'), 'upload-artifact must use path:');

@@ -1475,7 +1475,7 @@ async function obFinish() {
   const watchFolders = ob.watch.filter((w) => w.on).map((w) => w.path);
   const payload = { library_dir: ob.libPath, watch_folders: watchFolders };
   if (ob.owners.length > 0) payload.owners = ob.owners;
-  const chosen = ob.chosenModel || ob.stepModel?.model || '';
+  const chosen = ob.chosenModel || ob.stepModel?.model || ob.pull?.model || '';
   const keepShared = ob.stepModel?.state === 'shared' && ob.overrideShared !== true;
   if (chosen !== '' && !keepShared) {
     payload.model = { runtime: ob.stepModel?.runtime ?? 'ollama', url: ob.stepModel?.url ?? ob.address, model: chosen };
