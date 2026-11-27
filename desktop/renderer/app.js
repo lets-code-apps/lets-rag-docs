@@ -69,6 +69,8 @@ const state = {
     error: null, // why a continue did not go through
     filingLoaded: false,
     filingSkipped: false, // the person pressed Skip on the owners step: the step list draws it skipped
+    wasNotFound: false, // the previous detect found no runtime (the guided-install transition, finding 6)
+    guidedStarted: false, // the recommended pull already auto-started once (finding 6)
     done: false,
   },
 };
@@ -1352,12 +1354,14 @@ function onPullResult(modelId, res) {
 
 async function obDetect() {
   obClearAddressFromField();
+  const priorNotFound = ob.wasNotFound; // whether the last detect saw no runtime (the guided-install transition)
   const res = await track(api.modelDetect(ob.address === '' ? undefined : ob.address));
   if (!ob.active || ob.step !== 3) return;
   if (!res || !res.ok) {
     ob.stepModel = null;
     ob.detect = null;
     ob.viewState = 'not-found';
+    ob.wasNotFound = true;
     scheduleRecheck();
     render();
     return;
@@ -1366,6 +1370,7 @@ async function obDetect() {
   ob.chosenModel = '';
   const step = m.stepFromDetect(res.report, (state.settings.memGb || 16) * 1024 ** 3);
   ob.stepModel = step;
+  ob.wasNotFound = step.state === 'not-found';
   if (step.state === 'shared' && ob.overrideShared === true) {
     ob.viewState = 'found';
     ob.models = m.choiceList(res.report, step.url);
@@ -1377,7 +1382,16 @@ async function obDetect() {
     ob.models = m.choiceList(res.report, step.url);
   } else {
     ob.viewState = step.state;
-    if (step.state === 'not-found') scheduleRecheck();
+    if (step.state === 'not-found') {
+      scheduleRecheck();
+    } else if (m.guidedInstall(priorNotFound, step.state, ob.guidedStarted)) {
+      // Guided install (finding 6): the not-found screen promised that installing Ollama then re-detecting
+      // downloads the recommendation itself. The first detect that now finds an empty Ollama after a not-found
+      // starts that recommended pull exactly once; an initially-empty runtime keeps the manual offer only.
+      ob.guidedStarted = true;
+      startDownload(step.recommend.model);
+      return;
+    }
   }
   render();
 }
@@ -1446,6 +1460,10 @@ function obGoStep(step) {
   ob.step = step;
   if (step === 3) {
     ob.viewState = 'detecting';
+    // A fresh entry to the model step starts a new detect cycle: the guided-install transition (finding 6)
+    // is per-cycle, so a not-found from an earlier visit must not trigger a surprise pull on return.
+    ob.wasNotFound = false;
+    ob.guidedStarted = false;
     void obDetect();
   }
   if (step === 2 && ob.filingLoaded !== true) {

@@ -666,6 +666,15 @@ export function modelTravels(viewState, pullRunning, keepShared) {
   return false;
 }
 
+/** The guided-install download (review finding 6, LET-165): the not-found screen promises that installing
+ * Ollama and re-detecting will download the recommendation itself. The recommended pull auto-starts ONLY on
+ * the transition from a previous not-found to a newly-detected empty runtime, and only once. An initially
+ * detected empty runtime keeps the manual download offer (no surprise download before the person looked).
+ * `priorNotFound` is whether the previous detect was not-found; `guidedStarted` guards the once. */
+export function guidedInstall(priorNotFound, state, guidedStarted) {
+  return priorNotFound === true && state === 'found-empty' && guidedStarted !== true;
+}
+
 /** The runtime word the engine names, said the way the design says it ("Ollama", "LM Studio"). */
 export function runtimeName(runtime) {
   const names = { ollama: 'Ollama', lmstudio: 'LM Studio' };

@@ -17,7 +17,7 @@
 // between calls (default: a file in the OS temp folder). Delete it to start over.
 // The fake library root is /tmp/rag-docs-fake/library — what `locate` resolves paths to.
 // First-run onboarding (LET-136), mirroring lets-triage mail's selector names:
-// FAKE_MODEL_STATE=found|found-empty|not-found|shared: what `model detect` answers (default found).
+// FAKE_MODEL_STATE=found|found-empty|not-found|shared|install: what `model detect` answers (default found).
 // FAKE_DETECT_FOUND_AFTER=<n>: the first <n> detects answer not-found (the step re-checks itself).
 // FAKE_PULL=ok|hold-42|fail: how `model pull` streams (hold-42 stops at 42% and waits for SIGTERM).
 // FAKE_PICK_FOLDER=<path>: the folder the smoke/shots picker host returns (unset: the user cancelled).
@@ -395,6 +395,16 @@ function modelDetectCmd() {
   const dead = (runtime, url) => ({ runtime, url, reachable: false, models: [], usable: [], error: `no server at ${new URL(url).host}` });
   const alive = (runtime, url, models, usable) => ({ runtime, url, reachable: true, models, usable, error: null });
   const config = { model: state.model ?? '', overridden: false };
+  if (mode === 'install') {
+    // Guided install (review finding 6, LET-165): the first FAKE_DETECT_FOUND_AFTER detects are not-found (no
+    // runtime); after that Ollama appears but is empty (reachable, only an embedding model), so the step sees
+    // found-empty after a not-found and the page auto-starts the recommended pull exactly once.
+    const nf = Number(process.env.FAKE_DETECT_FOUND_AFTER || 1);
+    if (detects <= nf) {
+      print({ ok: true, runtimes: [dead('ollama', 'http://127.0.0.1:11434'), dead('lmstudio', 'http://127.0.0.1:1234')], shared: null, config });
+    }
+    print({ ok: true, runtimes: [alive('ollama', 'http://127.0.0.1:11434', ['bge-m3:latest'], []), dead('lmstudio', 'http://127.0.0.1:1234')], shared: null, config });
+  }
   if (after > 0 && detects <= after) {
     print({ ok: true, runtimes: [dead('ollama', 'http://127.0.0.1:11434'), dead('lmstudio', 'http://127.0.0.1:1234')], shared: null, config });
   }

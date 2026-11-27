@@ -490,3 +490,14 @@ test('a failed or not-found "set up later" saves no model; an installed or runni
   assert.equal(m.modelTravels('downloading', true, false), true, 'a still-running pull: main defers the save to success');
   assert.equal(m.modelTravels('shared', false, true), false, 'keeping the other app\'s choice: no model save');
 });
+
+test('guided install auto-starts the recommended pull only once, only after a not-found', () => {
+  // Review finding 6 (LET-165): the not-found screen promises installing Ollama then downloading the
+  // recommendation itself. The pull auto-starts on the transition not-found -> newly-detected empty, exactly
+  // once; an initially-empty runtime keeps the manual offer only.
+  assert.equal(m.guidedInstall(true, 'found-empty', false), true, 'empty appears where there was none: start the pull');
+  assert.equal(m.guidedInstall(false, 'found-empty', false), false, 'first detect already empty: manual offer only');
+  assert.equal(m.guidedInstall(true, 'found-empty', true), false, 'the recommended pull fires only once');
+  assert.equal(m.guidedInstall(true, 'not-found', false), false, 'not-found is not an empty runtime to download into');
+  assert.equal(m.guidedInstall(true, 'found', false), false, 'a found runtime with a usable model needs no download');
+});
