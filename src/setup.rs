@@ -385,6 +385,64 @@ mod tests {
     }
 
     #[test]
+    fn show_defaults_and_written_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("config.toml");
+
+        // No file written yet: nothing is "set", the recommendations are offered, and nothing
+        // is watched by accident.
+        let config = Config::default();
+        let fresh = collect_show(&config, &file);
+        assert!(
+            !fresh.library_dir_set,
+            "a fresh install has no written library_dir"
+        );
+        assert!(!fresh.watch_folders_set, "a fresh install watches nothing");
+        assert_eq!(fresh.recommended_library_dir, "~/Documents/library");
+        assert!(
+            fresh.watch_folders.is_empty(),
+            "[watch] folders starts empty"
+        );
+
+        // The user's own values stay theirs (and are marked as written), exactly as stored.
+        fs::write(
+            &file,
+            "[paths]\nlibrary_dir = \"~/Other/library\"\n[watch]\nfolders = [\"~/Downloads\"]\n",
+        )
+        .unwrap();
+        let written_config: Config = toml::from_str(
+            "[paths]\nlibrary_dir = \"~/Other/library\"\n[watch]\nfolders = [\"~/Downloads\"]\n",
+        )
+        .unwrap();
+        let after = collect_show(&written_config, &file);
+        assert!(after.library_dir_set, "a written library_dir is marked set");
+        assert!(
+            after.watch_folders_set,
+            "a written folders list is marked set"
+        );
+        assert_eq!(
+            after.watch_folders,
+            vec!["~/Downloads".to_string()],
+            "the stored value is reported verbatim"
+        );
+    }
+
+    #[test]
+    fn show_uses_tilde_form() {
+        // An effective library_dir under $HOME is reported in `~/` form, the inverse of
+        // `expand_home`, so the desktop can show the same text the config stores.
+        let home: String = std::env::var("HOME").unwrap().to_string();
+        let mut config = Config::default();
+        config.paths.library_dir = PathBuf::from(home.to_string() + "/Documents/library");
+        let dir = tempfile::tempdir().unwrap();
+        let report = collect_show(&config, &dir.path().join("config.toml"));
+        assert_eq!(
+            report.library_dir, "~/Documents/library",
+            "a $HOME prefix becomes ~/"
+        );
+    }
+
+    #[test]
     fn setup_show_shape_is_locked() {
         let report = ShowReport {
             version: 1,
