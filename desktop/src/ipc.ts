@@ -51,8 +51,9 @@ export type OpenDocumentResult = { ok: boolean; error?: string; opened?: boolean
 
 // The settings the page reads and writes. `appearance` is ours (system|dark|light); `openAtLogin`
 // is read from, and written back to, the OS login item — the payload always reports the OS's real
-// state, never a remembered one.
-export type SettingsPayload = { appearance: Appearance; openAtLogin: boolean };
+// state, never a remembered one. `setupDone` tells the boot gate whether first-run onboarding has
+// finished; only main ever writes it.
+export type SettingsPayload = { appearance: Appearance; openAtLogin: boolean; setupDone: boolean };
 
 export type IPCFunctionName =
 	| 'ask'

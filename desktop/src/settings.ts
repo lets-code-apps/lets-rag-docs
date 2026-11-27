@@ -12,28 +12,39 @@ import type { SettingsPayload } from './ipc.ts';
 
 export const APPEARANCES = ['system', 'dark', 'light'] as const;
 export type Appearance = (typeof APPEARANCES)[number];
-export type Settings = { appearance: Appearance };
+// `setupDone` records that first-run onboarding finished; main writes it (never the page), and it
+// is only ever set to true. An ordinary (pre-onboarding) file has no such key, which reads false.
+export type Settings = { appearance: Appearance; setupDone: boolean };
 
-export const DEFAULT_SETTINGS: Settings = { appearance: 'system' };
+export const DEFAULT_SETTINGS: Settings = { appearance: 'system', setupDone: false };
 
 // The allow-list for the segmented control: an appearance is one of these three, nothing else.
 export const isAppearance = (value: unknown): value is Appearance =>
 	APPEARANCES.includes(value as Appearance);
 
-// A missing, corrupt or unknown file is the defaults, never an error.
+// A missing, corrupt or unknown file is the defaults, never an error. `setupDone` is kept only when
+// it is exactly `true`; anything else (missing, false, non-boolean) is false.
 export function parseSettings(text: string): Settings {
 	try {
-		const parsed = JSON.parse(text) as { appearance?: unknown } | null;
-		if (isAppearance(parsed?.appearance)) return { appearance: parsed.appearance };
+		const parsed = JSON.parse(text) as { appearance?: unknown; setupDone?: unknown } | null;
+		if (parsed !== null && typeof parsed === 'object') {
+			return {
+				appearance: isAppearance(parsed.appearance) ? (parsed.appearance as Appearance) : DEFAULT_SETTINGS.appearance,
+				setupDone: parsed.setupDone === true,
+			};
+		}
 	} catch {
 		// fall through to the defaults
 	}
 	return DEFAULT_SETTINGS;
 }
 
-// What `setSetting` may do: a known name with a value of the right type, nothing else.
+// What `setSetting` may do: a known name with a value of the right type, nothing else. `setupDone`
+// accepts only `true` — onboarding can be completed, never "un-completed" from the page.
 export const isAllowedSetting = (name: unknown, value: unknown): boolean =>
-	(name === 'appearance' && isAppearance(value)) || (name === 'openAtLogin' && typeof value === 'boolean');
+	(name === 'appearance' && isAppearance(value)) ||
+	(name === 'openAtLogin' && typeof value === 'boolean') ||
+	(name === 'setupDone' && value === true);
 
 export function loadSettings(file: string): Settings {
 	// Missing or unreadable file: the defaults. Never throws.
@@ -50,11 +61,19 @@ function readFileSyncSafe(file: string): string {
 	return '';
 }
 
+// The shape written to disk: the appearance always, `setupDone` only when true, so a normal file
+// stays `{"appearance":…}` and only a finished onboarding adds `"setupDone":true`.
+function fileShape(settings: Settings): Record<string, unknown> {
+	const shape: Record<string, unknown> = { appearance: settings.appearance };
+	if (settings.setupDone) shape.setupDone = true;
+	return shape;
+}
+
 export function saveSettings(file: string, settings: Settings): boolean {
 	// Returns false on failure and never throws; a failed write still leaves the theme applied.
 	try {
 		mkdirSync(dirname(file), { recursive: true });
-		writeFileSync(file, JSON.stringify(settings));
+		writeFileSync(file, JSON.stringify(fileShape(settings)));
 		return true;
 	} catch {
 		return false;
@@ -87,18 +106,23 @@ export class SettingsController {
 	}
 
 	// The renderer reads the truth every time: the stored appearance plus the OS's real login-item
-	// state, so the switch shows what macOS has, not what the page last asked for.
+	// state, so the switch shows what macOS has, not what the page last asked for. `setupDone` tells
+	// the boot gate whether to skip onboarding.
 	payload(): SettingsPayload {
-		return { appearance: this.settings.appearance, openAtLogin: this.host.getOpenAtLogin() };
+		return { appearance: this.settings.appearance, openAtLogin: this.host.getOpenAtLogin(), setupDone: this.settings.setupDone };
 	}
 
 	// `setSetting` at the trust boundary. Unknown name or wrong value type: `null`, nothing changes.
 	set(name: unknown, value: unknown): SettingsPayload | null {
 		if (!isAllowedSetting(name, value)) return null;
 		if (name === 'appearance') {
-			this.settings = { appearance: value as Appearance };
+			this.settings = { appearance: value as Appearance, setupDone: this.settings.setupDone };
 			this.host.setTheme(value as Appearance);
 			// Persist if we can; the choice applies for this run either way.
+			saveSettings(this.file, this.settings);
+		} else if (name === 'setupDone') {
+			// Only main calls this, at the end of onboarding; it accepts `true` alone.
+			this.settings = { ...this.settings, setupDone: true };
 			saveSettings(this.file, this.settings);
 		} else {
 			// `openAtLogin` belongs to the OS, so it is set there and not written to our file.
