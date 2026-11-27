@@ -183,7 +183,7 @@ pub(crate) fn check_base_url(llm: &LlmConfig) -> Result<(), AskError> {
 /// Same rules as lets-triage-mail: loopback, RFC 1918, link-local, IPv6 unique-local,
 /// `localhost`, single-label names and `.local` / `.lan` / `.home.arpa`. Text only, no DNS:
 /// a name that looks local could still resolve to a public address, and the answer can change.
-fn is_local_or_private_host(host: &str) -> bool {
+pub(crate) fn is_local_or_private_host(host: &str) -> bool {
     let bare = host.trim_start_matches('[').trim_end_matches(']');
     if let Ok(ip) = bare.parse::<IpAddr>() {
         return match ip {

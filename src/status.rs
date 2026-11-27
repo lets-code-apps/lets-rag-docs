@@ -7,6 +7,7 @@
 //! documents: `last_sync` is the database file's mtime, and the probe is one local GET.
 
 use serde::Serialize;
+use serde_json::json;
 
 use crate::ask::check_base_url;
 use crate::config::{Config, LlmConfig};
@@ -26,15 +27,20 @@ struct Model {
     /// Whether the configured model answers right now. `false` is data: the overview
     /// shows "model unreachable" and the rest of the app keeps working.
     reachable: bool,
+    /// Whether the model itself completed a tiny test request (`--answer`), not just
+    /// whether the port lists models. `null`: not probed — the overview keeps the cheap
+    /// `reachable` check, while the onboarding's Ready state must depend on this one
+    /// (board decision 2026-11-27: a model is "ready" only if it actually answers).
+    answering: Option<bool>,
 }
 
-pub async fn run(config: &Config, json: bool) -> anyhow::Result<()> {
+pub async fn run(config: &Config, json: bool, answer: bool) -> anyhow::Result<()> {
     if !json {
         return Err(anyhow::anyhow!(
             "status: pass --json (this command reports the model and last sync for machines only)"
         ));
     }
-    let report = collect(config).await?;
+    let report = collect(config, answer).await?;
     println!("{}", serde_json::to_string(&report)?);
     Ok(())
 }
@@ -43,13 +49,27 @@ pub async fn run(config: &Config, json: bool) -> anyhow::Result<()> {
 /// so it must not inherit `llm.timeout_seconds` (minutes, meant for generation).
 const PROBE_TIMEOUT_SECONDS: u64 = 3;
 
+/// The budget for `--answer`'s tiny completion: loading a freshly pulled model takes
+/// seconds, so this is deliberately longer than the 2 s listing probe — but still
+/// bounded: "is this model answering" must never hang the app waiting on a server
+/// that only accepts the request and never answers.
+const ANSWER_TIMEOUT_SECONDS: u64 = 30;
+
 /// The two facts. `Report` is built from values, never from the clock or the network,
 /// so the shape-lock test fixes both directly (the seam).
-async fn collect(config: &Config) -> anyhow::Result<Report> {
+async fn collect(config: &Config, answer: bool) -> anyhow::Result<Report> {
     Ok(Report {
         version: 1,
         model: Model {
             reachable: reachable(&config.llm).await,
+            // Only asked for when `--answer` is on the command line: a real completion
+            // costs more than the 2 s listing the overview polls, so the overview leaves
+            // it `null` and the onboarding's Ready check pays for it once.
+            answering: if answer {
+                Some(answering(&config.llm).await)
+            } else {
+                None
+            },
         },
         last_sync: last_sync(config),
     })
@@ -71,6 +91,41 @@ async fn reachable(llm: &LlmConfig) -> bool {
     match client {
         Err(_) => false,
         Ok(client) => match client.get(&url).send().await {
+            Err(_) => false,
+            Ok(response) => response.status().is_success(),
+        },
+    }
+}
+
+/// Does the model itself answer? One tiny completion request (`max_tokens: 1` on a
+/// one-word prompt) against the effective `[llm] model` — the smallest real check that
+/// proves the model generates, not just that a port lists models. The onboarding's
+/// Ready state depends on this (board decision 2026-11-27); a refusal under the local
+/// rule, an empty model, a timeout or a non-2xx answer is `false`, never an error
+/// (same data-not-error discipline as `reachable`).
+async fn answering(llm: &LlmConfig) -> bool {
+    if check_base_url(llm).is_err() {
+        return false;
+    }
+    if llm.model.trim().is_empty() {
+        return false;
+    }
+    let url: String = format!("{}/chat/completions", llm.base_url.trim_end_matches('/'));
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(ANSWER_TIMEOUT_SECONDS))
+        .build();
+    match client {
+        Err(_) => false,
+        Ok(client) => match client
+            .post(&url)
+            .json(&json!({
+                "model": llm.model,
+                "messages": [{"role": "user", "content": "ping"}],
+                "max_tokens": 1,
+            }))
+            .send()
+            .await
+        {
             Err(_) => false,
             Ok(response) => response.status().is_success(),
         },
@@ -240,6 +295,42 @@ mod tests {
         assert!(!reachable(&llm("http://8.8.8.8/v1")).await);
     }
 
+    #[tokio::test]
+    async fn answering_on_completion_2xx() {
+        // `--answer` asks the model a one-word question and counts a 2xx completion as an
+        // answer: this is the proof the onboarding's Ready state depends on (board 2026-11-27).
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "choices": [{"message": {"role": "assistant", "content": "pong"}}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        assert!(answering(&llm(&format!("{}/v1", server.uri()))).await);
+    }
+
+    #[tokio::test]
+    async fn answering_false_on_refusal_or_empty_model_or_public_host() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        assert!(!answering(&llm(&format!("{}/v1", server.uri()))).await);
+
+        // An empty model is never asked for: no request would name a model to run.
+        let blank = llm("http://127.0.0.1:11434/v1");
+        blank.model = String::new();
+        assert!(!answering(&blank).await);
+
+        // The privacy rule applies to the completion probe too: a public host is `false`
+        // without ever sending the prompt.
+        assert!(!answering(&llm("http://8.8.8.8/v1")).await);
+    }
+
     #[test]
     fn last_sync_is_db_mtime() {
         let dir = tempfile::tempdir().unwrap();
@@ -309,7 +400,7 @@ mod tests {
         // The seam: build the Report from fixed values, never the clock or the network.
         let report = Report {
             version: 1,
-            model: Model { reachable: true },
+            model: Model { reachable: true, answering: None },
             last_sync: Some("2024-02-29T00:00:00Z".to_string()),
         };
         let json: String = serde_json::to_string(&report).unwrap();

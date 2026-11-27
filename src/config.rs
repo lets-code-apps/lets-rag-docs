@@ -251,13 +251,13 @@ impl Config {
 /// What the user wrote under `[llm]`; `Config` cannot say (serde fills in defaults). Unknown
 /// keys stay allowed here: this is the user's own config, already validated by `Config`.
 #[derive(Deserialize, Default)]
-struct Written {
+pub(crate) struct Written {
     #[serde(default)]
     llm: WrittenLlm,
 }
 
 #[derive(Deserialize, Default)]
-struct WrittenLlm {
+pub(crate) struct WrittenLlm {
     base_url: Option<String>,
     model: Option<String>,
 }

@@ -17,6 +17,7 @@ mod mcp;
 mod organize;
 mod search;
 mod setup;
+mod model_setup;
 mod shared_model;
 mod status;
 
@@ -69,6 +70,45 @@ enum Filing {
         /// Validate without writing
         #[arg(long)]
         check: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum Model {
+    /// Probe the local model servers and list what they can run (`model detect --json`)
+    Detect {
+        /// Probe this one local server instead of the two defaults
+        #[arg(long, value_name = "URL")]
+        url: Option<String>,
+        /// Machine-readable output; there is no text mode for the app contract
+        #[arg(long)]
+        json: bool,
+    },
+    /// Ask Ollama to download a model, streaming NDJSON progress lines
+    Pull {
+        /// Pull from this one local server instead of the Ollama default
+        #[arg(long, value_name = "URL")]
+        url: Option<String>,
+        /// The model to download (after `--`, so a name cannot be read as a flag)
+        model: String,
+        /// Progress is always line-delimited JSON; the flag is accepted for symmetry
+        #[arg(long)]
+        json: bool,
+    },
+    /// Record the choice in the shared `model.toml` (`model save --json --runtime=… --url=… --model=…`)
+    Save {
+        /// One of ollama, lmstudio or custom
+        #[arg(long)]
+        runtime: String,
+        /// A local model server url
+        #[arg(long, value_name = "URL")]
+        url: String,
+        /// The model name, as the server lists it
+        #[arg(long)]
+        model: String,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -153,6 +193,10 @@ enum Command {
         /// Machine-readable output; required, there is no text mode for this command
         #[arg(long)]
         json: bool,
+        /// Probe the model itself with one tiny completion (`--answer`): what the
+        /// onboarding's Ready check uses; the overview keeps the cheap listing probe
+        #[arg(long)]
+        answer: bool,
     },
     /// Show or change `[classify] folders` and `owners` through the engine
     Filing {
@@ -163,6 +207,11 @@ enum Command {
     Setup {
         #[command(subcommand)]
         command: Setup,
+    },
+    /// Probe, download, and record the local model (first-run onboarding): `model …`
+    Model {
+        #[command(subcommand)]
+        command: Model,
     },
     /// Serve `search_docs` to an MCP client over stdio
     Mcp,
@@ -184,9 +233,10 @@ async fn main() -> anyhow::Result<()> {
             .as_deref()
             .unwrap_or(DEFAULT_CONFIG_PATH.as_ref()),
     );
+    let shared_path = expand_home(Path::new(shared_model::DEFAULT_PATH));
     let config = Config::load_with_shared(
         &path,
-        &shared_model::read(&expand_home(Path::new(shared_model::DEFAULT_PATH))),
+        &shared_model::read(&shared_path),
     )?;
     tracing::debug!(?config, "config loaded from {}", path.display());
     match cli.command {
