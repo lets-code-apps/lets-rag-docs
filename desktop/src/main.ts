@@ -361,6 +361,75 @@ function registerIpc(): void {
 		if (!fromUs(event.senderFrame)) return null;
 		return settingsController.set(name, value);
 	});
+
+	// ---- first-run onboarding (LET-136): setup show/save and model detect/save/pull ----
+	// Same trust boundary as the rest: the renderer's own page only, no engine string trusted. setup
+	// save's draft goes through the same job bracket a filing save uses, so a setup save and a filing save
+	// never both write config.toml at once. A model download is single-flight in the engine (begin/end), so
+	// a second modelPull is refused there; cancelPull only stops the child, never a page-named path.
+
+	ipcMain.handle(IPC.setupShow, async (event) => {
+		if (!fromUs(event.senderFrame)) return null;
+		return guard(async () => toIPC(await engine.setupShow()));
+	});
+
+	ipcMain.handle(IPC.setupSave, async (event, draft: unknown, check: boolean) => {
+		if (!fromUs(event.senderFrame)) return null;
+		return guard(async () => {
+			if (check) return toIPC(await engine.setupSave(draft, true));
+			jobs.beginSave();
+			try {
+				return toIPC(await engine.setupSave(draft, false));
+			} finally {
+				jobs.endSave();
+			}
+		});
+	});
+
+	ipcMain.handle(IPC.modelDetect, async (event, url: unknown) => {
+		if (!fromUs(event.senderFrame)) return null;
+		if (url !== undefined && url !== null && typeof url !== 'string') return { ok: false, error: 'url must be a string' };
+		const addr = typeof url === 'string' ? url : undefined;
+		return guard(async () => toIPC(await engine.modelDetect(addr)));
+	});
+
+	ipcMain.handle(IPC.modelSave, async (event, runtime: unknown, url: unknown, model: unknown) => {
+		if (!fromUs(event.senderFrame)) return null;
+		if (typeof runtime !== 'string' || typeof url !== 'string' || typeof model !== 'string') {
+			return { ok: false, error: 'runtime, url and model must be strings' };
+		}
+		return guard(async () => toIPC(await engine.modelSave(runtime, url, model)));
+	});
+
+	ipcMain.handle(IPC.modelPull, async (event, model: unknown, url: unknown) => {
+		if (!fromUs(event.senderFrame)) return null;
+		if (typeof model !== 'string') return { ok: false, error: 'model must be a string' };
+		if (url !== undefined && url !== null && typeof url !== 'string') return { ok: false, error: 'url must be a string' };
+		const addr = typeof url === 'string' ? url : undefined;
+		return guard(async () => {
+			const result = await engine.modelPull(model, addr);
+			if (!result.ok) return { ok: false, error: result.error };
+			// A finished-but-failed download is a normal result: the page shows why, then may retry.
+			return { ok: true, success: result.value.success, reason: result.value.error };
+		});
+	});
+
+	ipcMain.handle(IPC.cancelPull, async (event) => {
+		if (!fromUs(event.senderFrame)) return null;
+		return { ok: true, cancelled: engine.cancelPull() };
+	});
+
+	ipcMain.handle(IPC.modelPullStatus, async (event) => {
+		if (!fromUs(event.senderFrame)) return null;
+		// A plain data snapshot (numbers + stage text); the page paints it with textContent, never HTML.
+		return engine.modelPullStatus();
+	});
+
+	// Finishing onboarding records setupDone through the controller (the one place allowed to write it).
+	ipcMain.handle(IPC.setupComplete, async (event) => {
+		if (!fromUs(event.senderFrame)) return null;
+		return settingsController.set('setupDone', true);
+	});
 }
 
 app.on('before-quit', (event) => {

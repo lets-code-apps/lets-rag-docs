@@ -18,4 +18,14 @@ contextBridge.exposeInMainWorld('ragDocs', {
 	openDocument: (path) => ipcRenderer.invoke('rag.openDocument', path),
 	settings: () => ipcRenderer.invoke('rag.settings'),
 	setSetting: (name, value) => ipcRenderer.invoke('rag.setSetting', name, value),
+	// First-run onboarding. The channel strings must match src/ipc.ts (IPC); test/boundaries.test.ts keeps
+	// them in sync. modelPull starts the download; cancelPull stops it; modelPullStatus reads the bar.
+	setupShow: () => ipcRenderer.invoke('rag.setupShow'),
+	setupSave: (draft, check) => ipcRenderer.invoke('rag.setupSave', draft, check),
+	modelDetect: (url) => ipcRenderer.invoke('rag.modelDetect', url),
+	modelSave: (runtime, url, model) => ipcRenderer.invoke('rag.modelSave', runtime, url, model),
+	modelPull: (model, url) => ipcRenderer.invoke('rag.modelPull', model, url),
+	cancelPull: () => ipcRenderer.invoke('rag.cancelPull'),
+	modelPullStatus: () => ipcRenderer.invoke('rag.modelPullStatus'),
+	completeSetup: () => ipcRenderer.invoke('rag.setupComplete'),
 });

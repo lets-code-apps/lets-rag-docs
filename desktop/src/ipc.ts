@@ -1,7 +1,22 @@
 // The one place that names the messages crossing the main <-> renderer boundary. Main, preload
 // and the tests all agree through these constants. No `electron` import: pure data.
 
-import type { AddReport, AskReport, DocumentsReport, FilingSaveReport, FilingShowReport, LocateReport, OrganizeReport, SearchReport, StatusReport } from './reports.ts';
+import type {
+	AddReport,
+	AskReport,
+	DocumentsReport,
+	FilingSaveReport,
+	FilingShowReport,
+	LocateReport,
+	ModelDetectReport,
+	ModelSaveReport,
+	OrganizeReport,
+	SetupSaveReport,
+	SetupShowReport,
+	SearchReport,
+	StatusReport,
+} from './reports.ts';
+import type { PullStatus } from './pull.ts';
 import type { Appearance } from './settings.ts';
 
 export const IPC = {
@@ -20,6 +35,17 @@ export const IPC = {
 	openDocument: 'rag.openDocument',
 	settings: 'rag.settings',
 	setSetting: 'rag.setSetting',
+	// First-run onboarding (LET-136). Each maps to one engine subcommand except setupComplete,
+	// which records setupDone through the settings controller. modelPull is the streaming download;
+	// cancelPull stops it and modelPullStatus reads its live progress without re-parsing any line.
+	setupShow: 'rag.setupShow',
+	setupSave: 'rag.setupSave',
+	modelDetect: 'rag.modelDetect',
+	modelSave: 'rag.modelSave',
+	modelPull: 'rag.modelPull',
+	cancelPull: 'rag.cancelPull',
+	modelPullStatus: 'rag.modelPullStatus',
+	setupComplete: 'rag.setupComplete',
 } as const;
 
 export type AskResult = { ok: boolean; error?: string; report?: AskReport };
@@ -55,6 +81,19 @@ export type OpenDocumentResult = { ok: boolean; error?: string; opened?: boolean
 // finished; only main ever writes it.
 export type SettingsPayload = { appearance: Appearance; openAtLogin: boolean; setupDone: boolean };
 
+// First-run onboarding payloads (each a parsed engine report, or a clean error string).
+export type SetupShowResult = { ok: boolean; error?: string; report?: SetupShowReport };
+export type SetupSaveResult = { ok: boolean; error?: string; report?: SetupSaveReport };
+export type ModelDetectResult = { ok: boolean; error?: string; report?: ModelDetectReport };
+export type ModelSaveResult = { ok: boolean; error?: string; report?: ModelSaveReport };
+// A pull answers with the outcome (did the server confirm success, and if not why). Progress is polled
+// separately through modelPullStatus, so the page's bar can move without waiting for the download to end.
+export type ModelPullResult = { ok: boolean; error?: string; success?: boolean; reason?: string | null };
+// The live download bar: engine-owned numbers the page paints as data (never HTML).
+export type PullStatusResult = PullStatus;
+// setupComplete records setupDone=true and returns the settings payload, or null if refused.
+export type SetupCompleteResult = SettingsPayload | null;
+
 export type IPCFunctionName =
 	| 'ask'
 	| 'cancelAsk'
@@ -70,4 +109,12 @@ export type IPCFunctionName =
 	| 'cancelAdd'
 	| 'openDocument'
 	| 'settings'
-	| 'setSetting';
+	| 'setSetting'
+	| 'setupShow'
+	| 'setupSave'
+	| 'modelDetect'
+	| 'modelSave'
+	| 'modelPull'
+	| 'cancelPull'
+	| 'modelPullStatus'
+	| 'completeSetup';
