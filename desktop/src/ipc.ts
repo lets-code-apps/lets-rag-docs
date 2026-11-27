@@ -46,6 +46,14 @@ export const IPC = {
 	cancelPull: 'rag.cancelPull',
 	modelPullStatus: 'rag.modelPullStatus',
 	setupComplete: 'rag.setupComplete',
+	// modelSetup writes only what the user chose (library, watch, optional owner, optional model) and
+	// records setupDone — in that fixed order, through the same jobs bracket a filing save uses. It runs
+	// at the last "continue", so quitting mid-onboarding leaves no half setup.
+	modelSetup: 'rag.modelSetup',
+	// Two host seams, not engine subcommands: pickFolder opens the OS folder picker and answers the chosen
+	// path (main converts it to `~/` form); installOllama hands the one fixed Ollama URL to the OS browser.
+	pickFolder: 'rag.pickFolder',
+	installOllama: 'rag.installOllama',
 } as const;
 
 export type AskResult = { ok: boolean; error?: string; report?: AskReport };
@@ -93,6 +101,13 @@ export type ModelPullResult = { ok: boolean; error?: string; success?: boolean; 
 export type PullStatusResult = PullStatus;
 // setupComplete records setupDone=true and returns the settings payload, or null if refused.
 export type SetupCompleteResult = SettingsPayload | null;
+// modelSetup writes the chosen fields in a fixed order and reports how far it got. On a stop the page
+// stays on the step that failed and can continue again safely (an unchanged save writes nothing).
+export type ModelSetupResult = { ok: boolean; step?: string; error?: string };
+// pickFolder answers the chosen directory (already in `~/` form) or says the user cancelled. installOllama
+// just reports the hand-off; the URL is fixed in main and never built from input.
+export type PickFolderResult = { ok: boolean; canceled?: boolean; path?: string };
+export type InstallOllamaResult = { ok: boolean };
 
 export type IPCFunctionName =
 	| 'ask'
@@ -117,4 +132,7 @@ export type IPCFunctionName =
 	| 'modelPull'
 	| 'cancelPull'
 	| 'modelPullStatus'
-	| 'completeSetup';
+	| 'completeSetup'
+	| 'modelSetup'
+	| 'pickFolder'
+	| 'installOllama';

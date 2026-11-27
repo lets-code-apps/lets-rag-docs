@@ -7,7 +7,7 @@ import { app, BrowserWindow, Menu, Tray, dialog, ipcMain, nativeImage, nativeThe
 import { basename, isAbsolute, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, totalmem, tmpdir } from 'node:os';
 
 import { defaultSpawn, Engine, type EngineResult } from './engine.ts';
 import { Jobs } from './jobs.ts';
@@ -16,6 +16,8 @@ import { buildTrayMenu, PRODUCT_NAME } from './menu.ts';
 import { WindowController } from './window.ts';
 import { denyNavigation, isOwnFile, windowOpenHandler, windowOptions } from './window-policy.ts';
 import { SettingsController, type SettingsHost } from './settings.ts';
+import { type FilingSaveReport, type SetupSaveReport } from './reports.ts';
+import { OLLAMA_INSTALL_URL } from './setup.ts';
 import { GEOMETRY } from './geometry.ts';
 
 const HERE = import.meta.dirname;
@@ -55,8 +57,18 @@ const fromUs = (senderFrame?: { url?: string } | null): boolean => senderFrame?.
 //   is ever listed. Picked paths live in main's queue only: the page gets counts and names.
 type OpenerHost = (path: string) => Promise<string>; // the OS host: '' means opened
 type PickerHost = () => Promise<string[]>;
+// First-run onboarding seams (main-only, like the two above):
+// - `folderPicker` opens the OS folder picker; it returns the chosen path or null when cancelled.
+// - `externalOpener` opens one fixed URL in the browser (install Ollama).
+// - `memoryBytes` answers the machine's memory for the recommended model size; smoke/shots fix it.
+type FolderPickerHost = () => Promise<string | null>;
+type ExternalOpenerHost = (url: string) => Promise<void>;
+type MemoryBytesHost = () => number;
 let opener: OpenerHost;
 let picker: PickerHost;
+let folderPicker: FolderPickerHost;
+let externalOpener: ExternalOpenerHost;
+let memoryBytes: MemoryBytesHost;
 const openLog: string[] = [];
 let addQueue: string[] = [];
 let addTotal = 0;
@@ -192,6 +204,17 @@ function makeHosts(): void {
 			void path;
 			return '';
 		};
+		// Onboarding seams under smoke/shots: the picker answers a fixed home-relative path (never a real
+		// folder), the opener records the one link instead of launching a browser, and memory is fixed at
+		// 16 GiB so the recommended model is deterministic (qwen3:8b).
+		folderPicker = async () => {
+			const fake = process.env.FAKE_PICK_FOLDER;
+			return fake === undefined || fake === '' ? null : fake;
+		};
+		externalOpener = async (url) => {
+			openLog.push(url);
+		};
+		memoryBytes = () => 16 * 1024 ** 3;
 		return;
 	}
 	opener = (path) => shell.openPath(path);
@@ -204,6 +227,28 @@ function makeHosts(): void {
 		});
 		return picked.canceled ? [] : picked.filePaths;
 	};
+	folderPicker = async () => {
+		const picked = await dialog.showOpenDialog({
+			title: PRODUCT_NAME,
+			buttonLabel: 'Choose',
+			properties: ['openDirectory'],
+		});
+		return picked.canceled ? null : (picked.filePaths[0] ?? null);
+	};
+	externalOpener = async (url) => {
+		await shell.openExternal(url);
+	};
+	memoryBytes = () => totalmem();
+}
+
+// The `~/` form the config keeps: an absolute path under the home folder becomes `~/…`; anything already
+// home-relative is left alone (the fake picker and the engine both report home-relative paths).
+function toHomePath(path: string): string {
+	const home = homedir();
+	if (path.startsWith('~/') || path === '~') return path;
+	if (path === home) return '~';
+	if (path.startsWith(`${home}/`)) return `~${path.slice(home.length)}`;
+	return path;
 }
 
 function registerIpc(): void {
@@ -430,6 +475,103 @@ function registerIpc(): void {
 		if (!fromUs(event.senderFrame)) return null;
 		return settingsController.set('setupDone', true);
 	});
+
+	// The last "continue": the page sends only the choices it collected; main runs the engine writes in a
+	// fixed order (setup -> optional filing owner -> optional model) and then records setupDone. It never
+	// trusts the page to sequence the writes, and a pull that is still running is never saved (the page
+	// would not send a model then). Stops at the first failing step; the page shows that step and may
+	// continue again safely (an unchanged engine save writes nothing).
+	ipcMain.handle(IPC.modelSetup, async (event, input: unknown) => {
+		if (!fromUs(event.senderFrame)) return null;
+		if (input === null || typeof input !== 'object' || Array.isArray(input)) {
+			return { ok: false, error: 'the setup choices are not an object' };
+		}
+		const plan = input as Record<string, unknown>;
+		const chosen = {
+			libraryDir: plan.library_dir,
+			watchFolders: plan.watch_folders,
+			owners: plan.owners,
+			model: plan.model,
+		};
+		return guard(async () => runSetup(chosen));
+	});
+
+	// The library field is read-only until the user chooses a folder: the OS picker runs in main (like the
+	// file picker), and only the chosen path returns, already converted to the `~/` form the config uses.
+	ipcMain.handle(IPC.pickFolder, async (event) => {
+		if (!fromUs(event.senderFrame)) return null;
+		return guard(async () => {
+			const picked = await folderPicker();
+			if (picked === null) return { ok: true, canceled: true };
+			return { ok: true, path: toHomePath(picked) };
+		});
+	});
+
+	// "install Ollama" is a user-clicked link to the fixed download page, opened in their browser. The URL is
+	// a constant (never built from input); this is the one place the desktop opens an external link.
+	ipcMain.handle(IPC.installOllama, async (event) => {
+		if (!fromUs(event.senderFrame)) return null;
+		await externalOpener(OLLAMA_INSTALL_URL);
+		return { ok: true };
+	});
+}
+
+// The single ordered write of first-run setup. Every value is re-validated by the engine (this only runs
+// the calls); the page cannot reorder or skip a step. An engine save that is unchanged reports saved:false
+// and writes nothing, so re-running setup after a stop is safe.
+async function runSetup(
+	chosen: { libraryDir: unknown; watchFolders: unknown; owners: unknown; model: unknown },
+): Promise<{ ok: boolean; step?: string; error?: string }> {
+	const libraryDir = chosen.libraryDir;
+	const watchFolders = chosen.watchFolders;
+	if (typeof libraryDir !== 'string' || !Array.isArray(watchFolders)) {
+		return { ok: false, step: 'setup', error: 'the folders are not valid values' };
+	}
+	const draft = { library_dir: libraryDir, watch_folders: watchFolders };
+	jobs.beginSave();
+	let setup: EngineResult<SetupSaveReport>;
+	try {
+		setup = await engine.setupSave(draft, false);
+	} finally {
+		jobs.endSave();
+	}
+	if (!setup.ok) return { ok: false, step: 'setup', error: `setup: ${setup.error ?? 'the engine gave no answer'}` };
+	if (setup.value.ok !== true) {
+		const first = setup.value.errors?.[0];
+		return { ok: false, step: 'setup', error: `setup: ${first?.message ?? 'the folders were rejected'}` };
+	}
+
+	const owners = Array.isArray(chosen.owners) ? chosen.owners.filter((name) => typeof name === 'string') : [];
+	if (owners.length > 0) {
+		const show = await engine.filingShow();
+		if (!show.ok) return { ok: false, step: 'filing', error: `filing: ${show.error ?? 'the engine gave no answer'}` };
+		const folders = Array.isArray(show.value.folders) ? show.value.folders : [];
+		const existing = Array.isArray(show.value.owners) ? show.value.owners : [];
+		const merged = { folders: folders.slice(), owners: existing.slice() };
+		for (const name of owners) if (!merged.owners.includes(name)) merged.owners.push(name);
+		jobs.beginSave();
+		let filing: EngineResult<FilingSaveReport>;
+		try {
+			filing = await engine.filingSave(merged, false);
+		} finally {
+			jobs.endSave();
+		}
+		if (!filing.ok) return { ok: false, step: 'filing', error: `filing: ${filing.error ?? 'an owner was rejected'}` };
+		if (filing.value.ok !== true) return { ok: false, step: 'filing', error: 'filing: an owner was rejected' };
+	}
+
+	const model = chosen.model && typeof chosen.model === 'object' && !Array.isArray(chosen.model)
+		? (chosen.model as Record<string, unknown>)
+		: null;
+	if (model !== null && typeof model.runtime === 'string' && typeof model.url === 'string' && typeof model.model === 'string') {
+		const saved = await engine.modelSave(model.runtime, model.url, model.model);
+		if (!saved.ok) return { ok: false, step: 'model', error: `model: ${saved.error ?? 'the engine refused the model'}` };
+		if (saved.value.ok !== true) return { ok: false, step: 'model', error: 'model: the engine refused the model' };
+	}
+
+	const recorded = await settingsController.set('setupDone', true);
+	if (recorded === null) return { ok: false, step: 'done', error: 'setupDone was refused' };
+	return { ok: true, step: 'done' };
 }
 
 app.on('before-quit', (event) => {

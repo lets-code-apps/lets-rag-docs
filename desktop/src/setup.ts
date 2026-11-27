@@ -145,10 +145,17 @@ const SETUP_PATH = /^(~|\/|~\/)/;
 const setupPath = (v: unknown): v is string =>
 	typeof v === 'string' && v.length > 0 && v.length <= 4096 && !v.includes('\u{0}') && SETUP_PATH.test(v);
 
-export function buildSetupSaveDraft(
-	libraryDir: unknown,
-	watchFolders: unknown,
-): { library_dir: string; watch_folders: string[] } | null {
+// The shape the page sends to `rag.modelSetup` (the last "continue"): the two setup fields, an owner
+// only when one was added, a model only when one is chosen and not already the shared block. main
+// validates each with the same builders it uses for the individual saves, then runs them in a fixed order.
+export type ModelSetupRun = {
+	library_dir: string;
+	watch_folders: string[];
+	owners?: string[];
+	model?: { runtime: string; url: string; model: string } | null;
+};
+
+export function buildSetupSaveDraft(libraryDir: unknown, watchFolders: unknown): { library_dir: string; watch_folders: string[] } | null {
 	if (!setupPath(libraryDir)) return null;
 	if (!Array.isArray(watchFolders)) return null;
 	const folders: string[] = [];

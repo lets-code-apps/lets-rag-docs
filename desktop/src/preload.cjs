@@ -28,4 +28,9 @@ contextBridge.exposeInMainWorld('ragDocs', {
 	cancelPull: () => ipcRenderer.invoke('rag.cancelPull'),
 	modelPullStatus: () => ipcRenderer.invoke('rag.modelPullStatus'),
 	completeSetup: () => ipcRenderer.invoke('rag.setupComplete'),
+	// The last step: send the collected choices; main runs the engine writes in a fixed order.
+	modelSetup: (input) => ipcRenderer.invoke('rag.modelSetup', input),
+	// Two host seams: the OS folder picker, and the one fixed Ollama install link opened in the browser.
+	pickFolder: () => ipcRenderer.invoke('rag.pickFolder'),
+	installOllama: () => ipcRenderer.invoke('rag.installOllama'),
 });
