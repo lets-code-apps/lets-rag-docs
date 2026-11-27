@@ -632,6 +632,73 @@ export function setupSteps(current) {
   });
 }
 
+/** The runtime word the engine names, said the way the design says it ("Ollama", "LM Studio"). */
+export function runtimeName(runtime) {
+  const names = { ollama: 'Ollama', lmstudio: 'LM Studio' };
+  return names[runtime] ?? 'A model runtime';
+}
+
+/** The muted line the board's answer 4 asked for: this app's own `[llm]` keys already pick a model,
+ * so the shared setting only takes effect for the other app. One note, shown on the found/shared step
+ * when `config.overridden` is true. The "change it later in settings" sentence from the design is
+ * dropped (answer 2): no settings model picker exists yet. */
+export function sharedNote() {
+  return 'Rag docs and triage mail share this setting.';
+}
+
+/** The `[llm]`-over-shared note, shown only when `overridden` is true. */
+export const OVERRIDDEN_NOTE = 'Your config.toml sets its own model; this setting is saved for the other app.';
+
+/**
+ * The model step's view: one state + the engine's data → the exact pill/line/note/rows the page paints
+ * (the same shape lets-triage mail's setup-model.ts produces, with rag docs' copy). All strings are
+ * fixed design copy or engine-derived data; the page formats nothing. `memGb` is the machine's memory
+ * in whole GB as main answers it (a host number, never a guess here); `pull` is the engine's own
+ * progress snapshot; `error` is the engine's sentence for a failed download.
+ */
+export function modelView(state, data) {
+  const runtime = runtimeName(data.runtime ?? 'ollama');
+  const url = data.url ?? '';
+  const memGb = data.memGb ?? 0;
+  const rec = data.recommend ?? recommendedModel(memGb * 1024 ** 3);
+  const view = { state, pill: '', tone: 'neutral', text: '', note: '', ob: data.overridden === true, bar: null, barModel: '', actions: [], models: [], selected: '', modelNote: '', hasAddress: true, nextLabel: 'start filing', nextOff: false, nextVariant: 'primary' };
+  switch (state) {
+    case 'detecting':
+      return { ...view, pill: 'looking for a runtime', tone: 'neutral', text: 'Checking Ollama at localhost:11434 and LM Studio at localhost:1234.', note: 'The model runs on this Mac, so nothing you give it leaves the computer.', address: '', nextOff: true };
+    case 'found': {
+      const n = (data.usable ?? []).length;
+      return { ...view, pill: `${runtime} found`, tone: 'positive', text: `${runtime} is running at ${url} with ${n} ${n === 1 ? 'model' : 'models'}. Rag docs picked the one that fits this Mac.`, note: sharedNote(), models: data.usable ?? [], selected: data.model ?? '', modelNote: `Recommended for this Mac's ${memGb} GB of memory: ${rec.model}, ${rec.sizeGb} GB.` };
+    }
+    case 'found-empty':
+      return { ...view, pill: `${runtime} found`, tone: 'attention', text: `${runtime} is running at ${url}, with no model rag docs can use yet.`, note: `Downloading ${rec.model} (${rec.sizeGb} GB) fits this Mac's ${memGb} GB of memory.`, actions: [{ label: `download ${rec.model}`, variant: 'primary', glyph: 'arrow-down' }], nextOff: true };
+    case 'not-found':
+      return { ...view, pill: 'no runtime found', tone: 'attention', text: 'Rag docs needs a model runtime on this Mac. Ollama is free and runs models locally, so nothing leaves the computer.', note: `Install Ollama and open it. This step finds it by itself, then downloads ${rec.model} (${rec.sizeGb} GB), the right size for this Mac's ${memGb} GB of memory.`, actions: [{ label: 'install Ollama', variant: 'primary', glyph: 'arrow-up-right' }, { label: 'check again', variant: 'secondary', glyph: '' }], nextLabel: 'set up later', nextVariant: 'secondary' };
+    case 'downloading': {
+      const pull = data.pull ?? { model: rec.model, done: 0, gb: 0, pct: 0 };
+      return { ...view, pill: 'downloading model', tone: 'neutral', text: `${runtime} is running. Rag docs is downloading ${pull.model} through it.`, note: 'You can go on. The download keeps going, and rag docs starts when it is done.', bar: formatProgress(pull.done, pull.gb, pull.pct), barModel: pull.model, actions: [{ label: 'cancel download', variant: 'ghost', glyph: '' }] };
+    }
+    case 'ready':
+      return { ...view, pill: 'ready', tone: 'positive', text: `${data.model} runs in ${runtime} on this Mac and answered a test question.`, note: sharedNote() };
+    case 'shared':
+      return { ...view, pill: 'using the model from triage mail', tone: 'positive', text: `${data.model} in ${runtime} at ${url}, set up when you installed triage mail.`, note: sharedNote(), hasAddress: false, actions: [{ label: 'use another model', variant: 'secondary', glyph: '' }] };
+    default:
+      return { ...view, pill: 'download failed', tone: 'danger', text: data.error ?? 'The download stopped before the model was complete.', note: '', actions: [{ label: 'try again', variant: 'primary', glyph: '' }], nextLabel: 'set up later', nextVariant: 'secondary' };
+  }
+}
+
+/** The four steps' titles and opening lines, the design's copy (the step content below is built from
+ * engine reports). `watchNote` is the board's answer 1: the screen must not promise watching that
+ * does not happen yet, so this exact muted line sits under the folder list. */
+export const SETUP_COPY = {
+  library: { title: 'library location', text: 'Rag docs keeps a filed copy of each document here. Your originals stay where they are.' },
+  watch: { title: 'folders to watch', text: 'New documents in these folders are copied to the library and filed. Turn off any you don’t want read.' },
+  filing: { title: 'folders and owners', text: 'Each copy is filed by folder, then by owner. The default folders fit most homes.' },
+  model: { title: 'model', text: 'Rag docs reads and files your documents with a model that runs on this Mac.' },
+  watchMuted: 'Rag docs never reads its own library, even inside a watched folder. Your originals are never moved or changed.',
+  watchLater: 'Rag docs starts watching these folders in a later update.',
+  ownersMuted: 'No owners yet is fine. Every copy is filed under Shared until you add some.',
+};
+
 /**
  * `model detect --json` → the model step. The rules are the board's and the design's, and read the engine
  * report without deciding anything the engine has not already decided:

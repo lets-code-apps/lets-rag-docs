@@ -11,7 +11,7 @@ import { homedir, totalmem, tmpdir } from 'node:os';
 
 import { defaultSpawn, Engine, type EngineResult } from './engine.ts';
 import { Jobs } from './jobs.ts';
-import { IPC } from './ipc.ts';
+import { IPC, type SettingsInfo } from './ipc.ts';
 import { buildTrayMenu, PRODUCT_NAME } from './menu.ts';
 import { WindowController } from './window.ts';
 import { denyNavigation, isOwnFile, windowOpenHandler, windowOptions } from './window-policy.ts';
@@ -69,6 +69,9 @@ let picker: PickerHost;
 let folderPicker: FolderPickerHost;
 let externalOpener: ExternalOpenerHost;
 let memoryBytes: MemoryBytesHost;
+// A model choice made while its download is still running: remembered here and saved by the still-running
+// modelPull handler the moment the job reports success (never on cancel or failure).
+let pendingPullSave: { runtime: string; url: string; model: string } | null = null;
 const openLog: string[] = [];
 let addQueue: string[] = [];
 let addTotal = 0;
@@ -395,11 +398,13 @@ function registerIpc(): void {
 		});
 	});
 
-	// Settings cross the same trust boundary: our own page only. `settings` reports the current truth;
-	// `setSetting` validates name+value through the controller and answers with the new truth.
+	// Settings cross the same trust boundary: our own page only. `settings` reports the current truth
+	// plus `memGb` from the main-only memory host (the onboarding model step names the memory-sized
+	// recommendation with it; the page never measures the machine itself).
 	ipcMain.handle(IPC.settings, async (event) => {
 		if (!fromUs(event.senderFrame)) return null;
-		return settingsController.payload();
+		const info: SettingsInfo = { ...settingsController.payload(), memGb: Math.max(1, Math.round(memoryBytes() / 1024 ** 3)) };
+		return info;
 	});
 
 	ipcMain.handle(IPC.setSetting, async (event, name: unknown, value: unknown) => {
@@ -454,6 +459,16 @@ function registerIpc(): void {
 		return guard(async () => {
 			const result = await engine.modelPull(model, addr);
 			if (!result.ok) return { ok: false, error: result.error };
+			// A choice made during this very download (runSetup stashed it) is saved here, once the
+			// server confirmed success — the one moment it is safe to write the shared model file.
+			if (result.value.success && pendingPullSave !== null) {
+				const wanted = pendingPullSave;
+				pendingPullSave = null;
+				const saved = await engine.modelSave(wanted.runtime, wanted.url, wanted.model);
+				if (!saved.ok || saved.value.ok !== true) {
+					return { ok: false, error: 'the model finished, but saving it failed; the step can save it again' };
+				}
+			}
 			// A finished-but-failed download is a normal result: the page shows why, then may retry.
 			return { ok: true, success: result.value.success, reason: result.value.error };
 		});
@@ -564,9 +579,17 @@ async function runSetup(
 		? (chosen.model as Record<string, unknown>)
 		: null;
 	if (model !== null && typeof model.runtime === 'string' && typeof model.url === 'string' && typeof model.model === 'string') {
-		const saved = await engine.modelSave(model.runtime, model.url, model.model);
-		if (!saved.ok) return { ok: false, step: 'model', error: `model: ${saved.error ?? 'the engine refused the model'}` };
-		if (saved.value.ok !== true) return { ok: false, step: 'model', error: 'model: the engine refused the model' };
+		if (engine.modelPullStatus().running === true) {
+			// The user continued while the download was still running ("you can go on"): never save the
+			// model into the shared file mid-stream. The choice is remembered instead, and the modelPull
+			// handler that is still running performs the save when the job reports success (and never on
+			// a cancel or a failure).
+			pendingPullSave = { runtime: model.runtime, url: model.url, model: model.model };
+		} else {
+			const saved = await engine.modelSave(model.runtime, model.url, model.model);
+			if (!saved.ok) return { ok: false, step: 'model', error: `model: ${saved.error ?? 'the engine refused the model'}` };
+			if (saved.value.ok !== true) return { ok: false, step: 'model', error: 'model: the engine refused the model' };
+		}
 	}
 
 	const recorded = await settingsController.set('setupDone', true);
@@ -642,6 +665,12 @@ window.__drive = {
     return node;
   },
   async click(selector) { this.find(selector).click(); await this.settle(); },
+  btn(label) {
+    const node = [...document.querySelectorAll('.btn')].find((b) => b.textContent.trim() === label);
+    if (!node) throw new Error('missing btn ' + label);
+    return node;
+  },
+  async clickBtn(label) { this.btn(label).click(); await this.settle(); },
   async pick(title) { this.row('#filingRows', title).click(); await this.settle(); },
   async type(selector, text) {
     const input = this.find(selector);
@@ -666,6 +695,15 @@ function freshFakeState(): string {
 	const dir = mkdtempSync(join(tmpdir(), 'rag-docs-fake-'));
 	process.env.FAKE_STATE_FILE = join(dir, 'state.json');
 	return dir;
+}
+
+// The settings file decides whether boot opens first-run onboarding. Every smoke/shots pass seeds
+// it explicitly: `true` (with the theme of the pass) so the normal screens open as before; `false`
+// (the key absent) so the step screen opens — the plan's "each shot seeds setupDone explicitly".
+// `load()` re-reads it into the controller, so the boot gate sees the seed without restarting main.
+function seedSettings(done: boolean, appearance: 'system' | 'dark' | 'light'): void {
+	writeFileSync(settingsFile, JSON.stringify(done ? { appearance, setupDone: true } : { appearance }));
+	settingsController.load();
 }
 
 async function loaded(browser: BrowserWindow): Promise<void> {
@@ -748,10 +786,13 @@ type SmokeChecks = {
 
 async function runSmoke(): Promise<void> {
 	const dir = freshFakeState();
+	// Normal (post-onboarding) smoke: the settings file carries setupDone, so boot opens the four
+	// screens. The onboarding pass below re-seeds without it and reloads.
+	seedSettings(true, 'system');
 	const deadline = setTimeout(() => {
-		console.error('SMOKE FAIL: timed out after 150s');
+		console.error('SMOKE FAIL: timed out after 240s');
 		app.exit(1);
-	}, 150000);
+	}, 240000);
 	let code = 1;
 	try {
 		// Busy pass: the fake model answers "not reachable", so the overview opens with its
@@ -1101,7 +1142,8 @@ async function runSmoke(): Promise<void> {
 		await drive(browser, `${OPEN_SETTINGS} await d.click('#appearance [data-value="dark"]');`);
 		const themeDark =
 			nativeTheme.themeSource === 'dark' &&
-			readFileSync(settingsFile, 'utf8') === '{"appearance":"dark"}' &&
+			// setupDone was seeded for this pass, so the finished-setup file keeps the key.
+			readFileSync(settingsFile, 'utf8') === '{"appearance":"dark","setupDone":true}' &&
 			(await drive(browser, `return window.matchMedia('(prefers-color-scheme: dark)').matches;`)) === true;
 		await drive(browser, `await d.click('#appearance [data-value="light"]');`);
 		const themeLight = nativeTheme.themeSource === 'light';

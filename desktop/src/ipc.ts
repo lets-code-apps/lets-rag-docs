@@ -89,6 +89,12 @@ export type OpenDocumentResult = { ok: boolean; error?: string; opened?: boolean
 // finished; only main ever writes it.
 export type SettingsPayload = { appearance: Appearance; openAtLogin: boolean; setupDone: boolean };
 
+// The `settings` channel answers with the payload plus `memGb`: the machine's memory in whole GB,
+// read from the main-only host (`memoryBytes`), the same host pattern as the folder picker. The onboarding
+// model step uses it to name the memory-sized recommendation; smoke/shots fix it at 16 GiB, so both
+// apps and the screenshots recommend alike. It is a host answer, never a stored setting.
+export type SettingsInfo = SettingsPayload & { memGb: number };
+
 // First-run onboarding payloads (each a parsed engine report, or a clean error string).
 export type SetupShowResult = { ok: boolean; error?: string; report?: SetupShowReport };
 export type SetupSaveResult = { ok: boolean; error?: string; report?: SetupSaveReport };

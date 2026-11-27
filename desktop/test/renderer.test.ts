@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
@@ -143,4 +144,14 @@ test('the settings article sits right after the sidebar, not centred', () => {
 	const body = css.match(/\.settings-body \{([^}]*)\}/);
 	assert.ok(body);
 	assert.doesNotMatch(body[1], /margin: 0 auto/);
+});
+
+test('every renderer file parses as plain JavaScript, not TypeScript', () => {
+	// The renderer ships as plain .js (index.html loads it directly), so a stray type annotation is a
+	// runtime SyntaxError the page swallows as "page never settled". `tsc` only checks src/, so this is
+	// the guard: node's own parser must accept every renderer script.
+	for (const file of readdirSync(RENDERER).filter((name) => name.endsWith('.js'))) {
+		const result = spawnSync(process.execPath, ['--check', join(RENDERER, file)], { encoding: 'utf8' });
+		assert.equal(result.status, 0, `renderer/${file} is not valid JavaScript: ${result.stderr}`);
+	}
 });

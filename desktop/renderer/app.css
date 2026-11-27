@@ -1090,6 +1090,314 @@ the 100%-wide wrap, so the narrow (360px) pane never grows a sideways scrollbar.
   color: var(--muted);
 }
 
+/* ---- first-run onboarding (LET-136): the design's step screen in place of sidebar and screens.
+     The reading column keeps the design's 720px maximum (geometry rule 6) and stacks at the 360px
+     minimum; every control is a 44px target; pills, fields, switches and rows reuse the shared parts. ---- */
+.onboarding {
+  flex-direction: column;
+  padding: var(--s5) 20px var(--s6);
+  overflow-y: auto;
+}
+
+.onboarding-col {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: var(--s5);
+  width: 100%;
+  max-width: 720px;
+  min-width: 0;
+}
+
+.steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2) var(--s4);
+}
+
+.steps li {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--muted);
+}
+
+.steps .step-dot {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: 1.5px solid var(--line-strong);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.steps li.step-current {
+  color: var(--fg);
+  font-weight: 600;
+}
+
+.steps li.step-current .step-dot {
+  border-color: var(--fg);
+  background: var(--fg);
+  color: var(--bg);
+}
+
+.steps li.step-done {
+  color: var(--fg);
+}
+
+.steps li.step-done .step-dot {
+  background: var(--raised);
+  color: var(--fg);
+}
+
+.steps li.step-skipped .step-dot {
+  border-style: dashed;
+}
+
+.step-head {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.step-title {
+  font-size: 26px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.15;
+}
+
+.step-text {
+  max-width: 62ch;
+  font-size: 16px;
+  line-height: 1.55;
+  color: var(--muted);
+}
+
+.step-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s4);
+  min-width: 0;
+}
+
+.step-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding-top: var(--s4);
+  border-top: 1px solid var(--line);
+}
+
+.actions-spacer {
+  flex: 1 1 0;
+}
+
+.step-error {
+  font-size: 15px;
+  color: var(--danger);
+}
+
+/* The library field is read-only until a folder is chosen: the value shown is the engine's, and
+   only "choose folder" (the OS picker) or "use the recommended folder" change it. */
+.lib-field .field-label {
+  display: block;
+}
+
+.watch-rows {
+  display: flex;
+  flex-direction: column;
+}
+
+.watch-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 44px;
+  padding: var(--s1) 0 var(--s2);
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  text-align: left;
+}
+
+.watch-row .switch-label {
+  font-weight: 500;
+}
+
+.watch-row .switch {
+  margin-left: auto;
+}
+
+.watch-row .watch-note {
+  flex-basis: 100%;
+  margin-top: -6px;
+  font-size: 13px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.watch-muted {
+  max-width: 62ch;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--muted);
+}
+
+.owner-rows {
+  display: flex;
+  flex-direction: column;
+}
+
+.owner-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 44px;
+  padding: var(--s1) var(--s4);
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+}
+
+.owner-row .row-title {
+  font-weight: 500;
+}
+
+.owner-row .btn {
+  margin-left: auto;
+  min-height: 44px;
+}
+
+.subhead {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--muted);
+}
+
+.folders-list {
+  max-width: 62ch;
+  font-size: 15px;
+  line-height: 1.55;
+}
+
+.model-card {
+  padding: var(--s4);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--s3);
+  min-width: 0;
+  max-width: 560px;
+}
+
+.model-card > p {
+  margin: 0;
+  max-width: 62ch;
+  font-size: 16px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.model-note {
+  max-width: 62ch;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--muted);
+}
+
+.progress {
+  align-self: stretch;
+  height: 8px;
+  border-radius: var(--r-pill);
+  background: var(--raised);
+  border: 1px solid var(--line-strong);
+  overflow: hidden;
+}
+
+.progress .fill {
+  height: 100%;
+  background: var(--fg);
+}
+
+.bar-meta {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.model-label {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.step-content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+  min-width: 0;
+}
+
+.step-btns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.step-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.model-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  min-width: 0;
+  max-width: 100%;
+}
+
+/* The model list is a design'd horizontal scroller: long ids scroll inside the control, the
+   document itself never grows (geometry rule 6). */
+.model-row .seg {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.steps li .sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+}
+
+.model-card .btn {
+  margin-top: var(--s1);
+}
+
 /* ---- Smallest window (360px): the panes stack and the whole page scrolls. ---- */
 
 @media (max-width: 480px) {
