@@ -216,11 +216,21 @@ async fn probe_listing(client: &reqwest::Client, url: String) -> Result<(u16, St
 /// `{url}/v1/models`, unless the url already names `/v1` (see `chat_base_url` in
 /// `shared_model.rs`).
 fn models_url(url: &str) -> String {
+    openai_path(url, "models")
+}
+
+/// The OpenAI-compatible path under a model server's base url: `/v1/models`, or `/v1/chat/
+/// completions` for the `status --answer` probe in `status.rs`. The desktop hands these probes the
+/// runtime root exactly as `detect` reports it (`http://127.0.0.1:11434`), while a `[llm] base_url`
+/// in config.toml may already name `/v1`, so `/v1` is added exactly once and never doubled
+/// (LET-165 review round 3: `<root>/chat/completions` is a 404 on Ollama, which made a finished
+/// download read as not answering).
+pub fn openai_path(url: &str, path: &str) -> String {
     let base = url.trim_end_matches('/');
     if base.ends_with("/v1") {
-        format!("{base}/models")
+        format!("{base}/{path}")
     } else {
-        format!("{base}/v1/models")
+        format!("{base}/v1/{path}")
     }
 }
 

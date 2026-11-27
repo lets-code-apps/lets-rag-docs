@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 
 use crate::ask::check_base_url;
 use crate::config::{Config, LlmConfig};
+use crate::model_setup::openai_path;
 
 #[derive(Serialize)]
 struct Report {
@@ -149,7 +150,13 @@ async fn answering(llm: &LlmConfig) -> bool {
     if llm.model.trim().is_empty() {
         return false;
     }
-    let url: String = format!("{}/chat/completions", llm.base_url.trim_end_matches('/'));
+    // The desktop hands this probe the runtime root (`http://127.0.0.1:11434`, exactly as
+    // `model detect` reports it), while an `[llm] base_url` in config.toml already names
+    // `/v1`; `openai_path` adds the `/v1` exactly once, so the probe never asks
+    // `<root>/chat/completions` (a 404 on Ollama) nor `<root>/v1/v1/...`
+    // (LET-165 review round 3: the runtime-root form made every successful download read as
+    // not answering).
+    let url: String = openai_path(llm.base_url.as_str(), "chat/completions");
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(ANSWER_TIMEOUT_SECONDS))
         .build();
@@ -398,6 +405,31 @@ mod tests {
             .mount(&server)
             .await;
         assert!(answering(&llm(&format!("{}/v1", server.uri()))).await);
+    }
+
+    #[tokio::test]
+    async fn answering_probes_a_runtime_root_url_once() {
+        // LET-165 review round 3: onboarding hands `--url` the runtime root, exactly as `model
+        // detect` reports it (no `/v1`). The probe must find the model at `<root>/v1/chat/completions`
+        // - and only once: a doubled `/v1/v1/...` or the bare `<root>/chat/completions` (a 404 on
+        // Ollama) would make a finished download read as not answering, so every Ready check failed.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "choices": [{"message": {"role": "assistant", "content": "pong"}}]
+            })))
+            // expect(2): both shapes - the bare root and the explicit /v1 - land on the SAME
+            // path exactly once each. Any other spelling (a root `/chat/completions`, a doubled
+            // `/v1/v1/`) matches no mock, arrives as a 404 no-match, and the probe answers false.
+            .expect(2)
+            .mount(&server)
+            .await;
+        // The root url, as `model detect` reports it: this is the shape that used to be broken.
+        let root: String = server.uri();
+        assert!(answering(&llm(root.as_str())).await);
+        // The same server addressed with an explicit /v1 must not double it.
+        assert!(answering(&llm(&format!("{}/v1", root))).await);
     }
 
     #[tokio::test]

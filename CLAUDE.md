@@ -89,7 +89,8 @@ an over-limit original (`skipped:"over_limit"`, never indexed) still shows its s
 iCloud-only file (macOS `SF_DATALESS` in `st_flags`, read via `symlink_metadata`, never downloaded);
 `status --json` → `{version, model:{reachable, answering}, last_sync:"<RFC3339 UTC>"|null}` — the engine probes `GET {base_url}/models`
 with a 3 s timeout (a dead model is data: `reachable:false`, not an error); `answering` is a tiny completion through
-`POST {base_url}/chat/completions` and is `null` when that probe did not run, so the desktop's "ready" can rest only on
+`POST {base_url}/v1/chat/completions` (the `/v1` is added once, so a runtime root and a `[llm] base_url` that already
+names `/v1` both land on the same path) and is `null` when that probe did not run, so the desktop's "ready" can rest only on
 a model that actually answered, never on a port that merely replies; and `last_sync` is the database file's mtime;
 `add --json -- <file>` → `{version, status, source, file, type, date, chunks, duplicate_of}` (an
 original over `[ocr] max_file_mb` (default 50) is refused before hashing/copy/OCR);
