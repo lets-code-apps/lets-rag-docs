@@ -913,6 +913,36 @@ async function smokeOnboarding(browser: BrowserWindow): Promise<{ ok: boolean; d
 	await drive(browser, `await d.clickBtn('start filing');`);
 	if (stateOf().calls.some((c) => c.includes('filing save'))) failures.push('skip-still-saved-filing');
 
+	// 7b) Skip then Back (LET-165 review round 3): Skip marks the owners step skipped, but Back into that
+	// step starts using it again, so the skip marking must not survive the trip. Adding an owner after
+	// the Back and continuing must really send the filing save (an owner was added), and the step list
+	// must show the owners step done - not the dashed skip from before the Back.
+	await scenario({ FAKE_SCENARIO: 'library', FAKE_MODEL_STATE: 'found' });
+	await walk('filing');
+	await drive(browser, `d.btn('skip').click(); await d.settle();`);
+	await check('skip draws the owners step skipped', String.raw`
+		const li2 = document.querySelectorAll('#setupStepsList li')[2];
+	 return li2?.classList.contains('step-skipped') && li2.getAttribute('aria-current') !== 'step';
+	`);
+	await drive(browser, `d.find('#stepBack').click(); await d.settle();`);
+	await check('back re-opens the owners step', String.raw`
+		const li2 = document.querySelectorAll('#setupStepsList li')[2];
+	 return d.find('#stepTitle').textContent === 'folders and owners'
+		 && li2?.classList.contains('step-current') && li2.getAttribute('aria-current') === 'step';
+	`);
+	await drive(browser, `
+		await d.type('#ownerField', 'Example Person');
+	`);
+	await drive(browser, `d.btn('add owner').click(); await d.settle();`);
+	await drive(browser, `await d.clickBtn('continue');`);
+	await check('back-then-add: owners step is done', String.raw`
+		const li = [...document.querySelectorAll('#setupStepsList li')];
+	 return li[2]?.classList.contains('step-done') && li[2].getAttribute('aria-current') !== 'step'
+		 && li[3]?.getAttribute('aria-current') === 'step';
+	`);
+	await drive(browser, `await d.clickBtn('start filing');`);
+	if (!stateOf().calls.some((c) => c.startsWith('filing save'))) failures.push('skip-then-back-lost-the-owner');
+
 	// 8) Not-found: the step re-checks itself (the fake state counts the detects), and the last continue
 	// is offered as "set up later" instead of a lie.
 	await scenario({ FAKE_SCENARIO: 'library', FAKE_MODEL_STATE: 'not-found' });

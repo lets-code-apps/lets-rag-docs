@@ -1458,6 +1458,13 @@ function obModelNextLabel() {
 // step leaves the lists untouched. The model step's continue is the LAST one: main runs the writes.
 function obGoStep(step) {
   ob.step = step;
+  if (step === 2) {
+    // Back into the owners step starts using it again, so the Skip marking does not survive the trip
+    // (LET-165 review round 3): after a Skip, pressing Back, adding an owner and continuing must land on
+    // a step that really saves the owner and reads done in the step list - not one stuck in the dashed
+    // skip drawing.
+    ob.filingSkipped = false;
+  }
   if (step === 3) {
     ob.viewState = 'detecting';
     // A fresh entry to the model step starts a new detect cycle: the guided-install transition (finding 6)
