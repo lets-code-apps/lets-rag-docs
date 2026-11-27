@@ -121,12 +121,18 @@ pub async fn detect(endpoints: Vec<Endpoint>, shared: shared_model::SharedModel)
         }
     };
 
-    // The shared block: probe the stored base url. A complete file gives one even when
-    // the server is off, flagged by `reachable`.
+    // The shared block: probe the stored base url, but only under the same local-only rule the
+    // `--url` path uses (review finding 2, LET-165). `shared_model::read` does not vet the url, so
+    // a shared `model.toml` that names a public host must NEVER make this app send a request there.
+    // `ensure_local` runs before `probe_listing`: a refused endpoint reports `reachable = false` and
+    // dispatches nothing.
     let shared_block: Option<SharedBlock> = match shared.chat_base_url() {
         None => None,
         Some(base_url) => {
-            let reachable = probe_listing(&client, base_url.to_string()).await.is_ok();
+            let reachable = match ensure_local(base_url.to_string()) {
+                Err(_) => false,
+                Ok(local_url) => probe_listing(&client, local_url).await.is_ok(),
+            };
             Some(SharedBlock {
                 runtime: shared.runtime.clone().unwrap_or_default(),
                 url: shared.url.clone().unwrap_or_default(),
@@ -1191,6 +1197,39 @@ mod tests {
         .shared
         .expect("block present even when the server is off");
         assert!(!off.reachable, "a dead stored url is data, not an error");
+    }
+
+    #[tokio::test]
+    async fn the_shared_block_refuses_a_public_url_without_requesting_it() {
+        // Review finding 2 (LET-165): the shared `model.toml` url is NOT validated by `shared_model::read`,
+        // so a public host there must not make `detect` send a request there. `ensure_local` runs first
+        // and short-circuits the probe; the block reports `reachable = false` (unreachable) and carries
+        // its stored values as data. Mirrors `status::refused_base_url_is_unreachable` for the shared path.
+        let shared = shared_model::SharedModel {
+            runtime: Some("ollama".to_string()),
+            url: Some("http://8.8.8.8/v1".to_string()),
+            model: Some("qwen3:8b".to_string()),
+            set_by: Some("triage mail".to_string()),
+            updated: Some("2026-11-25T09:00:00Z".to_string()),
+        };
+        let block = detect(Vec::new(), shared)
+            .await
+            .shared
+            .expect("a complete shared file gives a block");
+        assert!(
+            !block.reachable,
+            "a public stored url is refused: reported unreachable, never requested"
+        );
+        assert_eq!(
+            block.model,
+            "qwen3:8b".to_string(),
+            "the stored model still shows as data"
+        );
+        assert_eq!(
+            block.set_by,
+            "triage mail".to_string(),
+            "the other app's attribution still shows"
+        );
     }
 
     fn shared_with_url(url: String) -> shared_model::SharedModel {

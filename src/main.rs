@@ -197,6 +197,14 @@ enum Command {
         /// onboarding's Ready check uses; the overview keeps the cheap listing probe
         #[arg(long)]
         answer: bool,
+        /// Ask about a specific runtime address (`--url=ADDR`): the onboarding's Ready check
+        /// probes the model+endpoint the user has just chosen, which is not saved yet, instead
+        /// of the model `config.toml` would use. Read-only: nothing is written.
+        #[arg(long)]
+        url: Option<String>,
+        /// Ask about a specific model id (`--model=ID`), same reason as `--url`.
+        #[arg(long)]
+        model: Option<String>,
     },
     /// Show or change `[classify] folders` and `owners` through the engine
     Filing {
@@ -248,7 +256,12 @@ async fn main() -> anyhow::Result<()> {
             organize::run(&config, mode.dry_run, mode.apply, json).await
         }
         Command::Documents { json } => documents::run(&config, json),
-        Command::Status { json, answer } => status::run(&config, json, answer).await,
+        Command::Status {
+            json,
+            answer,
+            url,
+            model,
+        } => status::run(&config, json, answer, url, model).await,
         Command::Model { command } => match command {
             Model::Detect { url, json } => {
                 model_setup::detect_cmd(&config, &path, &shared_path, url, json).await
@@ -407,10 +420,24 @@ mod tests {
             .is_ok(),
             "`status --json` parses"
         );
+        // The onboarding's completion probe: `--answer` with the just-chosen endpoint and model.
+        // It must parse (read-only override; nothing is written), so the desktop can build it.
+        assert!(
+            Cli::try_parse_from(vec![
+                "lets-rag-docs".to_string(),
+                "status".to_string(),
+                "--json".to_string(),
+                "--answer".to_string(),
+                "--url=http://127.0.0.1:11434/v1".to_string(),
+                "--model=qwen3:8b".to_string()
+            ])
+            .is_ok(),
+            "`status --json --answer --url=.. --model=..` parses"
+        );
         // Without --json the clap side still parses (the flag is optional there); the command
         // refuses at run time, before touching config, with a non-zero exit.
         let config = Config::default();
-        let result = super::status::run(&config, false, false).await;
+        let result = super::status::run(&config, false, false, None, None).await;
         assert!(
             result.is_err(),
             "status without --json is refused, not printed by hand"
