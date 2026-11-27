@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { test } from 'node:test';
 
-import { Engine, type EngineProcess } from '../src/engine.ts';
+import { Engine, STATUS_ANSWER_MS, type EngineProcess } from '../src/engine.ts';
 
 class FakeChild extends EventEmitter {
 	readonly stdin: NodeJS.WritableStream | null = null;
@@ -245,6 +245,42 @@ test('status parses the engine report through the real collect path', async () =
 	assert.ok(result.ok);
 	assert.equal(result.value.model.reachable, false);
 	assert.equal(result.value.last_sync, null);
+});
+
+// The onboarding's Ready probe (review finding 1, LET-165): `status --answer` with the just-chosen model+endpoint.
+test('status --answer argv is the completion probe on the chosen model+endpoint', async () => {
+	const recorded: string[][] = [];
+	const spawn = {
+		call(file: string, args: string[]) {
+			void file;
+			recorded.push(args);
+			const child = new FakeChild();
+			queueMicrotask(() => child.emit('close'));
+			return child as unknown as EngineProcess;
+		},
+	};
+	const engine = new Engine({ RAG_DOCS_ENGINE_PATH: 'fake' }, '/repo', spawn, 0, 100);
+	await engine.statusAnswer('http://127.0.0.1:11434/v1', 'qwen3:8b');
+	assert.deepEqual(recorded, [['status', '--json', '--answer', '--url=http://127.0.0.1:11434/v1', '--model=qwen3:8b']]);
+	// A value that could not be a valid model id (here: empty) is refused by the builder and never reaches argv.
+	const bad = await engine.statusAnswer('http://127.0.0.1:11434/v1', '');
+	assert.ok(!bad.ok, 'a blank model is rejected by the builder');
+});
+
+test('the Ready probe parses answering through the real collect path', async () => {
+	const seen = { args: [] as string[][], stdin: [] as string[] };
+	const spawn = slowSpawn(0, JSON.stringify({ version: 1, model: { reachable: true, answering: true }, last_sync: null }), seen);
+	const engine = new Engine({ RAG_DOCS_ENGINE_PATH: 'fake' }, '/repo', spawn, 0, 100);
+	const result = await engine.statusAnswer('http://127.0.0.1:1234', 'qwen3:8b');
+	assert.ok(result.ok);
+	assert.equal(result.value.model.answering, true, 'the download can reach Ready on a real answer');
+});
+
+test('the Ready probe gives the child a budget longer than the engine\'s 30 s completion timeout', () => {
+	// The engine bounds `--answer` at 30 s (a freshly pulled model takes seconds to load). The desktop must
+	// not SIGKILL that child at a shorter budget and report a failure the engine never had (finding 1).
+	assert.ok(STATUS_ANSWER_MS > 30_000, 'desktop budget must exceed the engine completion budget');
+	assert.ok(STATUS_ANSWER_MS < 60_000, 'still bounded: a dead endpoint returns rather than hanging onboarding');
 });
 
 // ---- first-run onboarding (LET-136): setup show/save and model detect/save/pull ----

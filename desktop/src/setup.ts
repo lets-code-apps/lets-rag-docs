@@ -54,6 +54,16 @@ export function buildModelSaveArgs(runtime: unknown, url: unknown, model: unknow
 	return ['save', '--json', `--runtime=${runtime}`, `--url=${url}`, `--model=${model}`];
 }
 
+// `status --json --answer --url=U --model=M`: the onboarding's Ready check asks whether the model it just
+// chose answers a tiny completion, at its own endpoint, WITHOUT saving that choice to config first. The
+// subcommand name (`status`) is prepended by the engine; only the flags are built here. Both values are
+// validated (an address with no spaces / leading dash, a model id that cannot read as a flag); the engine
+// re-checks the local-only rule before it sends the request.
+export function buildStatusAnswerArgs(url: unknown, model: unknown): string[] | null {
+	if (!urlText(url) || !modelId(model)) return null;
+	return ['--json', '--answer', `--url=${url}`, `--model=${model}`];
+}
+
 // The download bar's accessible values and fill width for one progress percent, clamped to 0..100. The
 // maximum is always 100 and the fill is that same percent, so a partial download (e.g. 42%) never reads
 // as complete to a screen reader or in the painted bar.

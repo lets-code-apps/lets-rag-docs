@@ -427,10 +427,66 @@ test('watchRows pre-fills the recommendations and marks watched only once the li
   assert.deepEqual(m.watchRows(set), [{ path: '~/Downloads', watched: true }]);
 });
 
-test('setupSteps marks the current step, earlier ones done, and always skips folders and owners', () => {
-  const steps = m.setupSteps(2);
-  assert.deepEqual(steps.map((s) => [s.key, s.state]), [['library', 'done'], ['watch', 'done'], ['filing', 'skipped'], ['model', 'rest']]);
-  const model = m.setupSteps(3).find((s) => s.key === 'model');
-  assert.deepEqual([model.state, model.skipped], ['current', false]);
-  assert.equal(m.setupSteps(0).find((s) => s.key === 'filing').state, 'skipped');
+test('setupSteps: the owners step is current while you use it and done after Continue', () => {
+  // Review finding 7 (LET-165): the owners step (index 2) is a step the person uses, so it must carry
+  // aria-current while they are on it and show done once they have continued past it. Only an actual Skip
+  // (the page passes filingSkipped=true) draws it as skipped.
+  assert.deepEqual(m.setupSteps(2).map((s) => [s.key, s.state]),
+    [['library', 'done'], ['watch', 'done'], ['filing', 'current'], ['model', 'rest']]);
+  assert.deepEqual(m.setupSteps(3).map((s) => [s.key, s.state]),
+    [['library', 'done'], ['watch', 'done'], ['filing', 'done'], ['model', 'current']]);
+  assert.equal(m.setupSteps(1).find((s) => s.key === 'filing').state, 'rest', 'before the owners step: still to do');
+  const onFiling = m.setupSteps(2).find((s) => s.key === 'filing');
+  assert.deepEqual([onFiling.state, onFiling.skipped], ['current', false], 'the current step, not a skipped one');
+  // The only way it reads skipped is an explicit skip the page passes:
+  assert.equal(m.setupSteps(3, true).find((s) => s.key === 'filing').state, 'skipped', 'a real skip still draws as skipped');
+});
+
+test('model choices come only from the selected endpoint, not every runtime', () => {
+  // Review finding 5 (LET-165): two runtimes both list qwen3:8b, only LM Studio has llama3.2:3b. With Ollama
+  // selected the LM-Studio-only id must not be offered — choosing it would save it at Ollama's url, where it
+  // does not exist (a valid choice producing a broken shared config).
+  const detect = {
+    ok: true,
+    runtimes: [
+      { runtime: 'ollama', url: 'http://127.0.0.1:11434', reachable: true, usable: ['qwen3:8b'] },
+      { runtime: 'lmstudio', url: 'http://127.0.0.1:1234', reachable: true, usable: ['qwen3:8b', 'llama3.2:3b'] },
+    ],
+    shared: null,
+    config: { model: '', overridden: false },
+  };
+  const step = m.stepFromDetect(detect, 16 * 1024 ** 3);
+  assert.equal(step.url, 'http://127.0.0.1:11434', 'the first reachable runtime with a usable model is selected');
+  assert.deepEqual(m.choiceList(detect, step.url), ['qwen3:8b'], 'the LM-Studio-only id is never offered at the Ollama endpoint');
+  assert.deepEqual(m.choiceList(detect, 'http://127.0.0.1:1234'), ['qwen3:8b', 'llama3.2:3b'], 'at LM Studio both are offered');
+  assert.deepEqual(m.choiceList(detect, 'http://127.0.0.1:9999'), [], 'an endpoint not present offers nothing');
+});
+
+test('use-another-model switches the shared step to a selectable found step', () => {
+  // Review finding 4 (LET-165): the shared step hides the chooser; the action drops the shared block and
+  // falls back to the found step so the person can pick a different model at the shared runtime.
+  const detect = {
+    ok: true,
+    runtimes: [{ runtime: 'ollama', url: 'http://127.0.0.1:11434', reachable: true, usable: ['qwen3:8b', 'llama3.2:3b'] }],
+    shared: { runtime: 'ollama', url: 'http://127.0.0.1:11434', model: 'qwen3:8b', set_by: 'triage mail', reachable: true },
+    config: { model: '', overridden: false },
+  };
+  assert.equal(m.stepFromDetect(detect, 16 * 1024 ** 3).state, 'shared', 'as-is the other app\'s choice wins');
+  const found = m.switchFromShared(detect, 16 * 1024 ** 3);
+  assert.equal(found.state, 'found', 'the chooser and address appear');
+  assert.equal(found.url, 'http://127.0.0.1:11434');
+  assert.deepEqual(m.choiceList(detect, found.url), ['qwen3:8b', 'llama3.2:3b'], 'both models can now be chosen');
+});
+
+test('a failed or not-found "set up later" saves no model; an installed or running choice may', () => {
+  // Review finding 3 (LET-165): deferring setup must never leave the shared file pointing at a model whose
+  // download failed. A model travels only for a real installed choice or a still-running pull (whose save main
+  // defers to success); keeping the other app\'s choice saves nothing.
+  assert.equal(m.modelTravels('failed', false, false), false, 'a failed download: no model save');
+  assert.equal(m.modelTravels('not-found', false, false), false, 'nothing installed: no model save');
+  assert.equal(m.modelTravels('found-empty', false, false), false, 'no usable model installed: no model save');
+  assert.equal(m.modelTravels('ready', false, false), true, 'downloaded and answered: save it');
+  assert.equal(m.modelTravels('found', false, false), true, 'an installed found model: save it');
+  assert.equal(m.modelTravels('downloading', true, false), true, 'a still-running pull: main defers the save to success');
+  assert.equal(m.modelTravels('shared', false, true), false, 'keeping the other app\'s choice: no model save');
 });

@@ -6,7 +6,7 @@ contextBridge.exposeInMainWorld('ragDocs', {
 	ask: (question) => ipcRenderer.invoke('rag.ask', question),
 	cancelAsk: () => ipcRenderer.invoke('rag.cancelAsk'),
 	documents: () => ipcRenderer.invoke('rag.documents'),
-	status: () => ipcRenderer.invoke('rag.status'),
+	status: (url, model) => ipcRenderer.invoke('rag.status', url, model),
 	search: (query) => ipcRenderer.invoke('rag.search', query),
 	filing: () => ipcRenderer.invoke('rag.filingShow'),
 	saveFiling: (draft, check) => ipcRenderer.invoke('rag.filingSave', draft, check),

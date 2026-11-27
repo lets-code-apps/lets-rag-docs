@@ -36,7 +36,7 @@ import {
 	type SetupShowReport,
 	type StatusReport,
 } from './reports.ts';
-import { buildModelDetectArgs, buildModelPullArgs, buildModelSaveArgs, parsePullLine } from './setup.ts';
+import { buildModelDetectArgs, buildModelPullArgs, buildModelSaveArgs, buildStatusAnswerArgs, parsePullLine } from './setup.ts';
 import { PullJob, type PullStatus } from './pull.ts';
 import { resolveEngine } from './engine-path.ts';
 
@@ -77,6 +77,13 @@ export const TIMEOUTS = {
 	// long-job budget, and the page can cancel it (SIGTERM) instead.
 	pullMs: 60 * 60_000,
 } as const;
+
+// The onboarding's completion probe (`status --answer`) is bounded by the ENGINE at 30 s (a freshly pulled
+// model takes seconds to load). The desktop's budget for THIS call must be STRICTLY longer than the engine's
+// own answer timeout, or the desktop would SIGKILL a child whose model is still legitimately loading and
+// report a failure the engine never had (review finding 1, LET-165). It stays bounded so a dead endpoint still
+// returns rather than hanging onboarding.
+export const STATUS_ANSWER_MS = 45_000;
 
 // The outcome of a `model pull`: whether the server confirmed `success`, plus the reason if it did not.
 // A failed pull is a normal result (`ok:true, success:false`), not an engine failure: the engine printed
@@ -203,6 +210,17 @@ export class Engine {
 	async status(): Promise<EngineResult<StatusReport>> {
 		const outcome = await this.collect(['status', '--json']);
 		return this.finish(outcome, 'status', this.readTimeoutMs, (o) => parseStatus(o.stdout, o.stderrTail));
+	}
+
+	/** The onboarding's Ready check (review finding 1, LET-165): ask the engine to run its completion probe
+	 * on the model+endpoint the user has just chosen (`status --json --answer --url --model`), before that
+	 * choice is saved anywhere. Read-only. The engine validates the completion body (not just the status
+	 * code) and obeys the local-only rule; the budget here is longer than the engine's own answer timeout. */
+	async statusAnswer(url: string, model: string): Promise<EngineResult<StatusReport>> {
+		const args = buildStatusAnswerArgs(url, model);
+		if (args === null) return { ok: false, error: 'status --answer: url and model must be valid values' };
+		const outcome = await this.collect(['status', ...args], undefined, STATUS_ANSWER_MS);
+		return this.finish(outcome, 'status --answer', STATUS_ANSWER_MS, (o) => parseStatus(o.stdout, o.stderrTail));
 	}
 
 	async filingShow(): Promise<EngineResult<FilingShowReport>> {

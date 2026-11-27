@@ -68,6 +68,7 @@ const state = {
     poll: null, // interval id: reads modelPullStatus (~500 ms), never wrapped in track()
     error: null, // why a continue did not go through
     filingLoaded: false,
+    filingSkipped: false, // the person pressed Skip on the owners step: the step list draws it skipped
     done: false,
   },
 };
@@ -1002,7 +1003,7 @@ function obRenderStepList() {
   const ol = $('setupStepsList');
   ol.replaceChildren();
   for (let i = 0; i < 4; i += 1) {
-    const s = m.setupSteps(ob.step)[i];
+    const s = m.setupSteps(ob.step, ob.filingSkipped)[i];
     const li = el('li', `step-${s.state}`);
     const dot = el('span', 'step-dot');
     if (s.state === 'done') dot.append(icon('check', 14));
@@ -1261,9 +1262,15 @@ function modelAction(label) {
     return;
   }
   if (label === 'use another model') {
-    // The shared block stays unless the user picks a different model from this runtime's list.
+    // Transition to the selectable found state (not stay on `shared`, which hides the model chooser and
+    // the address field), preselecting the shared runtime so the person can pick a different model there
+    // (review finding 4, LET-165). The finish then saves that choice under rag docs, not the shared one.
     ob.overrideShared = true;
-    ob.models = (ob.detect?.runtimes ?? []).flatMap((r) => (r.reachable ? r.usable ?? [] : []));
+    const step = m.switchFromShared(ob.detect, (state.settings.memGb || 16) * 1024 ** 3);
+    ob.stepModel = step;
+    ob.viewState = step.state;
+    ob.models = m.choiceList(ob.detect, step.url);
+    ob.chosenModel = step.model ?? '';
     render();
   }
 }
@@ -1322,10 +1329,14 @@ function onPullResult(modelId, res) {
     render();
     return;
   }
-  // Ready is the board's answer 3: the engine's own completion probe must have answered —
-  // `status --json` reports `model.answering`, true only when a tiny completion came back from the
-  // model (not just "the port answers"). Until that is true the step never claims ready.
-  void track(api.status()).then((st) => {
+  // Ready is the board's answer 3, made real (review finding 1, LET-165): ask the engine to run its
+  // completion probe on the model that was just downloaded, at its own endpoint — `status --answer --url --
+  // model` — NOT the cheap `status --json` (which never sends `--answer` and reports `answering: null`, and
+  // would otherwise ask the old model still in config.toml). The engine reads the completion body, so only a
+  // model that actually generates lands Ready; the desktop gives this call a budget longer than the engine's
+  // own completion budget. Nothing is written before the save.
+  const probeUrl = ob.stepModel?.url || ob.address || '';
+  void track(api.status(probeUrl, modelId)).then((st) => {
     if (!ob.active) return;
     if (st && st.ok && st.report?.model?.answering === true) {
       ob.viewState = 'ready';
@@ -1357,13 +1368,13 @@ async function obDetect() {
   ob.stepModel = step;
   if (step.state === 'shared' && ob.overrideShared === true) {
     ob.viewState = 'found';
-    ob.models = (res.report.runtimes ?? []).flatMap((r) => (r.reachable ? r.usable ?? [] : []));
+    ob.models = m.choiceList(res.report, step.url);
   } else if (step.state === 'shared') {
     ob.viewState = 'shared';
     ob.models = [];
   } else if (step.state === 'found') {
     ob.viewState = 'found';
-    ob.models = (res.report.runtimes ?? []).flatMap((r) => (r.reachable && (r.usable ?? []).includes(step.model) ? r.usable : []));
+    ob.models = m.choiceList(res.report, step.url);
   } else {
     ob.viewState = step.state;
     if (step.state === 'not-found') scheduleRecheck();
@@ -1456,8 +1467,10 @@ function obContinue() {
 }
 
 function obSkip() {
-  // Skip on the owners step: the existing lists stand, nothing was added, so no owner save follows.
+  // Skip on the owners step: the existing lists stand, nothing was added, so no owner save follows. The
+  // step list then draws this step as actually skipped (a dashed –) instead of a visited step.
   ob.owners = [];
+  ob.filingSkipped = true;
   obGoStep(3);
 }
 
@@ -1475,9 +1488,14 @@ async function obFinish() {
   const watchFolders = ob.watch.filter((w) => w.on).map((w) => w.path);
   const payload = { library_dir: ob.libPath, watch_folders: watchFolders };
   if (ob.owners.length > 0) payload.owners = ob.owners;
-  const chosen = ob.chosenModel || ob.stepModel?.model || ob.pull?.model || '';
+  // A download's in-flight model counts as a choice only while it is still running (main defers that save
+  // to the pull's success); once a pull has finished-and-failed its model id must not become the choice.
+  const chosen = ob.chosenModel || ob.stepModel?.model || (ob.pullRunning ? ob.pull?.model : '') || '';
   const keepShared = ob.stepModel?.state === 'shared' && ob.overrideShared !== true;
-  if (chosen !== '' && !keepShared) {
+  // A model travels only for a real installed choice (found/ready), an explicit switch on the shared step,
+  // or a still-running pull. A failed or not-found "set up later" sends no model, so deferring setup can
+  // never leave the shared file pointing at a model whose download failed (review finding 3, LET-165).
+  if (m.modelTravels(ob.viewState, ob.pullRunning, keepShared) && chosen !== '') {
     payload.model = { runtime: ob.stepModel?.runtime ?? 'ollama', url: ob.stepModel?.url ?? ob.address, model: chosen };
   }
   const res = await track(api.modelSetup(payload));

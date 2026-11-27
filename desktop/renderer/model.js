@@ -616,10 +616,14 @@ export function watchRows(show) {
   return list.map((path) => ({ path, watched: set }));
 }
 
-/** The four design steps in order. The middle one ("folders and owners") is the plan's skipped step:
- * it is present for the aria list but marked skipped, and never a "current" step. `current` is the index
- * the page marks `aria-current="step"`; steps before it are done, after are still to do. */
-export function setupSteps(current) {
+/** The four design steps in order, with the shared progress state. `current` is the index the page marks
+ * `aria-current="step"`; steps before it are done, after are still to do. The "folders and owners" step (index
+ * 2) is a step the person really uses — they add owners on it — so it is CURRENT while they are on it and DONE
+ * once they have continued past it (board acceptance, review finding 7 LET-165: the owners step must carry the
+ * current marker and show complete after Continue). It is drawn "skipped" (a dashed –) only when the person
+ * actually pressed Skip on it, which the page passes as `filingSkipped`; the skip is tracked separately from the
+ * done/current state so the accessible progress no longer contradicts the step being used. */
+export function setupSteps(current, filingSkipped) {
   const steps = [
     { key: 'library', title: 'library' },
     { key: 'watch', title: 'folders to watch' },
@@ -627,9 +631,39 @@ export function setupSteps(current) {
     { key: 'model', title: 'model' },
   ];
   return steps.map((s, i) => {
-    const skipped = s.key === 'filing';
-    return { ...s, skipped, state: skipped ? 'skipped' : i < current ? 'done' : i === current ? 'current' : 'rest' };
+    const skipped = s.key === 'filing' && filingSkipped === true;
+    const state = skipped ? 'skipped' : i < current ? 'done' : i === current ? 'current' : 'rest';
+    return { ...s, skipped, state };
   });
+}
+
+/** The model ids the page may offer in the chooser: the usable list of the ONE runtime the step
+ * actually selected (`stepUrl`), not the union of every reachable runtime (review finding 5, LET-165).
+ * Offering another runtime's models would let a click save a model id at the selected endpoint's url,
+ * where that id does not exist — a valid choice that produces a broken shared config. */
+export function choiceList(detect, stepUrl) {
+  const runtimes = detect?.runtimes ?? [];
+  const selected = runtimes.find((r) => r.reachable && r.url === stepUrl);
+  return selected ? [...(selected.usable ?? [])] : [];
+}
+
+/** "Use another model" on the shared step (review finding 4, LET-165): drop the shared block and fall back
+ * to the found step, so the chooser (and the address field) appear and the person can pick a different model
+ * at the shared runtime — instead of leaving the view on `shared`, which hides both. */
+export function switchFromShared(detect, memBytes) {
+  return stepFromDetect({ ...(detect ?? {}), shared: null }, memBytes);
+}
+
+/** Whether the finish payload may carry a model, given the step's state (review finding 3, LET-165).
+ * A model is saved only for a real installed choice (found / ready), an explicit switch on the shared
+ * step (now a found state), or a still-running pull whose save main defers to its success. A failed or
+ * not-found "set up later" sends NO model: deferring setup must not leave the shared file pointing at a
+ * model whose download failed. `keepShared` (keeping the other app's choice) sends no model either. */
+export function modelTravels(viewState, pullRunning, keepShared) {
+  if (keepShared) return false;
+  if (viewState === 'found' || viewState === 'ready' || viewState === 'shared') return true;
+  if (pullRunning === true) return true;
+  return false;
 }
 
 /** The runtime word the engine names, said the way the design says it ("Ollama", "LM Studio"). */

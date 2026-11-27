@@ -260,8 +260,16 @@ function registerIpc(): void {
 		return guard(async () => toIPC(await engine.documents()));
 	});
 
-	ipcMain.handle(IPC.status, async (event) => {
+	ipcMain.handle(IPC.status, async (event, url: unknown, model: unknown) => {
 		if (!fromUs(event.senderFrame)) return null;
+		if (url !== undefined && url !== null && typeof url !== 'string') return { ok: false, error: 'url must be a string' };
+		if (model !== undefined && model !== null && typeof model !== 'string') return { ok: false, error: 'model must be a string' };
+		// The overview asks the cheap read (no args). The onboarding's Ready check asks the same channel WITH the
+		// model+endpoint it just chose, so the engine runs its completion probe on THAT model (review finding 1,
+		// LET-165) — read-only, nothing written before the save.
+		if (typeof url === 'string' && typeof model === 'string' && url !== '' && model !== '') {
+			return guard(async () => toIPC(await engine.statusAnswer(url, model)));
+		}
 		return guard(async () => toIPC(await engine.status()));
 	});
 

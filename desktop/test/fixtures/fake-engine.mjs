@@ -477,12 +477,17 @@ async function library() {
   const state = load();
   if (args[0] === 'documents') print(documents(state));
   if (args[0] === 'status') {
-    // Same shape as the Rust `status --json`. The timestamp is fixed so the overview figures
-    // and screenshots are byte-stable; smoke/shots run with TZ=UTC (package.json). `answering`
-    // is the completion probe: true when the model answered the tiny test completion (FAKE_ANSWERING=0
-    // says reachable-but-not-answering; FAKE_MODEL=down is unreachable, so never answering).
+    // Same shape and same probe ARGS as the real Rust `status`. The overview's cheap `status --json` reports
+    // `answering: null` (no completion was asked). Only when `--answer` is on the command line does the probe
+    // run: then `answering` is true for a reachable model, false when FAKE_ANSWERING=0 (a reachable model whose
+    // tiny completion never answers — the empty/malformed-completion case). The `--url`/`--model` the onboarding
+    // passes identify WHICH model was probed; the fake only ever uses local endpoints, matching the engine's
+    // local-only rule (it would refuse a public url there). This is why the smoke download can now reach Ready:
+    // the step passes `--answer --url --model`, and the probe answers.
     const reachable = process.env.FAKE_MODEL !== 'down';
-    print({ version: 1, model: { reachable, answering: reachable && process.env.FAKE_ANSWERING !== '0' }, last_sync: '2025-03-09T09:24:00Z' });
+    const wantsAnswer = args.includes('--answer');
+    const answering = wantsAnswer && reachable && process.env.FAKE_ANSWERING !== '0';
+    print({ version: 1, model: { reachable, answering: wantsAnswer ? answering : null }, last_sync: '2025-03-09T09:24:00Z' });
   }
   if (args[0] === 'search') {
     const limit = Number(args[args.indexOf('--limit') + 1] || 20);
