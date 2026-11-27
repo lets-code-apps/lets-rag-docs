@@ -10,7 +10,9 @@ use serde::{Deserialize, Serialize};
 
 /// Expand the `~` with the app's own `expand_home`.
 pub const DEFAULT_PATH: &str = "~/.config/lets-code/model.toml";
+#[allow(dead_code)] // used by onboarding and settings (LET-136, LET-137)
 pub const RUNTIMES: [&str; 3] = ["ollama", "lmstudio", "custom"];
+#[allow(dead_code)] // used by onboarding and settings (LET-136, LET-137)
 pub const WRITERS: [&str; 2] = ["rag docs", "triage mail"];
 
 /// All keys optional. No `deny_unknown_fields` (unlike the app configs): the other app may
@@ -74,6 +76,7 @@ pub fn read(path: &Path) -> SharedModel {
 /// Temp file in the same folder, `sync_all`, then `rename` over the target: a reader sees the
 /// old file or the new one, never half. Creates the folder. Validates first; nothing is
 /// written on refusal. `updated` is the caller's RFC 3339 string. Replaces the whole file.
+#[allow(dead_code)] // used by onboarding and settings (LET-136, LET-137)
 pub fn write(path: &Path, model: &SharedModel) -> anyhow::Result<()> {
     validate(model)?;
     let text = toml::to_string(model).context("cannot serialise the model setting")?;

@@ -194,16 +194,10 @@ impl Default for OcrConfig {
 /// `[watch]`: the folders the first-run onboarding saves for the (not-yet-implemented) watcher.
 /// Kept separate from `[paths]` on purpose: these are user-picked source folders, never expanded
 /// or resolved, and empty by default so nothing is watched before a human chooses it.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
 pub struct WatchConfig {
     pub folders: Vec<String>,
-}
-
-impl Default for WatchConfig {
-    fn default() -> Self {
-        WatchConfig { folders: Vec::new() }
-    }
 }
 
 impl Config {
@@ -309,15 +303,17 @@ mod tests {
     #[test]
     fn watch_section_parses() {
         let config: Config =
-            toml::from_str("[watch]\nfolders = [\"~/Downloads\", \"~/Desktop\"]\n")
-                .unwrap();
+            toml::from_str("[watch]\nfolders = [\"~/Downloads\", \"~/Desktop\"]\n").unwrap();
         assert_eq!(
             config.watch.folders,
             vec!["~/Downloads".to_string(), "~/Desktop".to_string()]
         );
         // Absent: empty, so nothing is watched by accident.
         let empty: Config = toml::from_str("").unwrap();
-        assert_eq!(empty.watch.folders, Vec::new());
+        assert!(
+            empty.watch.folders.is_empty(),
+            "an absent [watch] stays empty"
+        );
         // Kept verbatim: no `~` expansion in the stored value.
         assert_eq!(empty.watch.folders.first(), None);
     }

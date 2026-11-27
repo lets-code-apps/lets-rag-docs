@@ -12,7 +12,7 @@
 
 use std::collections::HashSet;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, anyhow};
 use serde::{Deserialize, Serialize};
@@ -23,7 +23,7 @@ use crate::organize;
 
 /// What a fresh install starts from, in `~/` form. A recommendation is advice the desktop can
 /// offer, never a default written behind the user's back (`[watch] folders` stays empty).
-const RECOMMENDED_LIBRARY_DIR: String = "~/Documents/library";
+const RECOMMENDED_LIBRARY_DIR: &str = "~/Documents/library";
 
 fn recommended_watch_folders() -> Vec<String> {
     vec!["~/Downloads".to_string(), "~/Desktop".to_string()]
@@ -97,17 +97,17 @@ fn collect_show(config: &Config, path: &Path) -> ShowReport {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => "".to_string(),
         Err(e) => {
             tracing::warn!("cannot read {} for setup show: {}", path.display(), e);
-            "".to_string();
+            "".to_string()
         }
     };
     let written: WrittenSetup = toml::from_str(text.as_str()).unwrap_or(WrittenSetup::default());
 
     ShowReport {
         version: 1,
-        library_dir: to_tilde(config.paths.library_dir),
+        library_dir: to_tilde(&config.paths.library_dir),
         library_dir_set: written.paths.library_dir.is_some(),
         recommended_library_dir: RECOMMENDED_LIBRARY_DIR.to_string(),
-        watch_folders: config.watch.folders,
+        watch_folders: config.watch.folders.clone(),
         watch_folders_set: written.watch.folders.is_some(),
         recommended_watch_folders: recommended_watch_folders(),
     }
@@ -132,17 +132,22 @@ fn save_report(
     let saved: bool = if check {
         false
     } else {
-        config_edit::write_setup(path, draft.library_dir.to_string(), &draft.watch_folders)?
+        config_edit::write_setup(path, draft.library_dir.clone(), &draft.watch_folders)?
     };
 
-    Ok(SaveReport { version: 1, ok: true, saved, errors: vec![] })
+    Ok(SaveReport {
+        version: 1,
+        ok: true,
+        saved,
+        errors: Vec::new(),
+    })
 }
 
 /// `None` when `value` is a usable path: absolute (`/...`) or under the home (`~/...`, or the bare
 /// `~`), with no NUL and at most 4096 characters. The `~` is kept: only the separation check
 /// expands it; the stored value stays exactly as given.
-fn path_problems(value: String) -> Option<String> {
-    if value.contains("\u0000".to_string()) {
+fn path_problems(value: &str) -> Option<String> {
+    if value.contains("\u{0}") {
         return Some("the path must not contain a NUL character".to_string());
     }
     if value.len() > 4096 {
@@ -154,15 +159,14 @@ fn path_problems(value: String) -> Option<String> {
     None
 }
 
-fn absolute_or_tilde(value: String) -> bool {
-    value == "~".to_string() || value.starts_with("/".to_string()) ||
-        value.starts_with("~/".to_string())
+fn absolute_or_tilde(value: &str) -> bool {
+    value == "~" || value.starts_with("/") || value.starts_with("~/")
 }
 
 fn validate_draft(config: &Config, draft: &Draft) -> Vec<Error> {
-    let mut errors: Vec<Error> = vec![];
+    let mut errors: Vec<Error> = Vec::new();
 
-    if let Some(message) = path_problems(draft.library_dir) {
+    if let Some(message) = path_problems(draft.library_dir.as_str()) {
         errors.push(Error {
             field: "library_dir".to_string(),
             message,
@@ -177,9 +181,9 @@ fn validate_draft(config: &Config, draft: &Draft) -> Vec<Error> {
             message: "at most 20 folders can be watched".to_string(),
         });
     }
-    let seen: HashSet<String> = HashSet::new();
+    let mut seen: HashSet<String> = HashSet::new();
     for folder in draft.watch_folders.iter() {
-        if let Some(message) = path_problems(folder) {
+        if let Some(message) = path_problems(folder.as_str()) {
             errors.push(Error {
                 field: "watch_folders".to_string(),
                 message,
@@ -190,13 +194,13 @@ fn validate_draft(config: &Config, draft: &Draft) -> Vec<Error> {
                 message: "the same folder may not be listed twice".to_string(),
             });
         }
-        seen.insert(folder.to_string());
+        seen.insert(folder.clone());
     }
 
     // The library must stay a place of its own, exactly the `organize` rule: expand the `~` only
     // for this check, then refuse if it contains or is inside `docs_dir`/`ocr_dir`.
-    if path_problems(draft.library_dir).is_none() {
-        let expanded = expand_home(Path(draft.library_dir.as_str()));
+    if path_problems(draft.library_dir.as_str()).is_none() {
+        let expanded: PathBuf = expand_home(Path::new(draft.library_dir.as_str()));
         if let Err(e) = organize::check_library_separation_for(config, &expanded) {
             errors.push(Error {
                 field: "library_dir".to_string(),
@@ -210,11 +214,11 @@ fn validate_draft(config: &Config, draft: &Draft) -> Vec<Error> {
 
 /// Replaces a leading `$HOME` with `~/`, the inverse of `config::expand_home`. With no `$HOME`
 /// (or a path that does not start with it) the value is passed through untouched.
-fn to_tilde(path: Path) -> String {
-    let text: String = path.to_string_lossy();
-    let home: String = std::env::var("HOME").unwrap_or(String::new());
-    if !home.is_empty() && text.starts_with(home) {
-        return "~".to_string() + text[home.len()..];
+fn to_tilde(path: &Path) -> String {
+    let text: String = path.to_string_lossy().to_string();
+    let home: String = std::env::var("HOME").unwrap_or_default();
+    if !home.is_empty() && text.starts_with(home.as_str()) {
+        return "~".to_string() + &text[home.len()..];
     }
     text
 }
@@ -245,10 +249,9 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::config::Config;
 
-    fn lock(name: String, actual: String) {
-        let path: PathBuf = PathBuf::from("testdata/desktop".to_string()).join(name.as_str());
+    fn lock(name: &str, actual: String) {
+        let path: PathBuf = PathBuf::from("testdata/desktop").join(name);
         if std::env::var("LOCK_FIXTURES")
             .map(|v| v == "1")
             .unwrap_or(false)
@@ -260,26 +263,30 @@ mod tests {
             return;
         }
         let want: String = fs::read_to_string(path.as_os_str()).unwrap();
-        assert_eq!(actual, want.as_str(), "JSON shape changed (or the fixture is stale)");
+        assert_eq!(
+            actual,
+            want.as_str(),
+            "JSON shape changed (or the fixture is stale)"
+        );
     }
 
     #[test]
     fn absolute_or_tilde_accepts_paths() {
-        assert!(absolute_or_tilde("/abs/path".to_string()));
-        assert!(absolute_or_tilde("~/Documents/library".to_string()));
-        assert!(absolute_or_tilde("~".to_string()));
-        assert!(!absolute_or_tilde("relative/path".to_string()));
-        assert!(!absolute_or_tilde("".to_string()));
+        assert!(absolute_or_tilde("/abs/path"), "absolute");
+        assert!(absolute_or_tilde("~/Documents/library"), "home-relative");
+        assert!(absolute_or_tilde("~"), "bare home");
+        assert!(!absolute_or_tilde("relative/path"), "relative");
+        assert!(!absolute_or_tilde(""), "empty");
     }
 
     #[test]
     fn path_problems_catches_bad_values() {
-        assert!(path_problems("relative".to_string()).is_some(), "relative path");
-        assert!(path_problems("bad\u0000char".to_string()).is_some(), "NUL");
+        assert!(path_problems("relative").is_some(), "relative path");
+        assert!(path_problems("bad\u{0}char").is_some(), "NUL");
         let long: String = "/".to_string() + "x".repeat(4097).as_str();
-        assert!(path_problems(long).is_some(), "over 4096 chars");
-        assert!(path_problems("~/Documents/library".to_string()).is_none());
-        assert!(path_problems("/tmp/library".to_string()).is_none());
+        assert!(path_problems(long.as_str()).is_some(), "over 4096 chars");
+        assert!(path_problems("~/Documents/library").is_none());
+        assert!(path_problems("/tmp/library").is_none());
     }
 
     #[test]
@@ -294,14 +301,17 @@ mod tests {
             watch_folders: vec!["~/Downloads".to_string(), "~/Downloads".to_string()],
         };
         let report = save_report(&config, &file, &draft, false).unwrap();
-        assert!(!report.ok, "a relative library and a duplicate folder are refused");
+        assert!(
+            !report.ok,
+            "a relative library and a duplicate folder are refused"
+        );
         assert!(!report.saved);
-        assert_eq!(fs::read_to_string(file.as_os_str()).unwrap(), "".to_string());
+        assert_eq!(fs::read_to_string(file.as_os_str()).unwrap(), "");
 
         let many: Vec<String> = {
-            let mut v: Vec<String> = vec![];
+            let mut v: Vec<String> = Vec::new();
             for i in 0..21 {
-                v.push("~/f".to_string() + i.to_string());
+                v.push("~/f".to_string() + i.to_string().as_str());
             }
             v
         };
@@ -309,7 +319,10 @@ mod tests {
             library_dir: "~/Documents/library".to_string(),
             watch_folders: many,
         };
-        assert!(!save_report(&config, &file, &draft2, false).unwrap().ok, "more than 20 folders");
+        assert!(
+            !save_report(&config, &file, &draft2, false).unwrap().ok,
+            "more than 20 folders"
+        );
     }
 
     #[test]
@@ -317,16 +330,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("config.toml");
         fs::write(&file, "").unwrap();
-        let config = Config::default();
+        let mut config = Config::default();
         config.paths.docs_dir = dir.path().join("docs");
 
         let draft = Draft {
-            library_dir: dir.path().join("docs/library").to_string(),
-            watch_folders: vec![],
+            library_dir: dir
+                .path()
+                .join("docs/library")
+                .to_string_lossy()
+                .to_string(),
+            watch_folders: Vec::new(),
         };
         let report = save_report(&config, &file, &draft, false).unwrap();
         assert!(!report.ok, "a library inside docs_dir is refused");
-        assert_eq!(fs::read_to_string(file.as_os_str()).unwrap(), "".to_string());
+        assert_eq!(fs::read_to_string(file.as_os_str()).unwrap(), "");
     }
 
     #[test]
@@ -342,7 +359,7 @@ mod tests {
         let first = save_report(&config, &file, &draft, false).unwrap();
         assert!(first.ok);
         assert!(first.saved);
-        let after_first = fs::read_to_string(file.as_os_str()).unwrap();
+        let after_first: String = fs::read_to_string(file.as_os_str()).unwrap();
         assert!(after_first.contains("# mine"));
 
         let second = save_report(&config, &file, &draft, false).unwrap();
@@ -364,7 +381,7 @@ mod tests {
         let report = save_report(&config, &file, &draft, true).unwrap();
         assert!(report.ok);
         assert!(!report.saved, "--check writes nothing");
-        assert_eq!(fs::read_to_string(file.as_os_str()).unwrap(), "".to_string());
+        assert_eq!(fs::read_to_string(file.as_os_str()).unwrap(), "");
     }
 
     #[test]
@@ -384,7 +401,12 @@ mod tests {
 
     #[test]
     fn setup_save_shape_is_locked() {
-        let report = SaveReport { version: 1, ok: true, saved: true, errors: vec![] };
+        let report = SaveReport {
+            version: 1,
+            ok: true,
+            saved: true,
+            errors: Vec::new(),
+        };
         let json: String = serde_json::to_string(&report).unwrap();
         lock("setup-save.json", json);
     }

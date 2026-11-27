@@ -61,10 +61,8 @@ fn render(list: &[String]) -> String {
 /// can never break out of the string or corrupt the file. Control characters are refused by the
 /// callers' validation before this ever runs, so they need no escaping here.
 fn toml_string(value: &str) -> String {
-    let escaped: String = value.to_string()
-        .replace("\\", "\\\\")
-        .replace("\"", "\\\"");
-    let out: String = "\"".to_string() + escaped.as_str() + "\"".to_string();
+    let escaped: String = value.replace("\\", "\\\\").replace("\"", "\\\"");
+    let out: String = "\"".to_string() + escaped.as_str() + "\"";
     out
 }
 
@@ -396,9 +394,11 @@ pub(crate) fn patch_setup(
                         "`library_dir` is not a string: edit config.toml by hand"
                     ));
                 }
-                edits.push(
-                    (old_span.start, old_span.end, toml_string(library_dir.as_str()).to_string()),
-                );
+                edits.push((
+                    old_span.start,
+                    old_span.end,
+                    toml_string(library_dir.as_str()).to_string(),
+                ));
             } else if section == "watch" && child == "folders" {
                 have_value = true;
                 let old_span = child_value.span();
@@ -417,12 +417,22 @@ pub(crate) fn patch_setup(
         }
 
         if section == "paths" && !have_value {
-            edits.push((insert_at, insert_at,
-                format!("\nlibrary_dir = {value}", value = toml_string(library_dir.as_str())).to_string()));
+            edits.push((
+                insert_at,
+                insert_at,
+                format!(
+                    "\nlibrary_dir = {value}",
+                    value = toml_string(library_dir.as_str())
+                )
+                .to_string(),
+            ));
         }
         if section == "watch" && !have_value {
-            edits.push((insert_at, insert_at,
-                format!("\nfolders = {list}", list = render(watch_folders)).to_string()));
+            edits.push((
+                insert_at,
+                insert_at,
+                format!("\nfolders = {list}", list = render(watch_folders)).to_string(),
+            ));
         }
     }
 
@@ -499,7 +509,7 @@ pub(crate) fn write_setup(
 
 /// Re-parse target for `patch_setup`: the two values it wrote, kept raw (never expanded), so a
 /// `~` path verifies against the exact string that was requested.
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 #[serde(default)]
 struct VerifySetup {
     #[serde(default)]
@@ -508,13 +518,13 @@ struct VerifySetup {
     watch: VerifyWatch,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 #[serde(default)]
 struct VerifyPaths {
     library_dir: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 #[serde(default)]
 struct VerifyWatch {
     folders: Option<Vec<String>>,
@@ -526,6 +536,7 @@ mod tests {
 
     use super::{patch_file, render, toml_string, write_lists};
     use super::{patch_setup, write_setup};
+    use crate::config::Config;
 
     #[test]
     fn toml_string_escapes_quotes_and_backslashes() {
@@ -564,11 +575,13 @@ mod tests {
 
     #[test]
     fn setup_idempotent_reports_unchanged() {
+        // The exact bytes `patch_setup` itself writes for these values: saving the same thing
+        // again changes nothing.
         let before: String =
-            "[paths]\nlibrary_dir = \"~/Documents/library\"\n[watch]\nfolders = [\"~/Downloads\",]\n".to_string();
+            "[paths]\nlibrary_dir = \"~/Documents/library\"\n[watch]\nfolders = [\n  \"~/Downloads\",\n]\n".to_string();
         let folders: Vec<String> = vec!["~/Downloads".to_string()];
         let (after, changed) =
-            patch_setup(before, "~/Documents/library".to_string(), &folders).unwrap();
+            patch_setup(before.clone(), "~/Documents/library".to_string(), &folders).unwrap();
         assert!(!changed);
         assert_eq!(after, before);
     }
@@ -581,27 +594,38 @@ mod tests {
         let folders: Vec<String> = vec!["~/a\\\"b".to_string()];
         let (after, changed) = patch_setup(before, "a\\\"b".to_string(), &folders).unwrap();
         assert!(changed);
-        assert!(toml::from_str::<Config>(after.as_str()).is_ok(), "the escaping is valid TOML");
-        assert!(after.contains("\\\""), "the quote is escaped in the file, not left bare");
+        assert!(
+            toml::from_str::<Config>(after.as_str()).is_ok(),
+            "the escaping is valid TOML"
+        );
+        assert!(
+            after.contains("\\\""),
+            "the quote is escaped in the file, not left bare"
+        );
     }
 
     #[test]
     fn setup_refuses_inline_table_and_commented_array() {
+        let empty: Vec<String> = vec![];
         assert!(
-            patch_setup("paths = { library_dir = \"x\" }".to_string(), "y".to_string(), &vec![])
-                .unwrap_err()
-                .to_string()
-                .contains("inline")
+            patch_setup(
+                "paths = { library_dir = \"x\" }".to_string(),
+                "y".to_string(),
+                &empty
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("inline")
         );
         assert!(
             patch_setup(
                 "[watch]\nfolders = [\n  \"x\", # keep me\n]\n".to_string(),
                 "y".to_string(),
-                &vec![],
+                &empty,
             )
-                .unwrap_err()
-                .to_string()
-                .contains("comment")
+            .unwrap_err()
+            .to_string()
+            .contains("comment")
         );
     }
 
@@ -612,7 +636,8 @@ mod tests {
         let folders: Vec<String> = vec!["~/Downloads".to_string(), "~/Desktop".to_string()];
         let first = write_setup(&file, "~/Documents/library".to_string(), &folders).unwrap();
         assert!(first);
-        let names: Vec<String> = fs::read_dir(dir.path()).unwrap()
+        let names: Vec<String> = fs::read_dir(dir.path())
+            .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
             .collect();
         assert_eq!(names, vec!["config.toml".to_string()]);
