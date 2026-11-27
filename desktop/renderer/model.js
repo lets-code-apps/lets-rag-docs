@@ -575,5 +575,101 @@ export class DryRunMemo {
   }
 }
 
+// ---- first-run onboarding (LET-136) ----
+//
+// The model-step brain: what `model detect --json` answered becomes the state and the preselected model
+// the step shows; the folders-to-watch rows and the four-step list are shaped from `setup show`; and a
+// download progress snapshot becomes the design's "2.2 of 5.2 GB · 42%". Every number is the engine's;
+// nothing here opens a socket or invents data. The shared thresholds and preselect order are lets-triage
+// mail's (PR #26), so both apps recommend and preselect alike.
+
+/** True only when the library path is inside iCloud Drive's `Mobile Documents` mount, where macOS may keep
+ * files online-only (the overview's "only in iCloud" item). Checked on the home-relative path the engine
+ * reports, so a near-miss folder name (`Mobile Documentsx`) is not iCloud. */
+export function isICloudPath(path) {
+  return String(path).startsWith('~/Library/Mobile Documents/');
+}
+
+/** Recommended model by the Mac's memory — the SAME thresholds lets-triage mail uses, so both apps
+ * suggest the same size for the same machine (smoke and shots fix the machine at 16 GiB). */
+const GB = 1024 ** 3;
+export function recommendedModel(totalBytes) {
+  const mem = totalBytes / GB;
+  if (mem < 12) return { model: 'qwen3:4b', sizeGb: 2.5 };
+  if (mem < 32) return { model: 'qwen3:8b', sizeGb: 5.2 };
+  return { model: 'qwen3:14b', sizeGb: 9.3 };
+}
+
+/** The download bar's text for one progress snapshot. GB are the engine's own byte numbers (already
+ * one decimal, as `pullProgress` produces), and the percent is the engine's completed/total, never a guess. */
+export function formatProgress(done, total, pct) {
+  const r1 = (x) => Math.round(x * 10) / 10;
+  return `${r1(done)} of ${r1(total)} GB · ${pct}%`;
+}
+
+/** `setup show` → the folders-to-watch rows (step 2). Pre-fill is the recommendations until the user has
+ * actually written the list, after which it is exactly what they wrote. A row is "watched" only once the
+ * list was set — watching the folders is a follow-up task, so the step carries the muted note, not a claim. */
+export function watchRows(show) {
+  const set = show.watch_folders_set === true;
+  const list = set ? (show.watch_folders ?? []) : (show.recommended_watch_folders ?? []);
+  return list.map((path) => ({ path, watched: set }));
+}
+
+/** The four design steps in order. The middle one ("folders and owners") is the plan's skipped step:
+ * it is present for the aria list but marked skipped, and never a "current" step. `current` is the index
+ * the page marks `aria-current="step"`; steps before it are done, after are still to do. */
+export function setupSteps(current) {
+  const steps = [
+    { key: 'library', title: 'library' },
+    { key: 'watch', title: 'folders to watch' },
+    { key: 'filing', title: 'folders and owners' },
+    { key: 'model', title: 'model' },
+  ];
+  return steps.map((s, i) => {
+    const skipped = s.key === 'filing';
+    return { ...s, skipped, state: skipped ? 'skipped' : i < current ? 'done' : i === current ? 'current' : 'rest' };
+  });
+}
+
+/**
+ * `model detect --json` → the model step. The rules are the board's and the design's, and read the engine
+ * report without deciding anything the engine has not already decided:
+ *  - a complete shared block that is reachable AND was set by "triage mail" wins as `shared` (the other
+ *    app already chose the model; this app just follows it).
+ *  - else the first reachable runtime with a usable model is `found`. Preselect order: this app's own
+ *    `config.model` when usable, else the memory `recommendedModel` when usable, else the first usable id
+ *    (the engine already keeps embeddings out of `usable`).
+ *  - else a reachable runtime with no usable model is `found-empty`: the step offers a download of the
+ *    recommendation (the design's open proposal, kept — no auto-download).
+ *  - else nothing is reachable: `not-found` (the step re-checks itself every 3 s while it stays there).
+ * `overridden` is the one muted note that config.toml sets its own model; `recommend` is what a download
+ * would fetch on this machine.
+ */
+export function stepFromDetect(detect, memBytes) {
+  const rec = recommendedModel(memBytes);
+  const overridden = detect.config?.overridden === true;
+  const runtimes = detect.runtimes ?? [];
+  const reachable = runtimes.filter((r) => r.reachable);
+  const has = (id) => reachable.some((r) => (r.usable ?? []).includes(id));
+
+  const shared = detect.shared;
+  if (shared && shared.reachable && shared.set_by === 'triage mail') {
+    return { state: 'shared', model: shared.model, runtime: shared.runtime, url: shared.url, overridden, recommend: rec };
+  }
+  const withUsable = reachable.find((r) => (r.usable ?? []).length > 0);
+  if (withUsable) {
+    const cfgModel = detect.config?.model ?? '';
+    const chosen = has(cfgModel) ? cfgModel : has(rec.model) ? rec.model : withUsable.usable[0];
+    const source = reachable.find((r) => (r.usable ?? []).includes(chosen));
+    return { state: 'found', model: chosen, runtime: source.runtime, url: source.url, overridden, recommend: rec };
+  }
+  const empty = reachable.find((r) => (r.usable ?? []).length === 0);
+  if (empty) {
+    return { state: 'found-empty', model: null, runtime: empty.runtime, url: empty.url, overridden, recommend: rec };
+  }
+  return { state: 'not-found', model: null, runtime: null, url: null, overridden, recommend: rec };
+}
+
 
 

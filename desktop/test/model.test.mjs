@@ -359,3 +359,78 @@ test('callers join a pending dry-run; only a settled failure is retried', async 
   const moved = new m.DryRunMemo(() => Promise.resolve({ ok: true, report: { status: 'ok', items: [], counts: {} } }), () => 2);
   assert.equal(await moved.ensure(1), null);
 });
+
+// ---- first-run onboarding (LET-136) ----
+
+test('isICloudPath matches only the iCloud Drive mount, not a near-miss name', () => {
+  assert.equal(m.isICloudPath('~/Library/Mobile Documents/com~apple~CloudDocs/library'), true);
+  assert.equal(m.isICloudPath('~/Documents/library'), false);
+  assert.equal(m.isICloudPath('~/Library/Mobile Documentsx/library'), false);
+});
+
+test('recommendedModel sizes by the Mac\'s memory, the same thresholds triage mail uses', () => {
+  const gb = 1024 ** 3;
+  assert.deepEqual(m.recommendedModel(8 * gb), { model: 'qwen3:4b', sizeGb: 2.5 });
+  assert.deepEqual(m.recommendedModel(16 * gb), { model: 'qwen3:8b', sizeGb: 5.2 });
+  assert.deepEqual(m.recommendedModel(64 * gb), { model: 'qwen3:14b', sizeGb: 9.3 });
+});
+
+test('the download bar reads 2.2 of 5.2 GB · 42% from the engine\'s own numbers', () => {
+  assert.equal(m.formatProgress(2.2, 5.2, 42), '2.2 of 5.2 GB · 42%');
+});
+
+test('stepFromDetect: a reachable shared block the other app set wins as shared', () => {
+  const detect = { ok: true, runtimes: [], shared: { runtime: 'ollama', url: 'http://127.0.0.1:11434', model: 'qwen3:8b', set_by: 'triage mail', reachable: true }, config: { model: '', overridden: false } };
+  const step = m.stepFromDetect(detect, 16 * 1024 ** 3);
+  assert.deepEqual([step.state, step.model, step.runtime], ['shared', 'qwen3:8b', 'ollama']);
+});
+
+test('stepFromDetect: a shared block set by this app does not win; a found runtime does', () => {
+  const detect = { ok: true, runtimes: [{ runtime: 'ollama', url: 'u', reachable: true, usable: ['qwen3:8b', 'bge-m3'], models: [] }], shared: { runtime: 'ollama', url: 'u', model: 'qwen3:14b', set_by: 'rag docs', reachable: true }, config: { model: '', overridden: false } };
+  const step = m.stepFromDetect(detect, 16 * 1024 ** 3);
+  assert.deepEqual([step.state, step.model, step.runtime], ['found', 'qwen3:8b', 'ollama']);
+});
+
+test('stepFromDetect preselect order: config.model, then the recommendation, then the first usable', () => {
+  const gb = 1024 ** 3;
+  const base = { runtime: 'ollama', url: 'u', reachable: true, models: [], usable: ['qwen3:4b', 'qwen3:8b', 'qwen3:14b'] };
+  // config.model wins when it is usable, and carries the overridden note.
+  let step = m.stepFromDetect({ ok: true, runtimes: [base], shared: null, config: { model: 'qwen3:14b', overridden: true } }, 16 * gb);
+  assert.equal(step.model, 'qwen3:14b');
+  assert.equal(step.overridden, true);
+  // else the recommendation when it is usable.
+  step = m.stepFromDetect({ ok: true, runtimes: [{ ...base, usable: ['qwen3:8b', 'qwen3:4b'] }], shared: null, config: { model: 'not-there', overridden: false } }, 16 * gb);
+  assert.equal(step.model, 'qwen3:8b');
+  // else the first usable, when neither config.model nor the recommendation is present.
+  step = m.stepFromDetect({ ok: true, runtimes: [{ ...base, usable: ['mistral:7b'] }], shared: null, config: { model: '', overridden: false } }, 16 * gb);
+  assert.equal(step.model, 'mistral:7b');
+});
+
+test('stepFromDetect: reachable but nothing usable is found-empty that offers the recommendation', () => {
+  const detect = { ok: true, runtimes: [{ runtime: 'ollama', url: 'u', reachable: true, usable: [], models: ['bge-m3'] }], shared: null, config: { model: '', overridden: false } };
+  const step = m.stepFromDetect(detect, 16 * 1024 ** 3);
+  assert.equal(step.state, 'found-empty');
+  assert.equal(step.model, null);
+  assert.equal(step.recommend.model, 'qwen3:8b');
+});
+
+test('stepFromDetect: nothing reachable is not-found (the step re-checks itself)', () => {
+  const detect = { ok: true, runtimes: [{ runtime: 'ollama', url: 'u', reachable: false, usable: [], models: [] }], shared: null, config: { model: '', overridden: false } };
+  const step = m.stepFromDetect(detect, 16 * 1024 ** 3);
+  assert.equal(step.state, 'not-found');
+});
+
+test('watchRows pre-fills the recommendations and marks watched only once the list is set', () => {
+  const rec = { watch_folders_set: false, watch_folders: [], recommended_watch_folders: ['~/Downloads', '~/Desktop'] };
+  assert.deepEqual(m.watchRows(rec), [{ path: '~/Downloads', watched: false }, { path: '~/Desktop', watched: false }]);
+  const set = { watch_folders_set: true, watch_folders: ['~/Downloads'], recommended_watch_folders: ['~/Downloads', '~/Desktop'] };
+  assert.deepEqual(m.watchRows(set), [{ path: '~/Downloads', watched: true }]);
+});
+
+test('setupSteps marks the current step, earlier ones done, and always skips folders and owners', () => {
+  const steps = m.setupSteps(2);
+  assert.deepEqual(steps.map((s) => [s.key, s.state]), [['library', 'done'], ['watch', 'done'], ['filing', 'skipped'], ['model', 'rest']]);
+  const model = m.setupSteps(3).find((s) => s.key === 'model');
+  assert.deepEqual([model.state, model.skipped], ['current', false]);
+  assert.equal(m.setupSteps(0).find((s) => s.key === 'filing').state, 'skipped');
+});
